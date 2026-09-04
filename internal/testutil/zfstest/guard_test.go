@@ -13,10 +13,18 @@ func TestVerifyGuestGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := VerifyGuestGuard(marker, "run-123", "boomerangz-test-run-123-source", []Vdev{
-		{Path: "/dev/disk/by-id/virtio-test-a", Serial: "boomerangz-test-run-123-a"},
+		{Path: "/dev/disk/by-id/virtio-test-a", Serial: DiskSerial("run-123", SourceDisk)},
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDiskSerialFitsVirtioLimit(t *testing.T) {
+	t.Parallel()
+	serial := DiskSerial("run-1234567890-very-long", DestinationDisk)
+	if len(serial) > 20 {
+		t.Fatalf("serial length = %d, want at most 20: %q", len(serial), serial)
 	}
 }
 

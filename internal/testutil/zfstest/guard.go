@@ -2,6 +2,7 @@
 package zfstest
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,21 @@ import (
 )
 
 const objectPrefix = "boomerangz-test-"
+
+// DiskRole distinguishes the two disposable pool devices.
+type DiskRole string
+
+// Supported disposable disk roles.
+const (
+	SourceDisk      DiskRole = "src"
+	DestinationDisk DiskRole = "dst"
+)
+
+// DiskSerial returns a deterministic virtio-safe serial of at most 20 bytes.
+func DiskSerial(runID string, role DiskRole) string {
+	digest := sha256.Sum256([]byte(runID))
+	return fmt.Sprintf("bz-%x-%s", digest[:6], role)
+}
 
 // Vdev identifies a guest block device and the serial reported by the guest.
 type Vdev struct {
@@ -36,12 +52,16 @@ func VerifyGuestGuard(markerPath, runID, pool string, vdevs []Vdev) error {
 	if len(vdevs) == 0 {
 		return errors.New("at least one virtual test disk is required")
 	}
+	wantSerials := map[string]bool{
+		DiskSerial(runID, SourceDisk):      true,
+		DiskSerial(runID, DestinationDisk): true,
+	}
 	for _, vdev := range vdevs {
 		if !strings.HasPrefix(vdev.Path, "/dev/") {
 			return fmt.Errorf("vdev %q is not an absolute device path", vdev.Path)
 		}
-		if !strings.HasPrefix(vdev.Serial, wantPrefix) {
-			return fmt.Errorf("vdev %q serial %q does not start with %q", vdev.Path, vdev.Serial, wantPrefix)
+		if !wantSerials[vdev.Serial] {
+			return fmt.Errorf("vdev %q has unexpected serial %q", vdev.Path, vdev.Serial)
 		}
 	}
 	return nil

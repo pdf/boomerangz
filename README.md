@@ -21,6 +21,18 @@ go tool golangci-lint run
 Real `zfs` and `zpool` commands must only be run by the integration harness in
 a disposable virtual machine. Development-host tests use fake command runners.
 
-See [PLAN.md](PLAN.md) for the architecture and [docs/configuration.md](docs/configuration.md)
-for the phase-one configuration schema.
+The VM harness can check prerequisites, create isolated copy-on-write disks,
+and launch a transient guest:
 
+```sh
+go run ./cmd/boomerangz-vmtest preflight \
+  --base-image /absolute/path/cachyos-base.qcow2 \
+  --work-dir /absolute/path/vm-runs \
+  --ssh-port 22022
+```
+
+See [PLAN.md](PLAN.md) for the architecture and [docs/configuration.md](docs/configuration.md)
+for the phase-one configuration schema. VM setup and safety requirements are in
+[docs/integration-testing.md](docs/integration-testing.md); the first delegated
+OpenZFS result is recorded in
+[docs/integration-spike-cachyos-260809.md](docs/integration-spike-cachyos-260809.md).

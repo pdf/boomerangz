@@ -15,13 +15,74 @@ Before any destructive guest command, the in-guest harness must verify all of:
 
 1. `/run/boomerangz-vmtest/guest-marker` contains the current run UUID.
 2. The pool name starts with `boomerangz-test-` followed by that UUID.
-3. Every vdev resolves to a virtio disk whose serial starts with
-   `boomerangz-test-` followed by that UUID.
+3. Every vdev resolves to a virtio disk whose deterministic serial matches the
+   source or destination serial derived from that UUID. Serials use a short
+   hash because virtio exposes at most 20 bytes.
 
 A missing or mismatched check aborts without cleanup. The host harness uses
 `qemu:///session`, transient domains, read-only base images, copy-on-write
 overlays, QEMU user networking, and per-run sockets and logs. It must not call
 host `zfs` or `zpool`, modify host services, or create persistent libvirt state.
 
-The executable harness is intentionally the next phase-one increment: this
-document fixes its safety boundary before destructive code is introduced.
+## Host prerequisites
+
+The current Arch-family package set is:
+
+```text
+qemu-desktop qemu-img libvirt virt-install passt edk2-ovmf openssh
+```
+
+The user must have read/write access to `/dev/kvm`, and `qemu:///session` must be
+available. `swtpm` is not required because this matrix does not use a virtual TPM.
+
+Run the non-destructive prerequisite check with an installed qcow2 base image,
+an existing artifact directory, and an unused loopback port:
+
+```sh
+go run ./cmd/boomerangz-vmtest preflight \
+  --base-image /storage/vm/base/cachyos.qcow2 \
+  --work-dir /storage/vm/boomerangz-runs \
+  --ssh-port 22022
+```
+
+`prepare` performs the same checks, creates a uniquely named qcow2 system
+overlay, and creates separate source and destination scratch disks. The base
+image cannot reside under the artifact directory, preventing later run cleanup
+from making it a possible target.
+
+```sh
+go run ./cmd/boomerangz-vmtest prepare \
+  --base-image /storage/vm/base/cachyos.qcow2 \
+  --work-dir /storage/vm/boomerangz-runs \
+  --ssh-port 22022
+```
+
+`launch` additionally starts a transient domain with `passt` forwarding the
+chosen loopback port to guest SSH. Its VNC listener is restricted to loopback,
+and a QEMU guest-agent channel is available for base-image maintenance. It does
+not yet enter the guest or run ZFS commands automatically.
+
+The root-owned `guest-bootstrap.sh` asset implements the only passwordless
+guest elevation. It independently checks the run marker, exact pool prefix,
+whole-disk identity, virtio serials, and pool vdev parents before creating or
+destroying pools. `guest-matrix.sh` repeats the marker, name, vdev, and serial
+checks before exercising delegated ZFS operations. The sudo policy permits the
+`boomerangz` account to invoke only the guarded bootstrap asset.
+
+## Base-image contract
+
+The reusable base image remains read-only and must contain:
+
+- an installed CachyOS system using a kernel with matching ZFS modules;
+- `zfs-utils`, OpenSSH, and a non-root test account reachable by key;
+- passwordless elevation limited to the guest bootstrap operations needed to
+  create the disposable test pools and delegated account;
+- no existing pools backed by the two harness scratch-disk serial prefixes;
+- a stable boot configuration compatible with virtio disks, a serial console,
+  and the loopback-only diagnostic display.
+
+The current harness deliberately stops before automating base-image installation
+and SSH orchestration. The initial CachyOS base and delegated-operation spike
+have been built and verified manually; the exact result is recorded in
+`integration-spike-cachyos-260809.md`. No host ZFS command is introduced by the
+bootstrap or matrix paths.
