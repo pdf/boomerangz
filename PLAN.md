@@ -1,0 +1,822 @@
+# boomerangz implementation plan
+
+## 1. Purpose
+
+`boomerangz` is a property-driven ZFS snapshot and send/receive manager designed
+for intermittently connected systems as well as continuously connected hosts.
+Its primary use cases include laptops and other roadwarrior systems whose
+replication targets may be unavailable for long periods.
+
+The design has four guiding principles:
+
+1. Dataset policy belongs in ZFS user properties attached to the datasets being
+   managed.
+2. TOML configuration contains only remote definitions and genuinely global
+   daemon configuration.
+3. Interrupted and delayed transfers recover through ZFS holds, bookmarks, and
+   receive resume tokens rather than requiring a continuously available target.
+4. Foreign snapshots are not pruned or otherwise modified by default.
+
+The program will be written for Go 1.26.x. The module path will be
+`github.com/pdf/boomerangz` and the CLI will use
+`github.com/alecthomas/kingpin/v2`.
+
+## 2. Initial platform scope
+
+The architecture should avoid unnecessary operating-system assumptions and aim
+to support OpenZFS wherever Go and the required ZFS operations are available.
+Initial packaging and integration support will be Linux-only, with Arch Linux
+first.
+
+An operating system is not considered supported until its real ZFS integration
+suite passes. CachyOS is the preferred initial integration guest because it
+ships `zfs-utils` and matching precompiled ZFS modules for its kernels, while
+the first package remains an Arch-family package. Container deployment is out
+of scope for the initial releases.
+
+Local integration and destructive testing must never modify the development
+host operating system. It runs natively inside disposable libvirt/QEMU/KVM
+guests. Containers are not part of the initial test architecture; container
+deployment and container-specific testing are deferred together.
+
+The initial Arch package should provide:
+
+- the `boomerangz` executable;
+- a systemd service;
+- systemd sysusers and tmpfiles definitions where appropriate;
+- a protected default configuration file;
+- configuration, credentials, identity, and runtime directories;
+- shell completions and man pages.
+
+### 2.1 Privilege and delegation model
+
+The recommended deployment runs the main `boomerangz` daemon as a dedicated,
+unprivileged system user. Administrators delegate only the required operations
+on explicitly selected source and destination roots with `zfs allow`. SSH
+destinations likewise use a non-root account with permissions delegated on the
+destination root. Running the network-facing daemon as root, or granting it
+`CAP_SYS_ADMIN`, is not a supported default.
+
+Receives use `zfs receive -u` so backup datasets are not mounted as a side
+effect. The daemon does not otherwise mount, unmount, share, or change the
+mount namespace during normal operation.
+
+Linux nevertheless needs explicit validation. OpenZFS documents `create`,
+`destroy`, `snapshot`, `receive`, and `receive:append` as depending on the
+`mount` permission, while Linux cannot delegate `mount`. Avoiding the actual
+mount operation with `receive -u` does not establish that these authorization
+checks can be satisfied by delegation alone.
+
+Implementation therefore starts with a direct, delegated ZFS executor and no
+privileged helper. An early integration matrix on supported Arch/OpenZFS
+versions must exercise at least:
+
+- snapshot creation and pruning;
+- bookmark creation and destruction;
+- hold and release;
+- full, incremental, recursive, and resumable sends;
+- full, incremental, recursive, and resumable receives using `-u`;
+- receive-side property overrides and exclusions.
+
+If those tests demonstrate that Linux requires elevation, add a separate
+Linux-only helper behind the same executor interface. The helper must expose
+typed, narrowly scoped operations over a private local channel; authenticate
+the daemon peer; independently validate operation and dataset scope; accept no
+arbitrary command, shell fragment, or ZFS flags; and have no network listener.
+Its systemd unit should restrict its capability bounding set and sandbox it as
+far as the required OpenZFS operations permit. `CAP_SYS_ADMIN` is the candidate
+capability, but its sufficiency and effective authority must be verified before
+packaging because it is broad and may bypass delegated ZFS checks.
+
+Platforms that can delegate all required operations use the direct executor
+without the Linux helper. Root execution remains a diagnostic or development
+fallback, not the recommended deployment model.
+
+## 3. Property contract
+
+All public and internal properties use the `org.boomerangz` namespace. User
+properties are inherited according to normal ZFS semantics unless noted below.
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `org.boomerangz:enabled=on\|off` | `off` | Enable management of a dataset. |
+| `org.boomerangz:remote=name,...` | unset | Send to named remotes defined in TOML. |
+| `org.boomerangz:local=dataset,...` | unset | Send to named local destination roots. |
+| `org.boomerangz:policy=<grid>` | `12x5m,24x1h,14x1d` | Define snapshot cadence and retention. |
+| `org.boomerangz:large_blocks=on\|off` | `on` | Request `zfs send -L`. |
+| `org.boomerangz:compressed=on\|off` | `on` | Request `zfs send -c`. |
+| `org.boomerangz:raw=on\|off` | encryption-dependent | Request `zfs send -w`. |
+| `org.boomerangz:props=on\|off` | `off` | Request `zfs send -p`. |
+| `org.boomerangz:incremental=all\|latest` | `all` | Choose `-I` or `-i` when a base exists. |
+| `org.boomerangz:replicate=on\|off` | `off` | Request recursive replication with `zfs send -R`. |
+| `org.boomerangz:set_prop:<name>=<value>` | unset | Apply receive-side `-o name=value`. |
+| `org.boomerangz:ignore_prop:<name>=on\|off` | unset | Apply receive-side `-x name` when enabled. |
+| `org.boomerangz:discard_first=on\|off` | `off` | Apply receive-side `-d`. |
+| `org.boomerangz:discard_all=on\|off` | `off` | Apply receive-side `-e`. |
+
+Comma-separated lists are trimmed, deduplicated, and rejected if they contain
+empty entries. Unknown remote names invalidate only the affected dataset policy;
+they do not prevent the daemon from managing unrelated datasets.
+
+### 3.1 Property source and activation
+
+Configuration discovery reads only locally set and received
+`org.boomerangz:*` properties. `boomerangz` resolves inheritance itself.
+
+A dataset becomes active only when `enabled=on` originates from a locally set
+property, either on the dataset or an ancestor. A received `enabled=on` never
+activates a destination by itself. This prevents a received backup from
+automatically becoming another replication source.
+
+After a dataset is locally activated, its received policy properties may take
+effect. Local definitions take precedence over received definitions, matching
+ZFS property precedence.
+
+### 3.2 Conflict handling
+
+If `set_prop` and `ignore_prop` address the same receive property, reconciliation
+emits a warning and `set_prop` wins. Only the corresponding `-o` argument is
+generated.
+
+`discard_first=on` and `discard_all=on` are mutually exclusive. Enabling both is
+an invalid policy.
+
+Raw mode exposes both requested and effective send flags. In particular:
+
+- raw sends of unencrypted datasets imply OpenZFS behaviours equivalent to
+  large blocks, embedded data, and compressed data;
+- encrypted recursive replication requires raw mode;
+- receive-side encryption overrides incompatible with raw streams invalidate
+  the job;
+- conflicts caused by raw mode produce visible warnings and are never hidden.
+
+### 3.3 Dynamic receive-property keys
+
+`set_prop:<name>` and `ignore_prop:<name>` remain dynamic user-property keys.
+A fixed key containing a delimited map would require escaping arbitrary ZFS
+property values, could grow unnecessarily large, and would make the complete
+map one inherited value. Dynamic keys allow each receive property to be
+inherited, overridden, or disabled independently.
+
+The explicit `set_prop` and `ignore_prop` components are retained instead of
+shorter names such as `set` or `ignore`; the longer forms make their receive-
+property purpose clear in `zfs get` output and administrative tooling.
+
+### 3.4 Incremental modes
+
+`incremental=all` uses `zfs send -I`, transferring every intermediary snapshot
+between the selected base and target. `incremental=latest` uses `zfs send -i`,
+transferring directly from the base to the target snapshot.
+
+Both are incremental modes. When no valid common base exists, the first transfer
+is necessarily a full send. Receive-token recovery uses `zfs send -t` and is
+independent of this property.
+
+Because `-I` includes every intermediary snapshot, it may also transmit foreign
+snapshots between two `boomerangz` snapshots. Inspection and job planning must
+warn when this will occur.
+
+Repeated forced full sends are not a policy mode. Reseeding an existing target
+will be an explicit administrative workflow with destination preflight and no
+implicit destruction.
+
+### 3.5 Recursive replication
+
+`replicate=on` makes the enabled dataset a replication root:
+
+- snapshots are taken recursively;
+- the stream uses `zfs send -R`;
+- covered descendants do not also receive duplicate independently scheduled
+  jobs;
+- descendant filesystems, clones, properties, and snapshots may be included,
+  including foreign snapshots;
+- differing descendant policy or target properties produce warnings because
+  the replication-root policy governs the stream.
+
+OpenZFS replication-package receive semantics can remove destination snapshots
+that are absent from the sender. Therefore `replicate=on` is an explicit opt-in
+to native replication semantics and is an exception to default foreign-snapshot
+coexistence. Its exact behaviour must be tested across every supported OpenZFS
+version before this property is released as stable. `boomerangz` will not add
+receive-side `-F` automatically.
+
+## 4. Grid policy
+
+The policy syntax follows the central idea of zrepl's grid policy:
+
+```text
+policy   = bucket ("," bucket)*
+bucket   = count "x" duration
+count    = positive integer
+duration = positive duration using m, h, d, or w
+```
+
+For example:
+
+```text
+12x5m,24x1h,14x1d
+```
+
+The smallest duration determines snapshot cadence, so the default creates a
+snapshot every five minutes. The grid then retains approximately twelve
+five-minute snapshots, twenty-four hourly representatives, and fourteen daily
+representatives.
+
+Policy rules are:
+
+1. Bucket durations must be strictly increasing.
+2. Buckets are adjacent, left-inclusive, and right-exclusive.
+3. The grid is positioned relative to the youngest owned snapshot.
+4. Each bucket retains its oldest contained snapshot.
+5. Owned snapshots older than the complete grid are eligible for pruning.
+6. Foreign snapshots never participate in the grid.
+7. Held snapshots and snapshots needed by a receive resume token are exempt.
+8. Missed schedules are not backfilled after downtime.
+9. At startup, a snapshot is due only when the newest owned snapshot is older
+   than the inferred cadence.
+10. A policy change takes effect on the next successful reconciliation.
+
+The source and each receive destination apply the grid independently. Remote
+pruning waits until the remote is reachable.
+
+## 5. Snapshot ownership and ZFS-native state
+
+Replication correctness must be reconstructable from ZFS. The initial design
+does not require a dedicated state dataset or an embedded replication-state
+database.
+
+### 5.1 Lineage
+
+On first management, `boomerangz` generates a cryptographically random lineage
+UUID and sets it locally on the source dataset or replication root:
+
+```text
+org.boomerangz:state:lineage=<uuid>
+```
+
+Created snapshots carry internal metadata such as:
+
+```text
+org.boomerangz:state:lineage=<uuid>
+org.boomerangz:state:snapshot=<uuid>
+org.boomerangz:state:created=<RFC3339Nano>
+```
+
+Snapshot names use an identifiable prefix plus a UTC timestamp and collision
+suffix, for example:
+
+```text
+pool/data@boomerangz-20260904T143052.123456789Z-a1b2c3d4
+```
+
+Deletion requires all of the following:
+
+- a `boomerangz` snapshot name;
+- valid internal metadata;
+- a lineage matching the managed dataset;
+- eligibility under the grid;
+- no hold or other ZFS dependency preventing deletion.
+
+Names alone are never proof of ownership.
+
+### 5.2 Recoverability
+
+The lineage lives with the dataset and its snapshots, so reinstalling
+`boomerangz` does not require restoring an installation UUID. A later
+`boomerangz dataset adopt` command can recover a missing dataset-level lineage
+from owned snapshots. It must refuse automatic adoption if multiple candidate
+lineages are present.
+
+### 5.3 Replication cursors and interrupted transfers
+
+For every source-target pair:
+
+- a target-specific bookmark records the most recently verified replication
+  point;
+- a target-specific hold protects the exact source snapshot required by an
+  active or resumable transfer;
+- the destination's `receive_resume_token` records interrupted receive state;
+- bookmark and hold names include a deterministic target identifier;
+- successful receive is confirmed by snapshot GUID before advancing the
+  bookmark or releasing the hold.
+
+When a target is unavailable, pending work is coalesced to the newest eligible
+snapshot instead of holding every scheduled snapshot. If a receive resume token
+exists, the exact source snapshot required by that token remains held until
+resume succeeds or the receive is explicitly abandoned.
+
+On reconnection:
+
+1. Probe the destination and query its resume token.
+2. Resume with `zfs send -t` when possible.
+3. Verify the completed snapshot GUID.
+4. Advance the target bookmark.
+5. Release obsolete `boomerangz` holds and bookmarks.
+6. Send the newest coalesced pending snapshot if another update is due.
+
+Transient progress and process IDs remain in memory. Errors are retained in
+structured logs. After restart, the daemon reconstructs pending work from
+properties, snapshots, bookmarks, holds, and destination resume tokens.
+
+## 6. Efficient dataset discovery
+
+Discovery avoids per-dataset subprocesses and excludes snapshots from the
+normal configuration walk.
+
+### 6.1 Global sparse inventory
+
+At startup and each periodic reconciliation, run:
+
+```sh
+zfs list -H -p -t filesystem,volume -o name,type,encryptionroot
+```
+
+Then retrieve only explicitly stored activation properties:
+
+```sh
+zfs get -H -p \
+  -s local,received \
+  -t filesystem,volume \
+  -o name,property,value,source \
+  org.boomerangz:enabled
+```
+
+Construct an inspection set containing:
+
+- active datasets;
+- their ancestors, needed for inheritance;
+- descendants covered by active replication roots;
+- datasets involved in pending or resumable work.
+
+### 6.2 Property retrieval
+
+For the inspection set, retrieve explicitly stored properties in bounded
+argument batches:
+
+```sh
+zfs get -H -p \
+  -s local,received \
+  -t filesystem,volume \
+  -o name,property,value,source \
+  all \
+  <dataset...>
+```
+
+Rows are immediately filtered to `org.boomerangz:*`. Requesting `all` is
+necessary to discover dynamic `set_prop:*` and `ignore_prop:*` names because
+OpenZFS provides no documented property-prefix query.
+
+The in-memory resolver walks parents before children:
+
+1. Start with application defaults.
+2. Copy the parent's effective property map.
+3. Apply received properties defined on the dataset.
+4. Apply local properties defined on the dataset.
+5. Parse and validate the effective policy.
+
+The daemon never requests inherited `boomerangz` rows from ZFS.
+
+Source filtering does not apply universally. Native and read-only operational
+properties such as GUID, creation time, encryption state, and
+`receive_resume_token` are requested as effective values without the
+`local,received` filter or obtained through `zfs list`.
+
+### 6.3 Reconciliation cache
+
+Each complete discovery pass creates an immutable generation containing the
+dataset tree and effective policies. It is published atomically. A failed or
+partial scan never replaces the last complete generation.
+
+The daemon compares generations and enqueues management work only for changed,
+newly due, or newly recoverable datasets. Global discovery runs through a
+single coordinator, never concurrently, at a default interval of 60 seconds.
+Explicit reconciliation requests are coalesced. Changes made by `boomerangz`
+update or invalidate the affected cache entry immediately.
+
+Prefer JSON output when capability detection confirms `zfs get -j`; otherwise
+parse `-H -p` tabular output. Both parsers are streaming, bounded, and
+fuzz-tested. ZFS events may later provide reconciliation hints, but periodic
+discovery remains the portable source of truth.
+
+Snapshot, bookmark, and hold inventories are targeted and requested only for a
+dataset that is due, being pruned, preparing a transfer, or recovering work.
+Remote discovery is limited to deterministic destination paths.
+
+## 7. Daemon execution model
+
+The default deployment runs `boomerangz daemon` as the dedicated unprivileged
+service user, in the foreground under systemd. It handles scheduling internally
+and shuts down gracefully on `SIGTERM`. All ZFS execution goes through an
+interface that supports direct delegated execution and, if Linux integration
+testing proves it necessary, a privileged-helper backend.
+
+There are two independent bounded worker pools.
+
+### 7.1 Management workers
+
+Management workers perform:
+
+- effective-policy reconciliation;
+- snapshot creation;
+- bookmark and hold maintenance;
+- source and destination pruning;
+- target probing;
+- post-transfer verification.
+
+They use per-dataset keyed locks and a bounded, deduplicating task queue. Global
+discovery itself remains owned by the single discovery coordinator.
+
+### 7.2 Transfer workers
+
+Transfer workers perform:
+
+- send-size estimation;
+- sender and receiver process startup;
+- byte-counting stream transfer;
+- cancellation and cleanup;
+- resume streams.
+
+They use a separately configurable bound, per-destination serialization, and
+fair scheduling across source datasets. The default count must be at least two
+so multiple targets can transfer concurrently.
+
+Jobs waiting for capacity remain visible, with distinct states for management
+and transfer pressure:
+
+```text
+scheduled
+pending-management
+snapshotting
+pending-transfer
+probing
+estimating
+sending
+verifying
+succeeded
+waiting-retry
+resumable
+blocked
+failed
+```
+
+Status includes the reason for pending state and, when stable enough to report,
+queue position.
+
+## 8. Transfer pipeline and progress
+
+Commands are constructed as argument vectors with `os/exec`; streams never pass
+through a shell.
+
+The local and SSH pipelines are conceptually:
+
+```text
+zfs send -> bounded Go copy/count loop -> zfs receive
+zfs send -> bounded Go copy/count loop -> ssh host zfs receive
+```
+
+Eligible destinations for a snapshot fan out concurrently through the transfer
+pool. One unavailable target does not delay another target.
+
+Before transfer, `zfs send -nP` is used where supported to estimate stream size.
+The copy loop records bytes transferred, rate, and ETA. Unknown or unavailable
+estimates are represented explicitly rather than guessed.
+
+SSH is the default v1 replication transport. It uses batch mode, strict host-key
+verification, argument-safe remote commands, and configurable connection
+settings. Password handling and arbitrary shell snippets are not supported.
+
+The transport boundary should allow a future native gRPC streaming transport
+without changing snapshot planning or recovery logic.
+
+## 9. Control API and authentication
+
+The local control API uses versioned gRPC services over a Unix-domain socket.
+The same API may optionally listen on TCP for remote status and control.
+
+Initial services include:
+
+```text
+StatusService.GetStatus
+StatusService.WatchStatus
+StatusService.ListDatasets
+ControlService.Trigger
+ControlService.Reconcile
+```
+
+A future native transport may add probe, receive, resume-token, verification,
+and prune RPCs.
+
+### 9.1 Listener security
+
+The Unix socket relies on filesystem permissions and local peer credentials.
+TCP is disabled by default and never supports an unauthenticated mode. Available
+TCP authentication modes are:
+
+- `token`: pinned server identity plus a scoped token;
+- `mtls`: server and client certificate authentication;
+- `mtls+token`: both mechanisms when desired.
+
+### 9.2 Token pairing
+
+`token` mode provides a homelab-friendly, one-bundle setup without requiring the
+user to operate a PKI.
+
+The server generates and manages its TLS identity. Creating a token emits a
+one-time pairing bundle containing:
+
+- endpoint;
+- server public-key pin;
+- token identifier;
+- at least 256 bits of random token secret;
+- authorised scopes.
+
+The client imports the bundle before connecting. It verifies the pinned server
+public key during TLS setup before sending the token as gRPC call credentials.
+Pinning the public key rather than the complete certificate allows certificate
+renewal while retaining the same identity key.
+
+Issue one token per client by default so clients can have separate scopes and be
+revoked independently. A shared token remains possible. Suggested scopes are
+`status`, `trigger`, `replicate`, `prune`, and `admin`.
+
+The server stores only token identifiers, verifiers, scopes, and optional expiry
+metadata. Tokens are never placed in URLs or logs. Multiple valid tokens permit
+rotation. Loss or rotation of the server identity key requires affected clients
+to pair again.
+
+## 10. Configuration and filesystem layout
+
+The primary configuration paths are:
+
+```text
+/etc/boomerangz/config.toml
+/etc/boomerangz/config.d/*.toml
+```
+
+`config.toml` is loaded first. Drop-ins are loaded in bytewise lexical filename
+order. Tables merge recursively and later scalar values override earlier
+values. Actual TOML arrays replace earlier arrays.
+
+Extensible collections use keyed tables rather than arrays, allowing individual
+drop-ins to add entries naturally:
+
+```toml
+[remotes.home]
+transport = "ssh"
+host = "home.example.net"
+root = "tank/backups"
+```
+
+Later files may override individual fields of a keyed entry. Examples of keyed
+collections include `[remotes.<name>]` and `[listeners.<name>]`.
+
+Other default paths are:
+
+```text
+/etc/boomerangz/credentials.d/
+/var/lib/boomerangz/identity/
+/run/boomerangz/boomerangz.sock
+```
+
+The package creates these directories with restrictive ownership and modes.
+The daemon generates key material atomically on first use; packages never ship
+or overwrite private keys. Paths are user-configurable. Imported remote token
+bundles live in `credentials.d`; server identity and token verifiers live under
+the identity directory.
+
+The Arch package treats `config.toml` as a protected configuration file so
+upgrades produce normal `.pacnew` handling instead of overwriting local changes.
+
+`boomerangz config check` validates every source and the merged result.
+`boomerangz config show` displays effective configuration with secrets redacted
+and source-file provenance for each value.
+
+The complete TOML schema will be reviewed separately before implementation.
+
+## 11. CLI and output
+
+The initial CLI shape is:
+
+```text
+boomerangz daemon
+boomerangz status [-w|--watch] [-i|--interval 2s]
+boomerangz dataset list
+boomerangz dataset inspect <dataset>
+boomerangz dataset adopt <dataset>
+boomerangz config check
+boomerangz config show
+boomerangz trigger [<dataset>...]
+boomerangz auth token create
+boomerangz auth token import
+boomerangz auth token list
+boomerangz auth token revoke
+boomerangz target reseed <dataset> <target>
+boomerangz version
+```
+
+Logging uses `log/slog`, defaults to `info`, and goes to stderr:
+
+- interactive stderr uses `slog.TextHandler`;
+- non-interactive stderr uses `slog.JSONHandler`.
+
+Status output goes to stdout:
+
+- an interactive one-shot status uses a human-readable table;
+- interactive watch mode redraws a stable terminal display with progress bars;
+- non-interactive one-shot status emits one JSON object;
+- non-interactive watch mode emits newline-delimited JSON at `--interval`,
+  defaulting to two seconds.
+
+Watch mode handles terminal resize and degrades cleanly when the terminal is too
+narrow for progress bars.
+
+## 12. Repository layout
+
+No Makefile or mandatory task runner is planned. CI and documentation use normal
+`go` and `go tool` commands directly.
+
+```text
+api/
+    boomerangz/v1/
+cmd/
+    boomerangz/
+internal/
+    cli/
+    config/
+    control/
+    daemon/
+    logging/
+    model/
+    policy/
+    properties/
+    replication/
+        ssh/
+        native/
+    scheduler/
+    snapshot/
+    statusui/
+    testutil/
+        commandtest/
+        zfstest/
+    zfs/
+.github/
+    workflows/
+.golangci.yml
+go.mod
+README.md
+```
+
+Packages should be introduced as functionality requires them rather than
+pre-created empty. Interfaces belong at consumer boundaries, especially around
+the ZFS command runner, clocks, remote transports, and filesystem/process
+integration.
+
+Integration tests remain colocated with relevant packages under an `integration`
+build tag. Shared disposable-pool helpers live in
+`internal/testutil/zfstest`; no separate top-level integration tree is needed.
+
+## 13. Toolchain, CI, and quality
+
+The module declares Go 1.26 language semantics and pins the supported Go 1.26
+patch toolchain. Development tools are declared with `tool` directives in
+`go.mod` and invoked through `go tool`, including golangci-lint and any gRPC
+code-generation tools.
+
+The golangci-lint configuration uses schema version 2, begins with a sensible
+standard set, and adds focused correctness checks rather than every available
+stylistic linter.
+
+GitHub Actions should run at least:
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+go tool golangci-lint run
+```
+
+Generated gRPC API files are committed. CI regenerates them and fails if the
+working tree changes.
+
+### 13.1 Test strategy
+
+Unit tests cover policy resolution, command construction, scheduling, pruning,
+state transitions, destination mapping, authentication scopes, and
+configuration merging.
+
+Fuzz tests cover:
+
+- grid-policy parsing and arithmetic;
+- ZFS JSON and tabular output parsing;
+- property names and values;
+- comma-separated target lists;
+- snapshot, bookmark, and hold naming;
+- source-to-destination mapping;
+- status protocol decoding;
+- malformed command output and resume tokens.
+
+Command execution tests use helper processes rather than shell scripts wherever
+practical.
+
+All tests that execute real `zfs` or `zpool` commands run inside disposable
+libvirt/QEMU/KVM guests. The host-side harness may perform read-only prerequisite
+checks and create ordinary user-owned VM images, overlays, sockets, logs, and
+test artifacts. It must not:
+
+- execute host `zfs` or `zpool` commands;
+- load or unload host kernel modules;
+- install or remove host packages;
+- alter host services, users, groups, capabilities, mounts, or firewall rules;
+- create persistent system or session libvirt domains, networks, storage pools,
+  or secrets;
+- pass the host's `/dev/zfs`, ZFS block devices, or existing pools into a
+  guest.
+
+Prefer transient domains on `qemu:///session`, copy-on-write overlays backed by
+a read-only CachyOS base image, QEMU user-mode networking, and dedicated virtual
+scratch disks. Every run receives unique names and identifiers. Guest shutdown
+deletes the overlays and scratch disks while leaving the reusable base image
+unchanged.
+
+The in-guest harness creates disposable pools only on virtual disks carrying
+expected test serial numbers. Before any destructive command it verifies a
+harness-injected guest marker, the exact pool-name prefix, and every vdev path.
+A missing or mismatched guard aborts the test rather than attempting cleanup.
+
+Tests run directly in the guests. A single guest covers local replication,
+delegation, pruning, recovery, systemd, packaging, mount-namespace, and
+capability behaviour. Two independent guests cover SSH and future native
+transport, source and destination isolation, target outages, and reconnection.
+Different read-only base images provide the kernel and OpenZFS version matrix.
+The harness uses ephemeral user-space networking that requires no persistent or
+privileged host network configuration.
+
+Container tests may be added later when container deployment or OpenZFS
+container-specific features become supported. They are not used merely to
+simulate multiple nodes because containers would share the guest kernel module
+and add a namespace layer without improving the relevant coverage.
+
+Fault-injection coverage terminates the sender, receiver, SSH process, and daemon
+at controlled points. It verifies resume-token recovery, hold preservation,
+bookmark advancement, restart reconciliation, and source/destination pruning.
+
+## 14. Delivery phases
+
+1. **Specification and scaffold**: finalize the TOML schema, minimum OpenZFS
+   capabilities, module, CI, lint, package boundaries, and ZFS executor
+   interface. Build the isolated VM harness and run the delegated-operation
+   integration spike in a CachyOS guest before committing to a helper protocol.
+2. **Discovery and policy**: implement sparse dataset discovery, inheritance,
+   grid parsing, effective-policy inspection, and immutable generations.
+3. **Snapshot lifecycle**: implement lineage, naming, recursive and non-recursive
+   snapshots, grid pruning, holds, bookmarks, and adoption.
+4. **Local transfer**: implement full bootstrap, `-i`, `-I`, progress,
+   receive-property handling, and GUID verification.
+5. **SSH and roadwarrior recovery**: implement remote probing, retry with jitter,
+   resume tokens, pending coalescing, and offline reconciliation.
+6. **Daemon and workers**: implement internal scheduling, independent bounded
+   worker pools, fairness, graceful shutdown, and systemd integration.
+7. **Control plane and UI**: implement gRPC over Unix sockets, status/watch,
+   terminal progress, token pairing, and optional secured TCP listeners.
+8. **Hardening and packaging**: run destructive integration and fault tests,
+   document delegated permissions, implement and harden the Linux helper if
+   the integration matrix requires it, and produce the initial Arch package.
+9. **Native transport**: prototype and benchmark gRPC stream replication after
+   SSH-based replication is stable.
+
+## 15. Pre-implementation decisions and validation
+
+The following remain deliberate checkpoints rather than implicit assumptions:
+
+- choose and test the minimum supported OpenZFS version and capability matrix;
+- validate `-R` receive and foreign-snapshot behaviour on each supported
+  OpenZFS release before stabilizing `replicate=on`;
+- finalize destination-path mapping for local, SSH, and native transports;
+- finalize the TOML schema and worker-count defaults;
+- decide whether remote status/control ships in the first release or follows
+  local gRPC control;
+- define safe, explicit reseed and interrupted-receive abandonment workflows;
+- benchmark Go-mediated stream copying against direct OS pipes and SSH;
+- determine the exact delegated permission sets for source and destination
+  roots, including permissions needed by configured native `set_prop` values;
+- verify whether delegated execution with `zfs receive -u` satisfies Linux's
+  transitive `mount` permission checks on every supported OpenZFS release;
+- if a Linux helper is required, threat-model and test its dataset validation,
+  peer authentication, capability handling, and systemd sandbox before making
+  it part of the recommended deployment.
+
+## 16. References
+
+- [OpenZFS send and receive](https://openzfs.github.io/openzfs-docs/Basic%20Concepts/Operations/Send%20and%20Receive.html)
+- [OpenZFS `zfs send`](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-send.8.html)
+- [OpenZFS `zfs receive`](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-receive.8.html)
+- [OpenZFS bookmarks](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-bookmark.8.html)
+- [OpenZFS holds](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-hold.8.html)
+- [OpenZFS user properties](https://openzfs.github.io/openzfs-docs/man/master/7/zfsprops.7.html)
+- [OpenZFS delegated administration](https://openzfs.github.io/openzfs-docs/Basic%20Concepts/Operations/Delegated%20Administration.html)
+- [OpenZFS `zfs allow`](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-allow.8.html)
+- [Linux capabilities](https://man7.org/linux/man-pages/man7/capabilities.7.html)
+- [zrepl grid policy](https://zrepl.github.io/configuration/prune.html#policy-grid)
+- [Kingpin](https://github.com/alecthomas/kingpin)
+- [gRPC authentication](https://grpc.io/docs/guides/auth/)
+- [Go module tool directives](https://go.dev/ref/mod#go-mod-file-tool)
