@@ -7,8 +7,13 @@ import (
 )
 
 func validateDataset(name string) error {
-	if name == "" || strings.HasPrefix(name, "/") || strings.ContainsAny(name, "@#") {
+	if name == "" || strings.HasPrefix(name, "/") || strings.HasPrefix(name, "-") || strings.ContainsAny(name, "@#") {
 		return fmt.Errorf("invalid ZFS dataset name %q", name)
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("invalid ZFS dataset name %q", name)
+		}
 	}
 	for _, r := range name {
 		if unicode.IsSpace(r) || unicode.IsControl(r) {
@@ -17,6 +22,9 @@ func validateDataset(name string) error {
 	}
 	return nil
 }
+
+// ValidateDataset rejects malformed names and command-option injection.
+func ValidateDataset(name string) error { return validateDataset(name) }
 
 func validateComponent(kind, name string) error {
 	if name == "" || strings.ContainsAny(name, "/@#") {

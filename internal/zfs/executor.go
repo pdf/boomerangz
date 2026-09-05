@@ -41,6 +41,7 @@ type Property struct {
 // commands or flags from its client.
 type Executor interface {
 	ListDatasets(context.Context) ([]Dataset, error)
+	GetActivationProperties(context.Context) ([]Property, error)
 	GetStoredProperties(context.Context, []string) ([]Property, error)
 	Snapshot(context.Context, string, string, bool, map[string]string) error
 	DestroySnapshot(context.Context, string) error

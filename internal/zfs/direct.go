@@ -1,6 +1,8 @@
 package zfs
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,11 +20,25 @@ type commandRunner interface {
 type execRunner struct{ path string }
 
 func (r execRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
-	output, err := exec.CommandContext(ctx, r.path, args...).CombinedOutput()
+	command := exec.CommandContext(ctx, r.path, args...)
+	output := &boundedOutput{}
+	command.Stdout, command.Stderr = output, output
+	err := command.Run()
 	if err != nil {
-		return nil, fmt.Errorf("zfs %s: %w: %s", args[0], err, strings.TrimSpace(string(output)))
+		return nil, fmt.Errorf("zfs %s: %w: %s", args[0], err, strings.TrimSpace(output.buffer.String()))
 	}
-	return output, nil
+	return output.buffer.Bytes(), nil
+}
+
+// Bound each sparse or batched query; exceeding the bound fails the scan instead
+// of publishing truncated data or allowing unbounded subprocess output.
+type boundedOutput struct{ buffer bytes.Buffer }
+
+func (b *boundedOutput) Write(data []byte) (int, error) {
+	if len(data) > 32*1024*1024-b.buffer.Len() {
+		return 0, errors.New("zfs output exceeds 32 MiB limit")
+	}
+	return b.buffer.Write(data)
 }
 
 // Direct executes typed operations using a locally installed zfs binary.
@@ -42,19 +58,35 @@ func (d *Direct) ListDatasets(ctx context.Context) ([]Dataset, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseDatasets(output)
+}
+
+func parseDatasets(output []byte) ([]Dataset, error) {
 	var datasets []Dataset
-	for lineNumber, line := range nonEmptyLines(output) {
-		fields := strings.Split(line, "\t")
-		if len(fields) != 3 {
-			return nil, fmt.Errorf("parse zfs list line %d: expected 3 tab-separated fields, got %d", lineNumber+1, len(fields))
+	err := parseTable(output, 3, func(fields []string) error {
+		if err := validateDataset(fields[0]); err != nil {
+			return err
 		}
 		typeName := DatasetType(fields[1])
 		if typeName != Filesystem && typeName != Volume {
-			return nil, fmt.Errorf("parse zfs list line %d: unsupported dataset type %q", lineNumber+1, fields[1])
+			return fmt.Errorf("unsupported dataset type %q", fields[1])
 		}
 		datasets = append(datasets, Dataset{Name: fields[0], Type: typeName, EncryptionRoot: fields[2]})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return datasets, nil
+}
+
+// GetActivationProperties retrieves the global sparse activation inventory.
+func (d *Direct) GetActivationProperties(ctx context.Context) ([]Property, error) {
+	output, err := d.runner.Run(ctx, "get", "-H", "-p", "-s", "local,received", "-t", "filesystem,volume", "-o", "name,property,value,source", propertyNamespace+"enabled")
+	if err != nil {
+		return nil, err
+	}
+	return parseProperties(output)
 }
 
 // GetStoredProperties retrieves local and received boomerangz properties.
@@ -73,20 +105,27 @@ func (d *Direct) GetStoredProperties(ctx context.Context, datasets []string) ([]
 	if err != nil {
 		return nil, err
 	}
+	return parseProperties(output)
+}
+
+func parseProperties(output []byte) ([]Property, error) {
 	var properties []Property
-	for lineNumber, line := range nonEmptyLines(output) {
-		fields := strings.Split(line, "\t")
-		if len(fields) != 4 {
-			return nil, fmt.Errorf("parse zfs get line %d: expected 4 tab-separated fields, got %d", lineNumber+1, len(fields))
-		}
+	err := parseTable(output, 4, func(fields []string) error {
 		if !strings.HasPrefix(fields[1], propertyNamespace) {
-			continue
+			return nil
+		}
+		if err := validateDataset(fields[0]); err != nil {
+			return err
 		}
 		source := PropertySource(fields[3])
 		if source != SourceLocal && source != SourceReceived {
-			return nil, fmt.Errorf("parse zfs get line %d: unsupported property source %q", lineNumber+1, fields[3])
+			return fmt.Errorf("unsupported property source %q", fields[3])
 		}
 		properties = append(properties, Property{Dataset: fields[0], Name: fields[1], Value: fields[2], Source: source})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return properties, nil
 }
@@ -172,10 +211,22 @@ func (d *Direct) Release(ctx context.Context, tag, snapshot string) error {
 	return err
 }
 
-func nonEmptyLines(output []byte) []string {
-	trimmed := strings.TrimSpace(string(output))
-	if trimmed == "" {
-		return nil
+func parseTable(output []byte, columns int, consume func([]string) error) error {
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	line := 0
+	for scanner.Scan() {
+		line++
+		fields := strings.Split(scanner.Text(), "\t")
+		if len(fields) != columns {
+			return fmt.Errorf("parse zfs output line %d: expected %d fields, got %d", line, columns, len(fields))
+		}
+		if err := consume(fields); err != nil {
+			return fmt.Errorf("parse zfs output line %d: %w", line, err)
+		}
 	}
-	return strings.Split(trimmed, "\n")
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("parse zfs output: %w", err)
+	}
+	return nil
 }

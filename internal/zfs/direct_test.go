@@ -1,7 +1,9 @@
 package zfs
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"reflect"
 	"testing"
 )
@@ -9,6 +11,74 @@ import (
 type fakeRunner struct {
 	output []byte
 	args   []string
+}
+
+func TestActivationQuery(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{output: []byte("backup\torg.boomerangz:enabled\ton\treceived\n")}
+	d := &Direct{runner: runner}
+	rows, err := d.GetActivationProperties(t.Context())
+	if err != nil || len(rows) != 1 || rows[0].Source != SourceReceived {
+		t.Fatalf("rows=%v err=%v", rows, err)
+	}
+	want := []string{"get", "-H", "-p", "-s", "local,received", "-t", "filesystem,volume", "-o", "name,property,value,source", "org.boomerangz:enabled"}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("args=%v", runner.args)
+	}
+}
+
+func TestMalformedPropertiesAndWhitespace(t *testing.T) {
+	t.Parallel()
+	for _, invalid := range []string{"tank\torg.boomerangz:enabled\ton\tinherited from tank\n", "tank\torg.boomerangz:enabled\n", "\n"} {
+		if _, err := parseProperties([]byte(invalid)); err == nil {
+			t.Errorf("accepted %q", invalid)
+		}
+	}
+	rows, err := parseProperties([]byte("tank\torg.boomerangz:set_prop:custom:value\t  keep spaces  \tlocal\n"))
+	if err != nil || rows[0].Value != "  keep spaces  " {
+		t.Fatalf("whitespace changed: %v %v", rows, err)
+	}
+}
+
+func FuzzDatasetRows(f *testing.F) {
+	f.Add("tank\tfilesystem\t-\n")
+	f.Add("tank/swap\tvolume\ttank\n")
+	f.Fuzz(func(t *testing.T, input string) {
+		rows, err := parseDatasets([]byte(input))
+		if err != nil {
+			return
+		}
+		for _, row := range rows {
+			if err := ValidateDataset(row.Name); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+}
+
+func TestBoundedCommandOutput(t *testing.T) {
+	t.Parallel()
+	b := &boundedOutput{}
+	_, err := io.Copy(b, bytes.NewReader(make([]byte, 32*1024*1024+1)))
+	if err == nil || b.buffer.Len() > 32*1024*1024 {
+		t.Fatal("output limit bypassed")
+	}
+}
+
+func FuzzPropertyRows(f *testing.F) {
+	f.Add("tank\torg.boomerangz:enabled\ton\tlocal\n")
+	f.Add("tank\tcompression\tzstd\tlocal\n")
+	f.Fuzz(func(t *testing.T, input string) {
+		rows, err := parseProperties([]byte(input))
+		if err != nil {
+			return
+		}
+		for _, row := range rows {
+			if row.Source != SourceLocal && row.Source != SourceReceived {
+				t.Fatal("invalid source accepted")
+			}
+		}
+	})
 }
 
 func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {

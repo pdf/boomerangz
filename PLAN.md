@@ -111,8 +111,7 @@ properties are inherited according to normal ZFS semantics unless noted below.
 | `org.boomerangz:replicate=on\|off` | `off` | Request recursive replication with `zfs send -R`. |
 | `org.boomerangz:set_prop:<name>=<value>` | unset | Apply receive-side `-o name=value`. |
 | `org.boomerangz:ignore_prop:<name>=on\|off` | unset | Apply receive-side `-x name` when enabled. |
-| `org.boomerangz:discard_first=on\|off` | `off` | Apply receive-side `-d`. |
-| `org.boomerangz:discard_all=on\|off` | `off` | Apply receive-side `-e`. |
+| `org.boomerangz:discard=none\|first\|all` | `none` | Discard no path components, the first component (`-d`), or all but the last component (`-e`) on receive. |
 
 Comma-separated lists are trimmed, deduplicated, and rejected if they contain
 empty entries. Unknown remote names invalidate only the affected dataset policy;
@@ -120,37 +119,69 @@ they do not prevent the daemon from managing unrelated datasets.
 
 ### 3.1 Property source and activation
 
-Configuration discovery reads only locally set and received
-`org.boomerangz:*` properties. `boomerangz` resolves inheritance itself.
+Configuration and cleanup discovery read only locally set and received
+`org.boomerangz:*` properties. `boomerangz` resolves inheritance itself, but
+only locally configured public properties participate in effective policy.
 
 A dataset becomes active only when `enabled=on` originates from a locally set
 property, either on the dataset or an ancestor. A received `enabled=on` never
 activates a destination by itself. This prevents a received backup from
 automatically becoming another replication source.
 
-After a dataset is locally activated, its received policy properties may take
-effect. Local definitions take precedence over received definitions, matching
-ZFS property precedence.
+Received public `org.boomerangz:*` properties never participate in effective
+policy, even after a destination is locally activated. An administrator who
+promotes a received dataset configures it locally. Internal
+`org.boomerangz:state:*` properties are handled separately as ownership and
+recovery metadata.
 
-### 3.2 Conflict handling
+### 3.2 Receive-side namespace isolation
+
+Public `org.boomerangz:*` configuration properties are ignored on receive by
+default. This includes activation, targets, policy, send flags, destination
+mapping, and dynamic `set_prop:*` and `ignore_prop:*` keys. It prevents a backup
+from inheriting source routing or becoming a replication source after an
+unrelated local configuration change.
+
+When a stream contains properties because `props=on` or `replicate=on`, the
+planner inventories the public `org.boomerangz:*` keys present across the send
+scope and supplies an explicit receive-side `-x` for each key. OpenZFS has no
+property-prefix form of `-x`. The VM compatibility matrix must verify whether
+each supported OpenZFS release retains an overridden received value internally;
+if it does, post-receive reconciliation clears that received value as well.
+Policy evaluation ignores it in either case.
+
+Internal `org.boomerangz:state:*` metadata is not covered by this default
+exclusion. The receiver either accepts or reconstructs the minimum lineage and
+snapshot metadata needed for ownership and recovery, then verifies it against
+the received snapshot GUID.
+
+Generic `set_prop:<name>` and `ignore_prop:<name>` directives may not target the
+reserved `org.boomerangz:*` namespace. Target-side `boomerangz` configuration
+must be set directly on that target, making activation and routing explicit.
+
+### 3.3 Conflict handling
 
 If `set_prop` and `ignore_prop` address the same receive property, reconciliation
 emits a warning and `set_prop` wins. Only the corresponding `-o` argument is
 generated.
 
-`discard_first=on` and `discard_all=on` are mutually exclusive. Enabling both is
-an invalid policy.
+`discard` is a single choice: `none`, `first`, or `all`. An explicit local
+`discard=none` overrides an ancestor's discard setting.
 
 Raw mode exposes both requested and effective send flags. In particular:
 
 - raw sends of unencrypted datasets imply OpenZFS behaviours equivalent to
   large blocks, embedded data, and compressed data;
 - encrypted recursive replication requires raw mode;
+- when `raw` is unspecified, an encrypted descendant automatically selects raw
+  mode for the replication root, subject to receive-property compatibility;
+  inspection explains that selection and any implied flag changes;
+- explicit local or inherited `raw=off` is never overridden automatically;
 - receive-side encryption overrides incompatible with raw streams invalidate
   the job;
 - conflicts caused by raw mode produce visible warnings and are never hidden.
 
-### 3.3 Dynamic receive-property keys
+### 3.4 Dynamic receive-property keys
 
 `set_prop:<name>` and `ignore_prop:<name>` remain dynamic user-property keys.
 A fixed key containing a delimited map would require escaping arbitrary ZFS
@@ -162,7 +193,7 @@ The explicit `set_prop` and `ignore_prop` components are retained instead of
 shorter names such as `set` or `ignore`; the longer forms make their receive-
 property purpose clear in `zfs get` output and administrative tooling.
 
-### 3.4 Incremental modes
+### 3.5 Incremental modes
 
 `incremental=all` uses `zfs send -I`, transferring every intermediary snapshot
 between the selected base and target. `incremental=latest` uses `zfs send -i`,
@@ -180,7 +211,7 @@ Repeated forced full sends are not a policy mode. Reseeding an existing target
 will be an explicit administrative workflow with destination preflight and no
 implicit destruction.
 
-### 3.5 Recursive replication
+### 3.6 Recursive replication
 
 `replicate=on` makes the enabled dataset a replication root:
 
@@ -318,6 +349,60 @@ Transient progress and process IDs remain in memory. Errors are retained in
 structured logs. After restart, the daemon reconstructs pending work from
 properties, snapshots, bookmarks, holds, and destination resume tokens.
 
+### 5.4 Deactivation and explicit cleanup
+
+An active dataset becomes inactive when its resolved locally configured
+`enabled` value changes away from `on`. Removing a dataset's local property does
+not deactivate it if a locally configured ancestor still supplies `enabled=on`;
+an explicit local `enabled=off` masks that ancestor.
+
+On an active-to-inactive transition, `boomerangz`:
+
+- stops scheduling snapshots, pruning, transfers, and property reconciliation;
+- removes work that has not started from both worker-pool queues;
+- requests cancellation of active transfers and preserves any resulting
+  resumable receive state;
+- allows already executing short ZFS management operations to finish, then
+  records their reconstructed result; and
+- exposes the dataset as disabled with retained recovery state in status output.
+
+Deactivation does not automatically destroy snapshots or bookmarks, release
+holds, abort receive resume tokens, or clear properties. This makes a temporary
+disable reversible and prevents a configuration edit from silently removing
+the only viable recovery path.
+
+`boomerangz dataset cleanup` is the explicit decommissioning workflow. It
+accepts exact dataset scopes, `--recursive`, or an explicit `--all`; defaults to
+a read-only preview; and requires `--apply` before changing ZFS state. It
+coordinates with the daemon when one is running so the selected scope is
+quiescent before cleanup. For each selected local dataset it:
+
+1. inventories locally set and received `org.boomerangz:*` properties on the
+   dataset and its selected descendants and snapshots;
+2. identifies holds and bookmarks by both the `boomerangz` naming contract and
+   matching lineage/target metadata;
+3. reports active jobs, inaccessible targets, conflicting lineages, and receive
+   resume tokens as blockers;
+4. clears public and internal `org.boomerangz:*` property values at the selected
+   scope and releases or destroys only holds and bookmarks whose ownership is
+   proven; and
+5. leaves snapshots and their data intact by default, after clearing their
+   internal ownership metadata, so they become foreign snapshots that
+   `boomerangz` can never prune.
+
+An additional `--destroy-owned-snapshots` option may delete only snapshots that
+pass the complete ownership proof and have no holds, clones, resume dependency,
+or other ZFS blocker. It is never implied by `--all` and is separately visible
+in the preview.
+
+Cleanup never reverts or clears non-`org.boomerangz:*` properties previously
+applied through `set_prop`; their prior values are unknown and they may now be
+intentional target configuration. It also never aborts a destination resume
+token implicitly. An interrupted receive must first be resumed or explicitly
+abandoned through the separately guarded administrative workflow. Offline or
+unreachable targets are reported as incomplete and must be cleaned on their
+own host; package removal does not run destructive cleanup automatically.
+
 ## 6. Efficient dataset discovery
 
 Discovery avoids per-dataset subprocesses and excludes snapshots from the
@@ -370,8 +455,9 @@ The in-memory resolver walks parents before children:
 
 1. Start with application defaults.
 2. Copy the parent's effective property map.
-3. Apply received properties defined on the dataset.
-4. Apply local properties defined on the dataset.
+3. Retain received properties and internal metadata separately for inspection;
+   they do not participate in public policy.
+4. Apply locally configured public properties defined on the dataset.
 5. Parse and validate the effective policy.
 
 The daemon never requests inherited `boomerangz` rows from ZFS.
@@ -603,6 +689,8 @@ boomerangz status [-w|--watch] [-i|--interval 2s]
 boomerangz dataset list
 boomerangz dataset inspect <dataset>
 boomerangz dataset adopt <dataset>
+boomerangz dataset cleanup [--recursive] [--all] [--apply]
+                            [--destroy-owned-snapshots] [<dataset>...]
 boomerangz config check
 boomerangz config show
 boomerangz trigger [<dataset>...]
@@ -701,8 +789,8 @@ working tree changes.
 ### 13.1 Test strategy
 
 Unit tests cover policy resolution, command construction, scheduling, pruning,
-state transitions, destination mapping, authentication scopes, and
-configuration merging.
+deactivation and cleanup planning, ownership proofs, destination mapping,
+authentication scopes, and configuration merging.
 
 Fuzz tests cover:
 
@@ -759,6 +847,9 @@ and add a namespace layer without improving the relevant coverage.
 Fault-injection coverage terminates the sender, receiver, SSH process, and daemon
 at controlled points. It verifies resume-token recovery, hold preservation,
 bookmark advancement, restart reconciliation, and source/destination pruning.
+VM integration tests also verify public-property exclusion, local and received
+property-layer cleanup, active-to-inactive transitions, preview/apply parity,
+and refusal to clean ambiguous or resume-dependent state.
 
 ## 14. Delivery phases
 
@@ -769,7 +860,8 @@ bookmark advancement, restart reconciliation, and source/destination pruning.
 2. **Discovery and policy**: implement sparse dataset discovery, inheritance,
    grid parsing, effective-policy inspection, and immutable generations.
 3. **Snapshot lifecycle**: implement lineage, naming, recursive and non-recursive
-   snapshots, grid pruning, holds, bookmarks, and adoption.
+   snapshots, grid pruning, holds, bookmarks, adoption, deactivation, and
+   preview-first cleanup.
 4. **Local transfer**: implement full bootstrap, `-i`, `-I`, progress,
    receive-property handling, and GUID verification.
 5. **SSH and roadwarrior recovery**: implement remote probing, retry with jitter,
@@ -796,6 +888,8 @@ The following remain deliberate checkpoints rather than implicit assumptions:
 - decide whether remote status/control ships in the first release or follows
   local gRPC control;
 - define safe, explicit reseed and interrupted-receive abandonment workflows;
+- verify receive-side exclusion and complete clearing of local and received
+  `org.boomerangz:*` property layers across supported OpenZFS releases;
 - benchmark Go-mediated stream copying against direct OS pipes and SSH;
 - determine the exact delegated permission sets for source and destination
   roots, including permissions needed by configured native `set_prop` values;

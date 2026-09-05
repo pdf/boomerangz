@@ -10,6 +10,8 @@ import (
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/discovery"
+	"github.com/pdf/boomerangz/internal/zfs"
 )
 
 const (
@@ -35,7 +37,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, build Bui
 	return 0
 }
 
-func run(_ context.Context, args []string, stdout, _ io.Writer, build BuildInfo) error {
+func run(ctx context.Context, args []string, stdout, stderr io.Writer, build BuildInfo) error {
+	return runWithReader(ctx, args, stdout, stderr, build, nil)
+}
+
+func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, build BuildInfo, reader discovery.Reader) error {
 	app := kingpin.New("boomerangz", "Property-driven ZFS snapshot and replication manager.")
 	app.HelpFlag.Short('h')
 	app.UsageWriter(stdout)
@@ -52,12 +58,56 @@ func run(_ context.Context, args []string, stdout, _ io.Writer, build BuildInfo)
 	versionCmd := app.Command("version", "Show version information.")
 	versionJSON := versionCmd.Flag("json", "Emit JSON.").Bool()
 
+	datasetCmd := app.Command("dataset", "Read-only dataset and effective-policy inspection.")
+	datasetPath := datasetCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
+	datasetDropIns := datasetCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
+	listCmd := datasetCmd.Command("list", "List sparse inventory and active policies as JSON.")
+	inspectCmd := datasetCmd.Command("inspect", "Inspect effective policy and stored properties as JSON.")
+	inspectName := inspectCmd.Arg("dataset", "Exact ZFS dataset name.").Required().String()
+
 	command, err := app.Parse(args)
 	if err != nil {
 		return err
 	}
 
 	switch command {
+	case listCmd.FullCommand(), inspectCmd.FullCommand():
+		loaded, err := config.Load(*datasetPath, *datasetDropIns)
+		if err != nil {
+			return err
+		}
+		if reader == nil {
+			reader, err = zfs.NewDirect("zfs")
+			if err != nil {
+				return err
+			}
+		}
+		var remotes []string
+		for name := range loaded.Config.Remotes {
+			remotes = append(remotes, name)
+		}
+		scanner, err := discovery.New(reader, discovery.Options{Remotes: remotes})
+		if err != nil {
+			return err
+		}
+		var inspect []string
+		if command == inspectCmd.FullCommand() {
+			inspect = []string{*inspectName}
+		}
+		generation, err := scanner.Scan(ctx, inspect)
+		if err != nil {
+			return err
+		}
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		if command == inspectCmd.FullCommand() {
+			entry, exists := generation.Inspect(*inspectName)
+			if !exists {
+				return fmt.Errorf("dataset %q was not found", *inspectName)
+			}
+			return encoder.Encode(entry)
+		}
+		return encoder.Encode(generation.Entries())
 	case checkCmd.FullCommand():
 		loaded, err := config.Load(*checkPath, *checkDropIns)
 		if err != nil {
