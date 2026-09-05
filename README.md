@@ -46,7 +46,8 @@ go run ./cmd/boomerangz-vmtest preflight \
 ```
 
 See [PLAN.md](PLAN.md) for the architecture and [docs/configuration.md](docs/configuration.md)
-for the phase-one configuration schema. VM setup and safety requirements are in
-[docs/integration-testing.md](docs/integration-testing.md); the first delegated
+for the configuration reference. Developer-only implementation and test notes
+live under [docs/development](docs/development/README.md). VM setup and safety requirements are in
+[docs/development/integration-testing.md](docs/development/integration-testing.md); the first delegated
 OpenZFS result is recorded in
-[docs/integration-spike-cachyos-260809.md](docs/integration-spike-cachyos-260809.md).
+[docs/development/integration-spike-cachyos-260809.md](docs/development/integration-spike-cachyos-260809.md).

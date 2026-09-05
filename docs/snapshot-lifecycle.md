@@ -1,8 +1,7 @@
 # Snapshot lifecycle
 
-Phase 3 provides the lifecycle service and explicit administrative commands.
-Automatic scheduling, live daemon status, and transfer orchestration remain in
-their separately planned phases. Configuration alone does not yet start jobs.
+The administrative commands below are available now. Automatic scheduling,
+transfers, and live daemon status are not yet available.
 
 ## Ownership and snapshots
 
@@ -37,12 +36,9 @@ resume state block adoption. Adoption is exact-dataset only.
 
 ## Holds and bookmarks
 
-The service records a local per-target/per-snapshot reference proof before taking
-a target-specific hold. A checkpoint requires a matching destination GUID from
-the caller, then creates a versioned bookmark. The transfer phases will supply
-actual destination verification; the lifecycle hook does not perform transfers.
-Old checkpoints and holds remain until explicitly released after dependencies
-are resolved. A failed operation leaves reconstructable records for retry.
+Target-specific holds protect snapshots needed for recovery. Versioned bookmarks
+record replication checkpoints. Old references remain until their dependencies
+are resolved; interrupted operations retain recovery metadata for retry.
 
 Cleanup verifies reference records, snapshot metadata, and GUIDs before releasing
 holds or deleting bookmarks. Unknown boomerangz-looking references block cleanup;
@@ -51,13 +47,9 @@ contents are documented in [the property reference](dataset-policy.md).
 
 ## Deactivation
 
-The lifecycle gate rejects new work for disabled scopes. Disabling cancels queued
-tickets and running transfers; cancelled queued tickets cannot start even after
-re-enabling. Running short management operations may finish and reconstruct their
-results before releasing their tickets. Quiescence waits for those operations and
-cancelled transfers to actually finish. ZFS snapshots, holds, bookmarks and resume
-tokens are untouched by deactivation. Scheduler/worker integration and persistent
-recovery status reconstruction remain in the daemon and transfer phases.
+Disabling management must preserve snapshots, holds, bookmarks and resume tokens.
+It is not a substitute for explicit decommissioning. Automatic scheduling and
+transfer cancellation are not yet available in this release.
 
 ## Explicit cleanup
 
@@ -88,11 +80,9 @@ the selected scope. Cleanup is local; it never silently cleans another host.
 
 Standalone applies hold an exclusive `<paths.socket_path>.lifecycle.lock` for
 their duration. An existing control socket causes refusal: daemon coordination is
-not implemented yet. The future daemon must participate in the same lock protocol.
-Target probing is also not implemented yet, so the CLI retains target references
+not implemented yet. Target probing is also not implemented yet, so the CLI retains target references
 and reports a blocker rather than assuming the target has no recovery dependency.
-The service accepts explicit quiescence and target-verification hooks for that
-integration. Use the same configured socket path for all cooperating processes.
+Use the same configured socket path for all cooperating processes.
 
 ZFS CLI operations do not provide atomic compare-and-swap against independent
 administrative commands. Avoid concurrent external ZFS changes during lifecycle
@@ -100,10 +90,9 @@ administration; observed changes cause refusal but cannot eliminate every race.
 
 ### Received-property limitation
 
-Plain `zfs inherit` removes local values but only masks received values. On the
-tested OpenZFS 2.4.3 guest, `zfs inherit -S` restores them. Hidden dynamic names
+Plain `zfs inherit` removes local values but only masks received values. `zfs inherit -S` can restore them. Hidden dynamic names
 can disappear from `zfs get all`; explicit known ownership-key queries still reveal
 their received values. Cleanup reports this limitation and never claims permanent
-erasure or uses direct libzfs APIs. Restoring hidden snapshot metadata externally
+erasure of received values. Restoring hidden snapshot metadata externally
 can restore ownership evidence; received public properties still never affect
 boomerangz policy.
