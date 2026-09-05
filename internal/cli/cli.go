@@ -67,7 +67,7 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 	adoptCmd := datasetCmd.Command("adopt", "Preview restoring a missing lineage from owned snapshots.")
 	adoptName := adoptCmd.Arg("dataset", "Exact ZFS dataset name.").Required().String()
 	adoptApply := adoptCmd.Flag("apply", "Apply the adoption after revalidation.").Bool()
-	cleanupCmd := datasetCmd.Command("cleanup", "Preview explicit local decommissioning; preserves snapshots by default.")
+	cleanupCmd := datasetCmd.Command("clean", "Preview explicit local decommissioning; preserves snapshots by default.")
 	cleanupNames := cleanupCmd.Arg("datasets", "Exact ZFS dataset scopes.").Strings()
 	cleanupRecursive := cleanupCmd.Flag("recursive", "Include descendants of the selected scopes.").Bool()
 	cleanupAll := cleanupCmd.Flag("all", "Explicitly select all local datasets recursively.").Bool()

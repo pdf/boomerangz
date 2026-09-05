@@ -169,8 +169,8 @@ func TestGuestLifecycle(t *testing.T) {
 		configPath := os.Getenv("BOOMERANGZ_LIFECYCLE_GUEST_CONFIG")
 		command(binary, "dataset", "--config", configPath, "adopt", cliRoot)
 		command(binary, "dataset", "--config", configPath, "adopt", cliRoot, "--apply")
-		command(binary, "dataset", "--config", configPath, "cleanup", cliRoot, "--destroy-owned-snapshots")
-		command(binary, "dataset", "--config", configPath, "cleanup", cliRoot, "--destroy-owned-snapshots", "--apply")
+		command(binary, "dataset", "--config", configPath, "clean", cliRoot, "--destroy-owned-snapshots")
+		command(binary, "dataset", "--config", configPath, "clean", cliRoot, "--destroy-owned-snapshots", "--apply")
 		state, err := direct.InspectState(t.Context(), cliRoot, false)
 		if err != nil {
 			t.Fatal(err)

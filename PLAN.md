@@ -383,7 +383,7 @@ holds, abort receive resume tokens, or clear properties. This makes a temporary
 disable reversible and prevents a configuration edit from silently removing
 the only viable recovery path.
 
-`boomerangz dataset cleanup` is the explicit decommissioning workflow. It
+`boomerangz dataset clean` is the explicit decommissioning workflow. It
 accepts exact dataset scopes, `--recursive`, or an explicit `--all`; defaults to
 a read-only preview; and requires `--apply` before changing ZFS state. It
 coordinates with the daemon when one is running so the selected scope is
@@ -396,7 +396,7 @@ blockers and retains their recovery references. Standalone applies share an
 exclusive `<socket_path>.lifecycle.lock`; the future daemon must hold that same
 lock before accepting work.
 
-For each selected local dataset cleanup:
+For each selected local dataset clean:
 
 1. inventories locally set and received `org.boomerangz:*` properties on the
    dataset and its selected descendants and snapshots;
@@ -726,7 +726,7 @@ boomerangz status [-w|--watch] [-i|--interval 2s]
 boomerangz dataset list
 boomerangz dataset inspect <dataset>
 boomerangz dataset adopt <dataset>
-boomerangz dataset cleanup [--recursive] [--all] [--apply]
+boomerangz dataset clean [--recursive] [--all] [--apply]
                             [--destroy-owned-snapshots] [<dataset>...]
 boomerangz config check
 boomerangz config show

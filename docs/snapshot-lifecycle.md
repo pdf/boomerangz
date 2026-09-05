@@ -62,10 +62,10 @@ recovery status reconstruction remain in the daemon and transfer phases.
 ## Explicit cleanup
 
 ```sh
-boomerangz dataset cleanup pool/data
-boomerangz dataset cleanup pool/data --recursive --apply
-boomerangz dataset cleanup --all
-boomerangz dataset cleanup pool/data --destroy-owned-snapshots --apply
+boomerangz dataset clean pool/data
+boomerangz dataset clean pool/data --recursive --apply
+boomerangz dataset clean --all
+boomerangz dataset clean pool/data --destroy-owned-snapshots --apply
 ```
 
 Named scopes are exact unless `--recursive` is specified. `--all` explicitly
