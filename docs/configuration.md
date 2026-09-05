@@ -37,6 +37,17 @@ useful host, account, or destination dataset.
 | `local_transfer_workers` | `2` | Maximum concurrent same-host transfers, independently limiting local storage load. Integer of at least one. |
 | `remote_transfer_workers` | `1` | Maximum concurrent network transfers across all remotes, independently limiting network load. Integer of at least one. |
 
+Snapshot timing is independent of reconciliation. The scheduling design uses
+known active policies to determine snapshot deadlines without rescanning ZFS on
+each snapshot tick. New or changed policies take effect after reconciliation.
+
+The reconciliation loop runs one pass at a time. If a pass (including its result
+callback) exceeds `reconcile_interval`, a pending tick can start another pass
+immediately afterward. Missed ticks do not accumulate into an unbounded backlog;
+there are no overlapping passes or automatic timeout at the interval. Sustained
+slow passes can therefore keep the reconciler continuously busy. Explicit refresh
+requests coalesce separately into one pending request.
+
 `local_transfer_workers` and `remote_transfer_workers` replace `transfer_workers`;
 the old field is no longer accepted. Setting both to `1` allows one local and one
 remote transfer concurrently, not a single global transfer. Concurrency is not a

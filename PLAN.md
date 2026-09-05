@@ -495,11 +495,29 @@ Each complete discovery pass creates an immutable generation containing the
 dataset tree and effective policies. It is published atomically. A failed or
 partial scan never replaces the last complete generation.
 
-The daemon compares generations and enqueues management work only for changed,
-newly due, or newly recoverable datasets. Global discovery runs through a
-single coordinator, never concurrently, at a default interval of 60 seconds.
+The daemon compares generations and enqueues policy/recovery work for changed
+or newly recoverable datasets. Global discovery runs through a single
+coordinator, never concurrently, at a default interval of 60 seconds.
 Explicit reconciliation requests are coalesced. Changes made by `boomerangz`
 update or invalidate the affected cache entry immediately.
+
+Reconciliation and snapshot scheduling use independent timers. The snapshot
+scheduler consumes the latest immutable policy generation and maintains per-root
+deadlines; its required resolution is inferred from the minimum cadence among
+active, valid, independently scheduled policies. With no active policies it need
+not tick. A new generation updates deadlines without forcing a global scan on
+each snapshot wakeup. Snapshot completion updates the affected deadline; missed
+snapshots coalesce rather than backfill. Future second-resolution policies must
+not force one-second discovery scans. Second units are not enabled by this design
+change. Scheduler and worker integration remain in phase 6.
+
+The current reconciliation loop uses a ticker and runs each scan and report
+callback synchronously. When a pass overruns the configured interval, a pending
+tick can start another pass immediately after completion. Missed ticks are
+coalesced/dropped, not queued without bound; scans never overlap. The interval
+is neither a timeout nor a mandatory pause after completion. Sustained overruns
+can keep discovery continuously busy. Explicit requests coalesce independently
+into one pending request, which can cause an additional follow-up pass.
 
 Prefer JSON output when capability detection confirms `zfs get -j`; otherwise
 parse `-H -p` tabular output. Both parsers are streaming, bounded, and
