@@ -371,7 +371,7 @@ an explicit local `enabled=off` masks that ancestor.
 On an active-to-inactive transition, `boomerangz`:
 
 - stops scheduling snapshots, pruning, transfers, and property reconciliation;
-- removes work that has not started from both worker-pool queues;
+- removes work that has not started from all worker-pool queues;
 - requests cancellation of active transfers and preserves any resulting
   resumable receive state;
 - allows already executing short ZFS management operations to finish, then
