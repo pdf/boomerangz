@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,7 +29,8 @@ type Grid struct {
 
 var bucketPattern = regexp.MustCompile(`^([0-9]+)x([0-9]+)([mhdw])$`)
 
-// ParseGrid validates the grammar, ordering, and total duration without expanding windows.
+// ParseGrid validates and sorts tiers by duration, merging equal durations,
+// without expanding individual windows. Written order does not affect retention.
 func ParseGrid(value string) (Grid, error) {
 	var grid Grid
 	var canonical []string
@@ -47,15 +49,32 @@ func ParseGrid(value string) (Grid, error) {
 			return Grid{}, fmt.Errorf("invalid grid duration %q", match[2]+match[3])
 		}
 		span := time.Duration(amount) * unit
-		if len(grid.buckets) > 0 && span <= grid.buckets[len(grid.buckets)-1].Span {
-			return Grid{}, fmt.Errorf("grid durations must be strictly increasing")
-		}
 		if count > int64((math.MaxInt64-grid.horizon)/span) {
 			return Grid{}, fmt.Errorf("grid horizon overflows time.Duration")
 		}
 		grid.horizon += time.Duration(count) * span
 		grid.buckets = append(grid.buckets, Bucket{Count: int(count), Span: span})
-		canonical = append(canonical, fmt.Sprintf("%dx%d%s", count, amount, match[3]))
+	}
+	sort.Slice(grid.buckets, func(i, j int) bool { return grid.buckets[i].Span < grid.buckets[j].Span })
+	merged := grid.buckets[:0]
+	for _, bucket := range grid.buckets {
+		if len(merged) > 0 && merged[len(merged)-1].Span == bucket.Span {
+			merged[len(merged)-1].Count += bucket.Count
+		} else {
+			merged = append(merged, bucket)
+		}
+	}
+	grid.buckets = merged
+	for _, bucket := range grid.buckets {
+		for _, unit := range []struct {
+			name string
+			span time.Duration
+		}{{"w", 7 * 24 * time.Hour}, {"d", 24 * time.Hour}, {"h", time.Hour}, {"m", time.Minute}} {
+			if bucket.Span%unit.span == 0 {
+				canonical = append(canonical, fmt.Sprintf("%dx%d%s", bucket.Count, bucket.Span/unit.span, unit.name))
+				break
+			}
+		}
 	}
 	grid.text = strings.Join(canonical, ",")
 	return grid, nil

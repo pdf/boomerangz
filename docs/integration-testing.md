@@ -86,3 +86,34 @@ and SSH orchestration. The initial CachyOS base and delegated-operation spike
 have been built and verified manually; the exact result is recorded in
 `integration-spike-cachyos-260809.md`. No host ZFS command is introduced by the
 bootstrap or matrix paths.
+
+## Lifecycle integration
+
+`internal/lifecycle/guest_test.go` is opt-in and skips ordinary host test runs.
+Build it on the host with `go test -c ./internal/lifecycle`, copy the binary into
+the disposable guest, and run there with `BOOMERANGZ_LIFECYCLE_GUEST_RUN` matching
+the guarded run marker. It verifies source disk serial and actual pool vdevs
+before creating uniquely named fixtures beneath the source pool's `data` subtree.
+The guest account additionally needs delegated `create` for these fixture datasets.
+Fixtures remain until the guarded bootstrap tears down the test pools.
+
+To include command-line adoption and cleanup, also copy the built boomerangz CLI
+and a test TOML file into the guest, then set `BOOMERANGZ_LIFECYCLE_GUEST_CLI` and
+`BOOMERANGZ_LIFECYCLE_GUEST_CONFIG` to those guest paths. Use a writable guest-only
+socket path in that TOML for the standalone lifecycle lock. Do not set these
+variables for host test runs.
+
+The 2026-09-05 run used Linux `6.18.42-1-cachyos-lts`, `zfs-2.4.3-1` and matching
+`zfs-kmod-2.4.3-1`, in the transient `run-lifecycle-260905` guest. The Go service
+and CLI passed creation of recursive and non-recursive snapshots, held-snapshot
+protection, exact-dataset pruning, lineage adoption, target-specific hold and
+bookmark creation/release, recursive cleanup preserving snapshot data, and CLI
+owned-snapshot destruction preserving a foreign snapshot. Checkpoint tests used
+a synthetic target and explicitly supplied source GUID; they do not claim real
+destination verification, which belongs to the transfer phase.
+
+`guest-property-layers.sh` separately demonstrated that receive exclusions and
+plain inheritance retain hidden received values, including snapshot user-property
+metadata; `inherit -S` can restore them. Queries for all properties can omit hidden
+names. No native libzfs removal implementation is pursued. See the lifecycle
+documentation for the practical cleanup limitation.

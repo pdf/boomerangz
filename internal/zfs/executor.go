@@ -43,10 +43,33 @@ type Executor interface {
 	ListDatasets(context.Context) ([]Dataset, error)
 	GetActivationProperties(context.Context) ([]Property, error)
 	GetStoredProperties(context.Context, []string) ([]Property, error)
+	InspectState(context.Context, string, bool) (State, error)
+	SetProperties(context.Context, string, map[string]string) error
+	InheritProperty(context.Context, string, string) error
 	Snapshot(context.Context, string, string, bool, map[string]string) error
 	DestroySnapshot(context.Context, string) error
 	Bookmark(context.Context, string, string) error
 	DestroyBookmark(context.Context, string) error
 	Hold(context.Context, string, string) error
 	Release(context.Context, string, string) error
+}
+
+// Object is a filesystem, volume, snapshot, or bookmark in a lifecycle query.
+type Object struct {
+	Name     string
+	Type     string
+	GUID     uint64
+	Creation int64
+}
+
+// State includes effective operational values and explicit namespace properties.
+// Received records known received values, including masked values for known keys.
+// ZFS CLI enumeration cannot discover every hidden dynamic property name.
+type State struct {
+	Objects      []Object
+	Properties   []Property
+	Received     map[string]map[string]string
+	ResumeTokens map[string]string
+	Clones       map[string][]string
+	Holds        map[string][]string
 }

@@ -3,9 +3,10 @@
 `boomerangz` is a property-driven ZFS snapshot and replication manager for
 continuously connected and intermittently connected systems.
 
-The discovery-and-policy phase provides configuration loading, sparse dataset
-discovery, local property inheritance, grid validation, and read-only policy
-inspection. It does not yet schedule snapshots or transfers.
+The current implementation provides configuration loading, sparse discovery,
+local policy inheritance, normalized retention grids, snapshot lifecycle services,
+and preview-first adoption and cleanup commands. It does not yet automatically
+schedule snapshots or run transfers.
 
 On a ZFS system (use the disposable guest for development), inspect datasets:
 
@@ -17,6 +18,8 @@ boomerangz dataset --config /etc/boomerangz/config.toml inspect pool/data
 Both commands emit JSON. Inspection includes property provenance, requested and
 effective send behavior, retained received properties, errors, and replication
 coverage. See [docs/dataset-policy.md](docs/dataset-policy.md) for the policy contract.
+Adoption, cleanup, ownership checks, and current safety boundaries are documented
+in [docs/snapshot-lifecycle.md](docs/snapshot-lifecycle.md).
 
 ## Development
 

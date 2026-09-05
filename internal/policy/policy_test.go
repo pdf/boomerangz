@@ -23,7 +23,13 @@ func TestGrid(t *testing.T) {
 	if g.Buckets()[0].Count != 12 {
 		t.Fatal("mutable grid")
 	}
-	for _, invalid := range []string{"", "1x1s", "1x1.5h", "0x1m", "1x0m", "-1x1m", "1x1m,", "1x1h,2x60m", "1x1w,1x1d", "999999999999x1m", "1x9999999999999999999w", "2147483647x1w", "1x1525028h,1x1525029h"} {
+	for _, input := range []string{"14x1d,12x5m,24x1h", "24x60m,7x1d,12x5m,7x24h"} {
+		normalized, err := ParseGrid(input)
+		if err != nil || !reflect.DeepEqual(g, normalized) {
+			t.Fatalf("normalization of %q: %v, %v", input, normalized, err)
+		}
+	}
+	for _, invalid := range []string{"", "1x1s", "1x1.5h", "0x1m", "1x0m", "-1x1m", "1x1m,", "999999999999x1m", "1x9999999999999999999w", "2147483647x1w", "1x1525028h,1x1525029h", "100000000x1m,100000000x1m"} {
 		if _, err := ParseGrid(invalid); err == nil {
 			t.Errorf("accepted %q", invalid)
 		}

@@ -58,12 +58,21 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 	versionCmd := app.Command("version", "Show version information.")
 	versionJSON := versionCmd.Flag("json", "Emit JSON.").Bool()
 
-	datasetCmd := app.Command("dataset", "Read-only dataset and effective-policy inspection.")
+	datasetCmd := app.Command("dataset", "Dataset inspection and explicit lifecycle administration.")
 	datasetPath := datasetCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
 	datasetDropIns := datasetCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
 	listCmd := datasetCmd.Command("list", "List sparse inventory and active policies as JSON.")
 	inspectCmd := datasetCmd.Command("inspect", "Inspect effective policy and stored properties as JSON.")
 	inspectName := inspectCmd.Arg("dataset", "Exact ZFS dataset name.").Required().String()
+	adoptCmd := datasetCmd.Command("adopt", "Preview restoring a missing lineage from owned snapshots.")
+	adoptName := adoptCmd.Arg("dataset", "Exact ZFS dataset name.").Required().String()
+	adoptApply := adoptCmd.Flag("apply", "Apply the adoption after revalidation.").Bool()
+	cleanupCmd := datasetCmd.Command("cleanup", "Preview explicit local decommissioning; preserves snapshots by default.")
+	cleanupNames := cleanupCmd.Arg("datasets", "Exact ZFS dataset scopes.").Strings()
+	cleanupRecursive := cleanupCmd.Flag("recursive", "Include descendants of the selected scopes.").Bool()
+	cleanupAll := cleanupCmd.Flag("all", "Explicitly select all local datasets recursively.").Bool()
+	cleanupDestroy := cleanupCmd.Flag("destroy-owned-snapshots", "Also delete fully proven owned snapshots without dependencies.").Bool()
+	cleanupApply := cleanupCmd.Flag("apply", "Apply cleanup after revalidation.").Bool()
 
 	command, err := app.Parse(args)
 	if err != nil {
@@ -71,6 +80,25 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 	}
 
 	switch command {
+	case adoptCmd.FullCommand(), cleanupCmd.FullCommand():
+		loaded, err := config.Load(*datasetPath, *datasetDropIns)
+		if err != nil {
+			return err
+		}
+		if reader == nil {
+			reader, err = zfs.NewDirect("zfs")
+			if err != nil {
+				return err
+			}
+		}
+		executor, ok := reader.(zfs.Executor)
+		if !ok {
+			return fmt.Errorf("lifecycle executor unavailable")
+		}
+		if command == adoptCmd.FullCommand() {
+			return runAdopt(ctx, stdout, loaded.Config, executor, *adoptName, *adoptApply)
+		}
+		return runCleanup(ctx, stdout, loaded.Config, executor, *cleanupNames, *cleanupRecursive, *cleanupAll, *cleanupDestroy, *cleanupApply)
 	case listCmd.FullCommand(), inspectCmd.FullCommand():
 		loaded, err := config.Load(*datasetPath, *datasetDropIns)
 		if err != nil {

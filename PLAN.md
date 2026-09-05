@@ -147,7 +147,9 @@ planner inventories the public `org.boomerangz:*` keys present across the send
 scope and supplies an explicit receive-side `-x` for each key. OpenZFS has no
 property-prefix form of `-x`. The VM compatibility matrix must verify whether
 each supported OpenZFS release retains an overridden received value internally;
-if it does, post-receive reconciliation clears that received value as well.
+if it does, post-receive reconciliation masks that received value as well.
+Plain `zfs inherit` can retain hidden received values that `inherit -S` exposes
+again; no direct libzfs removal path is planned.
 Policy evaluation ignores it in either case.
 
 Internal `org.boomerangz:state:*` metadata is not covered by this default
@@ -255,7 +257,8 @@ representatives.
 
 Policy rules are:
 
-1. Bucket durations must be strictly increasing.
+1. Written tier order is irrelevant: normalize by increasing duration and merge
+   equal-duration tiers by adding their counts (including equivalent units).
 2. Buckets are adjacent, left-inclusive, and right-exclusive.
 3. The grid is positioned relative to the youngest owned snapshot.
 4. Each bucket retains its oldest contained snapshot.
@@ -331,6 +334,15 @@ For every source-target pair:
 - successful receive is confirmed by snapshot GUID before advancing the
   bookmark or releasing the hold.
 
+Recovery proofs use local
+`org.boomerangz:state:reference:<target-id>:<snapshot-uuid>` JSON properties on
+the source root, recording the non-secret canonical target identity, source GUID,
+and snapshot metadata. Target IDs are SHA-256 hex digests. Holds use
+`boomerangz-<target-id>` and bookmarks use
+`boomerangz-<target-id>-<snapshot-uuid>`. Versioned bookmarks avoid a destructive
+replace-before-create gap. Old proofs remain until their references are released;
+name prefixes alone never authorize release or destruction.
+
 When a target is unavailable, pending work is coalesced to the newest eligible
 snapshot instead of holding every scheduled snapshot. If a receive resume token
 exists, the exact source snapshot required by that token remains held until
@@ -375,7 +387,16 @@ the only viable recovery path.
 accepts exact dataset scopes, `--recursive`, or an explicit `--all`; defaults to
 a read-only preview; and requires `--apply` before changing ZFS state. It
 coordinates with the daemon when one is running so the selected scope is
-quiescent before cleanup. For each selected local dataset it:
+quiescent before cleanup.
+
+The phase-3 standalone implementation fails closed if the configured control
+socket exists. Daemon coordination and target probing are integration hooks for
+their later phases; until available, the CLI reports unverified targets as
+blockers and retains their recovery references. Standalone applies share an
+exclusive `<socket_path>.lifecycle.lock`; the future daemon must hold that same
+lock before accepting work.
+
+For each selected local dataset cleanup:
 
 1. inventories locally set and received `org.boomerangz:*` properties on the
    dataset and its selected descendants and snapshots;
@@ -383,12 +404,13 @@ quiescent before cleanup. For each selected local dataset it:
    matching lineage/target metadata;
 3. reports active jobs, inaccessible targets, conflicting lineages, and receive
    resume tokens as blockers;
-4. clears public and internal `org.boomerangz:*` property values at the selected
+4. inherits public and internal `org.boomerangz:*` properties at the selected
    scope and releases or destroys only holds and bookmarks whose ownership is
    proven; and
 5. leaves snapshots and their data intact by default, after clearing their
-   internal ownership metadata, so they become foreign snapshots that
-   `boomerangz` can never prune.
+   effective internal ownership metadata, so they become foreign snapshots.
+   Hidden received metadata may remain and can be restored externally; cleanup
+   must report this limitation and must not promise irreversible erasure.
 
 An additional `--destroy-owned-snapshots` option may delete only snapshots that
 pass the complete ownership proof and have no holds, clones, resume dependency,
@@ -598,7 +620,7 @@ The Unix socket relies on filesystem permissions and local peer credentials.
 TCP is disabled by default and never supports an unauthenticated mode. Available
 TCP authentication modes are:
 
-- `token`: pinned server identity plus a scoped token;
+- `token`: verified TLS server identity plus a scoped token;
 - `mtls`: server and client certificate authentication;
 - `mtls+token`: both mechanisms when desired.
 
@@ -607,19 +629,32 @@ TCP authentication modes are:
 `token` mode provides a homelab-friendly, one-bundle setup without requiring the
 user to operate a PKI.
 
-The server generates and manages its TLS identity. Creating a token emits a
-one-time pairing bundle containing:
+Server verification is independent of client authorization. Support normal
+CA-chain and hostname verification using system roots or an explicitly configured
+private CA, as well as optional public-key pinning for self-managed identities.
+Never skip verification or silently fall back between trust modes. A public CA
+server certificate does not supply mTLS client identities.
+
+The server may generate its identity or load externally managed certificate and
+key files, including certificates renewed by Let's Encrypt/ACME tooling. Reload
+the pair atomically after renewal; report failed reloads and retain the previous
+identity without bypassing expiry validation. Built-in ACME issuance is not
+required. Define trust and reload configuration in the TCP phase.
+
+Creating a token emits a one-time pairing bundle containing:
 
 - endpoint;
-- server public-key pin;
+- explicit server trust mode: CA source and expected server name, or public-key pin;
 - token identifier;
 - at least 256 bits of random token secret;
 - authorised scopes.
 
-The client imports the bundle before connecting. It verifies the pinned server
-public key during TLS setup before sending the token as gRPC call credentials.
-Pinning the public key rather than the complete certificate allows certificate
-renewal while retaining the same identity key.
+The client imports the bundle before connecting. It verifies the server using
+the selected trust mode before sending the token as gRPC call credentials.
+CA verification allows certificate and private-key renewal without re-pairing
+while the expected name and trusted chain remain valid. Optional public-key
+pinning allows renewal with the same key, but changing that key requires an
+explicit trust update or re-pairing.
 
 Issue one token per client by default so clients can have separate scopes and be
 revoked independently. A shared token remains possible. Suggested scopes are
@@ -627,8 +662,9 @@ revoked independently. A shared token remains possible. Suggested scopes are
 
 The server stores only token identifiers, verifiers, scopes, and optional expiry
 metadata. Tokens are never placed in URLs or logs. Multiple valid tokens permit
-rotation. Loss or rotation of the server identity key requires affected clients
-to pair again.
+rotation. Loss or rotation of a pinned server identity key requires affected
+clients to update their trust or pair again; CA-verified clients are not tied to
+that individual key.
 
 ## 10. Configuration and filesystem layout
 
@@ -644,7 +680,8 @@ order. Tables merge recursively and later scalar values override earlier
 values. Actual TOML arrays replace earlier arrays.
 
 Extensible collections use keyed tables rather than arrays, allowing individual
-drop-ins to add entries naturally:
+drop-ins to add entries naturally. No remote is supplied by default; this is a
+placeholder example requiring user-selected connection and destination details:
 
 ```toml
 [remotes.home]
@@ -888,8 +925,9 @@ The following remain deliberate checkpoints rather than implicit assumptions:
 - decide whether remote status/control ships in the first release or follows
   local gRPC control;
 - define safe, explicit reseed and interrupted-receive abandonment workflows;
-- verify receive-side exclusion and complete clearing of local and received
-  `org.boomerangz:*` property layers across supported OpenZFS releases;
+- verify receive-side exclusion and inheritance/masking of local and received
+  `org.boomerangz:*` property layers across supported OpenZFS releases, documenting
+  hidden received values rather than requiring direct libzfs removal;
 - benchmark Go-mediated stream copying against direct OS pipes and SSH;
 - determine the exact delegated permission sets for source and destination
   roots, including permissions needed by configured native `set_prop` values;
