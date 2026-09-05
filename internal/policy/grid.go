@@ -27,7 +27,21 @@ type Grid struct {
 	horizon time.Duration
 }
 
-var bucketPattern = regexp.MustCompile(`^([0-9]+)x([0-9]+)([mhdw])$`)
+var bucketPattern = regexp.MustCompile(`^([0-9]+)x([0-9]+)(mo|[mhdwy])$`)
+
+// Grid units are fixed elapsed durations, never calendar arithmetic. The same
+// ordered table defines parsing and canonical formatting.
+var gridUnits = []struct {
+	name string
+	span time.Duration
+}{
+	{"y", 365 * 24 * time.Hour},
+	{"mo", 30 * 24 * time.Hour},
+	{"w", 7 * 24 * time.Hour},
+	{"d", 24 * time.Hour},
+	{"h", time.Hour},
+	{"m", time.Minute},
+}
 
 // ParseGrid validates and sorts tiers by duration, merging equal durations,
 // without expanding individual windows. Written order does not affect retention.
@@ -44,7 +58,13 @@ func ParseGrid(value string) (Grid, error) {
 			return Grid{}, fmt.Errorf("invalid grid count %q", match[1])
 		}
 		amount, err := strconv.ParseInt(match[2], 10, 64)
-		unit := map[string]time.Duration{"m": time.Minute, "h": time.Hour, "d": 24 * time.Hour, "w": 7 * 24 * time.Hour}[match[3]]
+		var unit time.Duration
+		for _, candidate := range gridUnits {
+			if candidate.name == match[3] {
+				unit = candidate.span
+				break
+			}
+		}
 		if err != nil || amount <= 0 || amount > math.MaxInt64/int64(unit) {
 			return Grid{}, fmt.Errorf("invalid grid duration %q", match[2]+match[3])
 		}
@@ -66,10 +86,7 @@ func ParseGrid(value string) (Grid, error) {
 	}
 	grid.buckets = merged
 	for _, bucket := range grid.buckets {
-		for _, unit := range []struct {
-			name string
-			span time.Duration
-		}{{"w", 7 * 24 * time.Hour}, {"d", 24 * time.Hour}, {"h", time.Hour}, {"m", time.Minute}} {
+		for _, unit := range gridUnits {
 			if bucket.Span%unit.span == 0 {
 				canonical = append(canonical, fmt.Sprintf("%dx%d%s", bucket.Count, bucket.Span/unit.span, unit.name))
 				break

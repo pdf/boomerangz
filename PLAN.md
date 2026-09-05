@@ -241,7 +241,7 @@ The policy syntax follows the central idea of zrepl's grid policy:
 policy   = bucket ("," bucket)*
 bucket   = count "x" duration
 count    = positive integer
-duration = positive duration using m, h, d, or w
+duration = positive integer followed by m, h, d, w, mo, or y
 ```
 
 For example:
@@ -254,6 +254,13 @@ The smallest duration determines snapshot cadence, so the default creates a
 snapshot every five minutes. The grid then retains approximately twelve
 five-minute snapshots, twenty-four hourly representatives, and fourteen daily
 representatives.
+
+Units are fixed elapsed durations: minute (`m`, 60 seconds), hour (`h`, 60
+minutes), day (`d`, 24 hours), week (`w`, 7 days), month (`mo`, 30 days), and year
+(`y`, 365 days). They do not use calendar arithmetic, varying month lengths,
+leap-year adjustments, or daylight-saving transitions. Twelve months are 360
+days, not one year. Seconds are not currently accepted. Canonical output uses
+the largest exactly dividing unit.
 
 Policy rules are:
 

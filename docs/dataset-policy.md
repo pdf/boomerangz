@@ -22,12 +22,29 @@ grids, and reserved receive-property targets invalidate the affected policy.
 Generic `set_prop:*` and `ignore_prop:*` directives cannot target any
 `org.boomerangz:*` property, including internal state.
 
-Grids use positive integer counts and durations with `m`, `h`, `d`, or `w`:
+Grids use positive integer counts and durations with the units below:
 `12x5m,24x1h,14x1d`. Written order does not matter: the parser sorts tiers by
 duration and combines equal durations by adding counts. Thus
 `14x1d,12x5m,24x1h` has identical behavior, and `1x1h,2x60m` becomes `3x1h`.
 Parsing validates the complete retention interval against overflow without
 allocating each window. The smallest duration supplies cadence.
+
+| Duration type | Short value | Fixed elapsed duration |
+| --- | --- | --- |
+| Minute | `m` | 60 seconds |
+| Hour | `h` | 60 minutes |
+| Day | `d` | 24 hours |
+| Week | `w` | 7 days |
+| Month | `mo` | 30 days |
+| Year | `y` | 365 days |
+
+These are elapsed-time intervals, not calendar boundaries. Months do not vary
+with month length, and years do not adjust for leap years. Consequently `12mo`
+is 360 days, not `1y`. Daylight-saving changes do not change interval lengths.
+For example, `12x1mo,5x1y` gives twelve 30-day windows followed by five 365-day
+windows. Unit suffixes are case-sensitive; seconds (`s`) are not supported yet.
+Normalized output uses the largest unit that divides a duration exactly, so
+`1x30d` becomes `1x1mo` and `1x365d` becomes `1x1y`.
 
 Retention windows run from finer to coarser resolution, adjacent rather than
 overlapping, anchored at the youngest owned snapshot. Each window keeps its
@@ -45,7 +62,7 @@ transfer behavior; automatic transfers are not available in the current release.
 | `enabled` | `off` | `on`, `off` | Opts a dataset into automatic management; local `off` masks inherited activation. Disabling preserves snapshots and recovery metadata, rather than cleaning them up. |
 | `remote` | Unset | Comma-separated remote names | Selects destinations defined in global `[remotes.NAME]` tables. No remote is supplied automatically. |
 | `local` | Unset | Comma-separated dataset names | Selects receive destinations on this host. |
-| `policy` | `12x5m,24x1h,14x1d` | Grid of positive counts and durations (`m`, `h`, `d`, `w`) | Determines snapshot cadence and retention windows, as described above. |
+| `policy` | `12x5m,24x1h,14x1d` | Grid of positive counts and durations (`m`, `h`, `d`, `w`, `mo`, `y`) | Determines snapshot cadence and retention windows, as described above. |
 | `large_blocks` | `on` | `on`, `off` | Requests send `-L`, preserving large blocks instead of splitting them, subject to receiver feature support. |
 | `compressed` | `on` | `on`, `off` | Requests send `-c`, transferring compressed blocks to reduce stream size. |
 | `raw` | `on` for encrypted scopes; `off` otherwise | `on`, `off` | Requests send `-w`; encrypted data remains encrypted in transit without decrypting it for the send. Unspecified values adapt to encrypted replication descendants; explicit `off` is never silently overridden. Plaintext raw sends imply large-block, embedded-data and compressed-data behavior. |

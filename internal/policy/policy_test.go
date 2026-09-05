@@ -36,6 +36,33 @@ func TestGrid(t *testing.T) {
 	}
 }
 
+func TestFixedMonthAndYearGrids(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		input, canonical string
+		cadence, horizon time.Duration
+	}{
+		{"1x1mo", "1x1mo", 30 * 24 * time.Hour, 30 * 24 * time.Hour},
+		{"1x1y", "1x1y", 365 * 24 * time.Hour, 365 * 24 * time.Hour},
+		{"2x365d,1x30d,2x1mo", "3x1mo,2x1y", 30 * 24 * time.Hour, (90 + 730) * 24 * time.Hour},
+		{"1x1y,1x12mo", "1x12mo,1x1y", 360 * 24 * time.Hour, 725 * 24 * time.Hour},
+	} {
+		grid, err := ParseGrid(tc.input)
+		if err != nil || grid.String() != tc.canonical || grid.Cadence() != tc.cadence || grid.Horizon() != tc.horizon {
+			t.Fatalf("%s: grid=%v err=%v", tc.input, grid, err)
+		}
+		roundtrip, err := ParseGrid(grid.String())
+		if err != nil || !reflect.DeepEqual(grid, roundtrip) {
+			t.Fatal("unstable month/year normalization")
+		}
+	}
+	for _, invalid := range []string{"1x1M", "1x1month", "1x1year", "1x0mo", "0x1y", "1x1.5mo", "1x293y", "1000000x1mo", "1x292y,1x12mo"} {
+		if _, err := ParseGrid(invalid); err == nil {
+			t.Fatalf("accepted %q", invalid)
+		}
+	}
+}
+
 func property(dataset, name, value string, source zfs.PropertySource) zfs.Property {
 	return zfs.Property{Dataset: dataset, Name: Namespace + name, Value: value, Source: source}
 }
@@ -185,7 +212,7 @@ func FuzzResolve(f *testing.F) {
 }
 
 func FuzzGrid(f *testing.F) {
-	for _, seed := range []string{DefaultGrid, "", "1x1w", "999999999999x1h"} {
+	for _, seed := range []string{DefaultGrid, "", "1x1w", "999999999999x1h", "12x1mo,5x1y", "1x1y,2x30d,1x1mo"} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, value string) {

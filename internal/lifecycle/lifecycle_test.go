@@ -138,6 +138,31 @@ func TestSnapshotCadence(t *testing.T) {
 	}
 }
 
+func TestPruneFixedMonthYearBoundaries(t *testing.T) {
+	t.Parallel()
+	grid, err := policy.ParseGrid("1x1y,1x1mo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2028, 3, 31, 12, 0, 0, 0, time.UTC)
+	ages := []int{0, 29, 30, 394, 395}
+	snapshots := make([]Snapshot, len(ages))
+	want := map[string]bool{}
+	for i, days := range ages {
+		snapshots[i] = owned(t, now.Add(-time.Duration(days)*24*time.Hour))
+		want[snapshots[i].Name] = days == 0 || days == 30 || days == 395
+	}
+	decisions, err := PlanPrune("tank/data", testLineage, grid, snapshots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decision := range decisions {
+		if decision.Destroy != want[decision.Snapshot] {
+			t.Fatalf("incorrect fixed-duration boundary: %v", decision)
+		}
+	}
+}
+
 func FuzzOwnership(f *testing.F) {
 	f.Add("tank/data@boomerangz-fake", testLineage, "2026-09-05T12:00:00Z")
 	f.Fuzz(func(t *testing.T, name, id, created string) {
