@@ -2,9 +2,8 @@
 
 This describes every currently accepted global configuration field. Dataset
 policy belongs in [ZFS user properties](dataset-policy.md), not this file.
-Configuration loading and validation are implemented; worker scheduling, SSH
-transfers, and listener operation are planned for their respective later phases.
-Accepting a field does not mean its runtime feature is available yet.
+Configuration loading and validation are available. Automatic scheduling,
+transfers, and control listeners are not yet available.
 
 The primary file is `/etc/boomerangz/config.toml`. Files ending in `.toml` from
 `/etc/boomerangz/config.d` are applied afterward in bytewise filename order.
@@ -14,8 +13,9 @@ replace earlier arrays. Unknown fields are errors.
 ```toml
 [daemon]
 reconcile_interval = "1m"
-management_workers = 4
-transfer_workers = 2
+management_workers = 0
+local_transfer_workers = 2
+remote_transfer_workers = 1
 
 [paths]
 credentials_dir = "/etc/boomerangz/credentials.d"
@@ -33,8 +33,14 @@ useful host, account, or destination dataset.
 | Field | Default | Purpose and constraints |
 | --- | --- | --- |
 | `reconcile_interval` | `"1m"` | Interval between global dataset discovery/reconciliation passes; not the snapshot cadence, which comes from each dataset's grid. Positive Go duration. |
-| `management_workers` | `4` | Maximum concurrent short management tasks, such as property and snapshot operations. At least one. |
-| `transfer_workers` | `2` | Maximum concurrent long-running transfers, separate from management work so streams do not monopolize it. At least two. |
+| `management_workers` | `0` | Concurrent short ZFS management tasks. `0` automatically uses the logical CPU count available to the process; positive integers select an explicit limit. Negative values are invalid. |
+| `local_transfer_workers` | `2` | Maximum concurrent same-host transfers, independently limiting local storage load. Integer of at least one. |
+| `remote_transfer_workers` | `1` | Maximum concurrent network transfers across all remotes, independently limiting network load. Integer of at least one. |
+
+`local_transfer_workers` and `remote_transfer_workers` replace `transfer_workers`;
+the old field is no longer accepted. Setting both to `1` allows one local and one
+remote transfer concurrently, not a single global transfer. Concurrency is not a
+bandwidth-rate limit.
 
 ## Paths
 
@@ -62,7 +68,7 @@ accepted transport type; there is no default remote.
 | `user` | Empty | SSH login account; empty leaves account selection to SSH. |
 | `root` | Required | Destination ZFS dataset used as the receive path base, not a filesystem path. Final mapping also depends on `org.boomerangz:discard`. |
 | `identity_file` | Empty | Dedicated SSH private-key file; empty leaves identity selection to SSH. This field contains a path, not key contents. |
-| `connect_timeout` | `"0s"` | Limits connection establishment, not total transfer duration. Nonnegative Go duration; zero selects the application default, whose runtime value will be defined in the SSH phase. |
+| `connect_timeout` | `"0s"` | Limits connection establishment, not total transfer duration. Nonnegative Go duration; zero selects the application default, whose runtime value is not yet defined because SSH transfers are unavailable. |
 
 Illustrative only—replace these details with your own before use:
 
@@ -93,10 +99,9 @@ the same syntax as remote names. TCP is opt-in and never unauthenticated.
 | `tls_cert` | Empty | Server certificate-chain file, required for TCP. May be externally managed, including ACME-issued certificates. |
 | `tls_key` | Empty | Matching server private-key file, required for TCP; protect access to this file. |
 
-Planned TCP server verification supports normal CA-chain and hostname validation
-or explicit public-key pinning. Pinning is optional, not required for rotating
-CA-issued certificates. Trust configuration and certificate reload details will
-be finalized in the TCP phase; these are not additional accepted TOML fields yet.
+TCP trust and certificate-renewal design details are maintained in the
+[development plan](../PLAN.md#91-listener-security). No additional trust-related
+TOML fields are accepted yet.
 
 The `config show` command redacts private-key fields. Secret token material will
 be stored in credential bundles rather than this configuration.

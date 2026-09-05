@@ -16,11 +16,14 @@ func (c Config) Validate() error {
 	if c.Daemon.ReconcileInterval.Duration <= 0 {
 		problems = append(problems, errors.New("daemon.reconcile_interval must be positive"))
 	}
-	if c.Daemon.ManagementWorkers < 1 {
-		problems = append(problems, errors.New("daemon.management_workers must be at least 1"))
+	if c.Daemon.ManagementWorkers < 0 {
+		problems = append(problems, errors.New("daemon.management_workers must be nonnegative (0 selects automatic sizing)"))
 	}
-	if c.Daemon.TransferWorkers < 2 {
-		problems = append(problems, errors.New("daemon.transfer_workers must be at least 2"))
+	if c.Daemon.LocalTransferWorkers < 1 {
+		problems = append(problems, errors.New("daemon.local_transfer_workers must be at least 1"))
+	}
+	if c.Daemon.RemoteTransferWorkers < 1 {
+		problems = append(problems, errors.New("daemon.remote_transfer_workers must be at least 1"))
 	}
 	for field, value := range map[string]string{
 		"paths.credentials_dir": c.Paths.CredentialsDir,

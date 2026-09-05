@@ -1,16 +1,20 @@
 // Package config loads, merges, validates, and safely renders global config.
 package config
 
-import "time"
+import (
+	"runtime"
+	"time"
+)
 
 // Default global daemon settings and filesystem paths.
 const (
-	DefaultReconcileInterval = time.Minute
-	DefaultManagementWorkers = 4
-	DefaultTransferWorkers   = 2
-	DefaultCredentialsDir    = "/etc/boomerangz/credentials.d"
-	DefaultIdentityDir       = "/var/lib/boomerangz/identity"
-	DefaultSocketPath        = "/run/boomerangz/boomerangz.sock"
+	DefaultReconcileInterval     = time.Minute
+	DefaultManagementWorkers     = 0
+	DefaultLocalTransferWorkers  = 2
+	DefaultRemoteTransferWorkers = 1
+	DefaultCredentialsDir        = "/etc/boomerangz/credentials.d"
+	DefaultIdentityDir           = "/var/lib/boomerangz/identity"
+	DefaultSocketPath            = "/run/boomerangz/boomerangz.sock"
 )
 
 // Config is the complete global configuration.
@@ -23,9 +27,19 @@ type Config struct {
 
 // DaemonConfig controls reconciliation and worker concurrency.
 type DaemonConfig struct {
-	ReconcileInterval Duration `toml:"reconcile_interval" json:"reconcile_interval"`
-	ManagementWorkers int      `toml:"management_workers" json:"management_workers"`
-	TransferWorkers   int      `toml:"transfer_workers" json:"transfer_workers"`
+	ReconcileInterval     Duration `toml:"reconcile_interval" json:"reconcile_interval"`
+	ManagementWorkers     int      `toml:"management_workers" json:"management_workers"`
+	LocalTransferWorkers  int      `toml:"local_transfer_workers" json:"local_transfer_workers"`
+	RemoteTransferWorkers int      `toml:"remote_transfer_workers" json:"remote_transfer_workers"`
+}
+
+// EffectiveManagementWorkers resolves auto mode to the logical CPUs available
+// to this process. The configured value remains zero in config show.
+func (d DaemonConfig) EffectiveManagementWorkers() int {
+	if d.ManagementWorkers == 0 {
+		return runtime.NumCPU()
+	}
+	return d.ManagementWorkers
 }
 
 // PathsConfig contains persistent and runtime filesystem locations.
@@ -59,9 +73,10 @@ type ListenerConfig struct {
 func Defaults() Config {
 	return Config{
 		Daemon: DaemonConfig{
-			ReconcileInterval: Duration{DefaultReconcileInterval},
-			ManagementWorkers: DefaultManagementWorkers,
-			TransferWorkers:   DefaultTransferWorkers,
+			ReconcileInterval:     Duration{DefaultReconcileInterval},
+			ManagementWorkers:     DefaultManagementWorkers,
+			LocalTransferWorkers:  DefaultLocalTransferWorkers,
+			RemoteTransferWorkers: DefaultRemoteTransferWorkers,
 		},
 		Paths: PathsConfig{
 			CredentialsDir: DefaultCredentialsDir,

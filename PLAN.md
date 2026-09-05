@@ -518,7 +518,8 @@ and shuts down gracefully on `SIGTERM`. All ZFS execution goes through an
 interface that supports direct delegated execution and, if Linux integration
 testing proves it necessary, a privileged-helper backend.
 
-There are two independent bounded worker pools.
+There are three independent bounded worker pools: management, local transfers,
+and remote transfers.
 
 ### 7.1 Management workers
 
@@ -533,6 +534,8 @@ Management workers perform:
 
 They use per-dataset keyed locks and a bounded, deduplicating task queue. Global
 discovery itself remains owned by the single discovery coordinator.
+`management_workers=0` (the default) resolves to the logical CPU count available
+to the process. Positive values set an explicit bound; negative values are invalid.
 
 ### 7.2 Transfer workers
 
@@ -544,9 +547,12 @@ Transfer workers perform:
 - cancellation and cleanup;
 - resume streams.
 
-They use a separately configurable bound, per-destination serialization, and
-fair scheduling across source datasets. The default count must be at least two
-so multiple targets can transfer concurrently.
+Same-host transfers use `local_transfer_workers` (default 2); network transfers
+use `remote_transfer_workers` (default 1 across all remotes). Each accepts any
+positive integer, including 1. Both classes retain per-destination serialization
+and fair scheduling across source datasets. They do not borrow each other's
+capacity. Setting both to 1 permits one local and one remote stream concurrently;
+these limits are not bandwidth-rate controls. They replace `transfer_workers`.
 
 Jobs waiting for capacity remain visible, with distinct states for management
 and transfer pressure:

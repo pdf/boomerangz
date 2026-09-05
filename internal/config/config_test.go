@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -41,8 +42,8 @@ user = "replicator"
 	if loaded.Config.Daemon.ManagementWorkers != 6 {
 		t.Fatalf("management workers = %d, want 6", loaded.Config.Daemon.ManagementWorkers)
 	}
-	if loaded.Config.Daemon.TransferWorkers != DefaultTransferWorkers {
-		t.Fatalf("transfer workers = %d, want default %d", loaded.Config.Daemon.TransferWorkers, DefaultTransferWorkers)
+	if loaded.Config.Daemon.LocalTransferWorkers != DefaultLocalTransferWorkers {
+		t.Fatalf("transfer workers = %d, want default %d", loaded.Config.Daemon.LocalTransferWorkers, DefaultLocalTransferWorkers)
 	}
 	if loaded.Config.Remotes["home"].Host != "backup.example.net" || loaded.Config.Remotes["home"].User != "replicator" {
 		t.Fatalf("remote was not recursively merged: %#v", loaded.Config.Remotes["home"])
@@ -71,6 +72,58 @@ func TestDefaultsValidate(t *testing.T) {
 	}
 	if config.Daemon.ReconcileInterval.Duration != time.Minute {
 		t.Fatalf("interval = %s, want 1m", config.Daemon.ReconcileInterval)
+	}
+}
+
+func TestWorkerSizing(t *testing.T) {
+	t.Parallel()
+	cfg := Defaults()
+	if cfg.Daemon.ManagementWorkers != 0 || cfg.Daemon.EffectiveManagementWorkers() != runtime.NumCPU() {
+		t.Fatal("incorrect automatic management sizing")
+	}
+	if cfg.Daemon.LocalTransferWorkers != 2 || cfg.Daemon.RemoteTransferWorkers != 1 {
+		t.Fatal("incorrect transfer defaults")
+	}
+	cfg.Daemon.ManagementWorkers = 3
+	cfg.Daemon.LocalTransferWorkers = 1
+	cfg.Daemon.RemoteTransferWorkers = 1
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Daemon.EffectiveManagementWorkers() != 3 {
+		t.Fatal("explicit worker limit ignored")
+	}
+	for _, field := range []string{"management", "local", "remote"} {
+		invalid := cfg
+		switch field {
+		case "management":
+			invalid.Daemon.ManagementWorkers = -1
+		case "local":
+			invalid.Daemon.LocalTransferWorkers = 0
+		case "remote":
+			invalid.Daemon.RemoteTransferWorkers = 0
+		}
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("accepted invalid %s limit", field)
+		}
+	}
+}
+
+func TestWorkerSchemaMigration(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	writeTestFile(t, path, "[daemon]\nmanagement_workers=0\nlocal_transfer_workers=1\nremote_transfer_workers=1\n")
+	loaded, err := Load(path, filepath.Join(dir, "missing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Config.Daemon.LocalTransferWorkers != 1 || loaded.Config.Daemon.RemoteTransferWorkers != 1 {
+		t.Fatal("transfer limits not loaded")
+	}
+	writeTestFile(t, path, "[daemon]\ntransfer_workers=1\n")
+	if _, err := Load(path, filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("accepted removed transfer_workers field")
 	}
 }
 
