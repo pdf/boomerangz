@@ -166,6 +166,22 @@ func (d *Direct) GetActivationProperties(ctx context.Context) ([]Property, error
 	return parseProperties(output)
 }
 
+// GetLifecycleProperties retrieves only the root authority and inactive marker
+// keys needed to reconstruct daemon responsibility after a restart. It remains
+// a sparse global query and does not enumerate arbitrary user properties.
+func (d *Direct) GetLifecycleProperties(ctx context.Context) ([]Property, error) {
+	keys := strings.Join([]string{
+		propertyNamespace + "state:owner",
+		propertyNamespace + "state:lineage",
+		propertyNamespace + "state:inactive",
+	}, ",")
+	output, err := d.runner.Run(ctx, "get", "-H", "-p", "-s", "local,received", "-t", "filesystem,volume", "-o", "name,property,value,source", keys)
+	if err != nil {
+		return nil, err
+	}
+	return parseProperties(output)
+}
+
 // GetStoredProperties retrieves local and received boomerangz properties.
 func (d *Direct) GetStoredProperties(ctx context.Context, datasets []string) ([]Property, error) {
 	if len(datasets) == 0 {

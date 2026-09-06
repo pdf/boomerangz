@@ -4,9 +4,17 @@
 continuously connected and intermittently connected systems.
 
 The current implementation provides configuration loading, sparse discovery,
-local policy inheritance, normalized retention grids, snapshot lifecycle services,
-and preview-first adoption and clean commands. It does not yet automatically
-schedule snapshots or run transfers.
+local policy inheritance, normalized retention grids, automatic snapshot and
+replication workers, and preview-first adoption and clean commands.
+
+Run the manager in the foreground:
+
+```sh
+boomerangz daemon
+```
+
+The supplied systemd integration runs the same command as a dedicated service
+account. See [docs/daemon.md](docs/daemon.md) before enabling it.
 
 On a ZFS system (use the disposable guest for development), inspect datasets:
 

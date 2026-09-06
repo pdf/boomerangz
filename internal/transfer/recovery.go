@@ -136,7 +136,7 @@ type RecoveryOutcome struct {
 }
 
 // Roadwarrior reconstructs resume work on demand and coalesces newly due work.
-// Scheduling and worker ownership remain outside this Phase 5 component.
+// Scheduling and worker ownership remain outside this recovery component.
 type Roadwarrior struct {
 	engine  transferApplier
 	request Request

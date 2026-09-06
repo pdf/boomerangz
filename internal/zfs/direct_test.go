@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -126,6 +127,22 @@ func TestGetStoredPropertiesFiltersNamespace(t *testing.T) {
 	want := []Property{{Dataset: "tank/data", Name: "org.boomerangz:enabled", Value: "on", Source: SourceLocal}}
 	if !reflect.DeepEqual(properties, want) {
 		t.Fatalf("properties = %#v, want %#v", properties, want)
+	}
+}
+
+func TestGetLifecyclePropertiesUsesOnlyAuthorityKeys(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{output: []byte("tank/data\torg.boomerangz:state:owner\t11111111-1111-4111-8111-111111111111\tlocal\n")}
+	direct, err := NewDirectWithRunners(runner, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	properties, err := direct.GetLifecycleProperties(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(properties) != 1 || !strings.Contains(strings.Join(runner.args, " "), "state:owner,org.boomerangz:state:lineage,org.boomerangz:state:inactive") {
+		t.Fatalf("unexpected lifecycle query: %#v %#v", properties, runner.args)
 	}
 }
 

@@ -22,6 +22,15 @@ type fakeReader struct {
 	changeActivation bool
 }
 
+type lifecycleFakeReader struct {
+	*fakeReader
+	lifecycle []zfs.Property
+}
+
+func (f *lifecycleFakeReader) GetLifecycleProperties(context.Context) ([]zfs.Property, error) {
+	return slices.Clone(f.lifecycle), nil
+}
+
 func (f *fakeReader) ListDatasets(context.Context) ([]zfs.Dataset, error) {
 	return slices.Clone(f.datasets), nil
 }
@@ -164,6 +173,34 @@ func TestInactiveInspectionAndDeactivation(t *testing.T) {
 	}
 	if _, err := s.Scan(t.Context(), []string{"missing"}); err == nil {
 		t.Fatal("accepted absent retained dataset")
+	}
+}
+
+func TestSparseLifecycleRootsAreReconstructedAfterRestart(t *testing.T) {
+	t.Parallel()
+	base := fixture()
+	reader := &lifecycleFakeReader{fakeReader: base, lifecycle: []zfs.Property{
+		{Dataset: "tank/other", Name: policy.StateNamespace + "owner", Value: "11111111-1111-4111-8111-111111111111", Source: zfs.SourceLocal},
+		{Dataset: "tank/other", Name: policy.StateNamespace + "lineage", Value: "22222222-2222-4222-8222-222222222222", Source: zfs.SourceLocal},
+		{Dataset: "tank/other", Name: policy.StateNamespace + "inactive", Value: "marker", Source: zfs.SourceLocal},
+	}}
+	reader.properties = append(reader.properties, reader.lifecycle...)
+	scanner, err := New(reader, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := scanner.Scan(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, exists := generation.Inspect("tank/other")
+	if !exists || !entry.Inspected {
+		t.Fatal("inactive lifecycle root was not inspected")
+	}
+	for _, property := range reader.lifecycle {
+		if !slices.Contains(entry.Stored, property) {
+			t.Fatalf("lifecycle property missing: %#v", property)
+		}
 	}
 }
 

@@ -2,8 +2,8 @@
 
 This describes every currently accepted global configuration field. Dataset
 policy belongs in [ZFS user properties](dataset-policy.md), not this file.
-Configuration loading and validation are available. Automatic scheduling,
-transfers, and control listeners are not yet available.
+The daemon uses these settings for automatic scheduling and transfers. Control
+listeners are not yet available.
 
 The primary file is `/etc/boomerangz/config.toml`. Files ending in `.toml` from
 `/etc/boomerangz/config.d` are applied afterward in bytewise filename order.
@@ -34,7 +34,7 @@ useful host, account, or destination dataset.
 | Field | Default | Purpose and constraints |
 | --- | --- | --- |
 | `reconcile_interval` | `"1m"` | Interval between global dataset discovery/reconciliation passes; not the snapshot cadence, which comes from each dataset's grid. Positive Go duration. |
-| `inactive_grace_period` | `"24h"` | Time an owned dataset remains safely recoverable after becoming inactive before it is eligible for automatic retirement. Zero disables automatic retirement; negative durations are invalid. Scheduled execution begins with the daemon phase. |
+| `inactive_grace_period` | `"24h"` | Time an owned dataset remains safely recoverable after becoming inactive before it is eligible for automatic retirement. Zero disables automatic retirement; negative durations are invalid. |
 | `management_workers` | `0` | Concurrent short ZFS management tasks. `0` automatically uses the logical CPU count available to the process; positive integers select an explicit limit. Negative values are invalid. |
 | `local_transfer_workers` | `2` | Maximum concurrent same-host transfers, independently limiting local storage load. Integer of at least one. |
 | `remote_transfer_workers` | `1` | Maximum concurrent network transfers across all remotes, independently limiting network load. Integer of at least one. |

@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/daemon"
 	"github.com/pdf/boomerangz/internal/discovery"
+	"github.com/pdf/boomerangz/internal/identity"
 	remoterpc "github.com/pdf/boomerangz/internal/replication/rpc"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
@@ -43,7 +46,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, build Bui
 	return runWithReader(ctx, args, stdout, stderr, build, nil)
 }
 
-func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, build BuildInfo, reader discovery.Reader) error {
+func runWithReader(ctx context.Context, args []string, stdout, stderr io.Writer, build BuildInfo, reader discovery.Reader) error {
 	app := kingpin.New("boomerangz", "Property-driven ZFS snapshot and replication manager.")
 	app.HelpFlag.Short('h')
 	app.UsageWriter(stdout)
@@ -59,6 +62,9 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 
 	versionCmd := app.Command("version", "Show version information.")
 	versionJSON := versionCmd.Flag("json", "Emit JSON.").Bool()
+	daemonCmd := app.Command("daemon", "Run snapshot and replication management in the foreground.")
+	daemonPath := daemonCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
+	daemonDropIns := daemonCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
 	sshShellCmd := app.Command("ssh-shell", "Serve the restricted replication protocol over an SSH command channel.").Hidden()
 	sshShellRoot := sshShellCmd.Flag("root", "Allowed destination ZFS root.").Required().String()
 
@@ -91,6 +97,36 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 	}
 
 	switch command {
+	case daemonCmd.FullCommand():
+		loaded, err := config.Load(*daemonPath, *daemonDropIns)
+		if err != nil {
+			return err
+		}
+		lock, err := lifecycleLock(loaded.Config)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = lock.Close() }()
+		installation, err := identity.LoadOrCreate(loaded.Config.Paths.IdentityDir)
+		if err != nil {
+			return err
+		}
+		var source daemonBackend
+		if reader != nil {
+			source, _ = reader.(daemonBackend)
+		}
+		if source == nil {
+			source, err = zfs.NewDirect("zfs")
+			if err != nil {
+				return err
+			}
+		}
+		logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		runtime, err := daemon.New(loaded.Config, source, installation, logger)
+		if err != nil {
+			return err
+		}
+		return runtime.Run(ctx)
 	case sshShellCmd.FullCommand():
 		executor, err := zfs.NewDirect("zfs")
 		if err != nil {

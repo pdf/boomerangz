@@ -17,7 +17,7 @@ const (
 	Transfer
 )
 
-// Gate is the lifecycle boundary for a future scheduler's queues. A disabled
+// Gate is the lifecycle boundary for the daemon scheduler's queues. A disabled
 // scope rejects new tickets and cancels queued tickets and running transfers.
 // Running management tickets remain registered until their caller finishes.
 // It stores no recovery data: holds, bookmarks and tokens remain untouched.

@@ -1,0 +1,79 @@
+package daemon
+
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestPoolsHaveIndependentCapacityAndDeduplicateRunningJobs(t *testing.T) {
+	t.Parallel()
+	first, _ := NewPool("management", 1, 1, nil)
+	second, _ := NewPool("transfer", 1, 1, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	_ = first.Start(ctx)
+	_ = second.Start(ctx)
+	blocked := make(chan struct{})
+	started := make(chan struct{}, 2)
+	job := func(id string) Job {
+		return Job{ID: id, Group: id, Scope: id, Run: func(context.Context) Outcome {
+			started <- struct{}{}
+			<-blocked
+			return Outcome{}
+		}}
+	}
+	if added, err := first.Submit(job("same")); err != nil || !added {
+		t.Fatal(err)
+	}
+	if added, err := second.Submit(job("same")); err != nil || !added {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("independent pool did not start")
+		}
+	}
+	if added, err := first.Submit(job("same")); err != nil || added {
+		t.Fatalf("running duplicate accepted: %v %v", added, err)
+	}
+	close(blocked)
+	first.Close()
+	second.Close()
+	first.Wait()
+	second.Wait()
+}
+
+func TestPoolSerializesLockKeyAcrossWorkers(t *testing.T) {
+	t.Parallel()
+	pool, _ := NewPool("transfer", 2, 4, nil)
+	_ = pool.Start(t.Context())
+	var active atomic.Int32
+	var overlap atomic.Bool
+	var wait sync.WaitGroup
+	wait.Add(2)
+	for _, id := range []string{"a", "b"} {
+		job := queueJob(id, id, id)
+		job.LockKey = "one-target"
+		job.Run = func(context.Context) Outcome {
+			if active.Add(1) != 1 {
+				overlap.Store(true)
+			}
+			time.Sleep(10 * time.Millisecond)
+			active.Add(-1)
+			wait.Done()
+			return Outcome{}
+		}
+		_, _ = pool.Submit(job)
+	}
+	wait.Wait()
+	pool.Close()
+	pool.Wait()
+	if overlap.Load() {
+		t.Fatal("same target overlapped")
+	}
+}

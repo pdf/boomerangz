@@ -4,6 +4,8 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/pdf/boomerangz/internal/cli"
 )
@@ -15,7 +17,9 @@ var (
 )
 
 func main() {
-	os.Exit(cli.Run(context.Background(), os.Args[1:], os.Stdout, os.Stderr, cli.BuildInfo{
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	os.Exit(cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr, cli.BuildInfo{
 		Version: version,
 		Commit:  commit,
 		Date:    date,

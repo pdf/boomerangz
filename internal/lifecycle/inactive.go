@@ -221,7 +221,7 @@ func (s *Service) ReconcileInactive(ctx context.Context, dataset string, active 
 }
 
 // Retire previews or applies the ownership-safe local retirement plan after an
-// inactive marker's grace period. Phase 6 supplies scheduling and target-side
+// inactive marker's grace period. The daemon supplies scheduling and target-side
 // retirement coordination through CleanSafety.
 func (s *Service) Retire(ctx context.Context, dataset string, recursive bool, observedAt time.Time, grace time.Duration, apply bool, safety CleanSafety) (RetirementPlan, error) {
 	s.mu.Lock()

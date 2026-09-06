@@ -34,25 +34,25 @@ snapshot across these commands: other concurrent property edits converge on
 the next successful scan. Concurrent scans are serialized, reconciliation
 hints coalesce, and the coordinator accepts a configurable periodic interval.
 Pending and resumable work is represented by the transfer recovery layer; the
-daemon phase will feed that state into discovery and scheduling.
+daemon feeds that state into discovery and scheduling.
 
 Generation comparison reports changed and removed datasets. Disabling a dataset
 is visible in the next generation. The [lifecycle service](../snapshot-lifecycle.md)
 provides cancellation/quiescence gates and preview/apply clean; wiring those
-gates to live workers and exposing reconstructed recovery status remain in the
-daemon phase. Namespace exclusion during actual receives belongs to the transfer
-phase.
+gates to live workers and reconstruction of sparse lifecycle state are provided
+by the daemon. Namespace exclusion during receives is enforced by the transfer
+engine.
 
 ## Lifecycle integration boundaries
 
-The lifecycle service and cancellation gate are implemented. The future daemon
-must wire activation transitions to the gate, hold the same lifecycle lock as
-standalone commands, and reconstruct recovery status. Queued cancelled tickets
-must be discarded; running management operations finish before quiescence.
-Transfer implementations must supply destination GUID verification and safe target
-probes before references can be released. The transfer engine now enforces that
-boundary for local and SSH targets; standalone clean still fails closed where
-live target coordination is unavailable.
+The daemon wires activation transitions to the lifecycle gate, holds the same
+lifecycle lock as standalone commands, and reconstructs sparse lifecycle state
+after restart. Queued cancelled tickets are discarded; running management
+operations finish before quiescence. The transfer engine supplies destination
+GUID verification and just-in-time target probes before references can be
+released for local and SSH targets. Standalone clean still fails closed where
+live target coordination is unavailable until the control API can coordinate
+with the daemon.
 
 ## Test-only properties and received layers
 

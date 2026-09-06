@@ -522,12 +522,11 @@ quiescent before cleaning. Unlike delayed retirement, explicit clean may clear
 the selected public configuration and remains the immediate operator-controlled
 path.
 
-The phase-3 standalone implementation fails closed if the configured control
-socket exists. Daemon coordination and target probing are integration hooks for
-their later phases; until available, the CLI reports unverified targets as
-blockers and retains their recovery references. Standalone applies share an
-exclusive `<socket_path>.lifecycle.lock`; the future daemon must hold that same
-lock before accepting work.
+The standalone implementation fails closed if the configured control socket
+exists. Until the control API can coordinate a live daemon, the CLI reports
+unverified targets as blockers and retains their recovery references.
+Standalone applies share an exclusive `<socket_path>.lifecycle.lock`; the
+daemon holds that same lock for its lifetime before accepting work.
 
 For each selected local dataset clean:
 
@@ -650,7 +649,7 @@ not tick. A new generation updates deadlines without forcing a global scan on
 each snapshot wakeup. Snapshot completion updates the affected deadline; missed
 snapshots coalesce rather than backfill. Future second-resolution policies must
 not force one-second discovery scans. Second units are not enabled by this design
-change. Scheduler and worker integration remain in phase 6.
+change. Scheduler and worker integration are provided by the daemon runtime.
 
 The current reconciliation loop uses a ticker and runs each scan and report
 callback synchronously. When a pass overruns the configured interval, a pending

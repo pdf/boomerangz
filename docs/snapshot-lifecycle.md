@@ -1,7 +1,7 @@
 # Snapshot lifecycle
 
-The administrative commands below are available now. Automatic scheduling,
-transfers, and live daemon status are not yet available.
+The administrative commands and automatic daemon lifecycle described below are
+available. Live daemon status is not yet available.
 
 ## Ownership and snapshots
 
@@ -75,9 +75,16 @@ contents are documented in [the property reference](dataset-policy.md).
 Disabling management must preserve snapshots, holds, bookmarks and resume tokens.
 The default `inactive_grace_period` keeps an owned dataset recoverable for 24
 hours before it becomes eligible for automatic retirement; setting the period
-to zero disables automatic retirement. The durable inactive marker and
-ownership-safe retirement preview are available now. Scheduled execution begins
-with daemon scheduling.
+to zero disables automatic retirement. The daemon records the durable inactive
+marker, waits until the deadline, and then applies ownership-safe retirement. An
+inaccessible target or unresolved receive state keeps retirement pending for a
+bounded retry rather than discarding recovery evidence.
+
+Snapshot deadlines are maintained independently of dataset discovery. A delayed
+wakeup creates one current snapshot rather than backfilling every missed interval.
+Local and SSH transfers have separate worker limits, and an unavailable remote
+retains only the newest pending snapshot for each source and target while
+preserving resumable ZFS state.
 
 ## Explicit clean
 
@@ -107,13 +114,13 @@ unavailable target verification, and exposing inherited `enabled=on` from outsid
 the selected scope. The clean operation is local; it never silently cleans
 another host.
 
-Standalone applies hold an exclusive `<paths.socket_path>.lifecycle.lock` for
-their duration. An existing control socket causes refusal: daemon coordination is
-not implemented yet. Adoption probes configured local and SSH targets just in
-time; an unreachable SSH target is recorded as suspended and must be verified
-before replication resumes. Clean cannot yet probe target recovery dependencies,
-so it retains those references and reports a blocker. Use the same configured
-socket path for all cooperating processes.
+The daemon holds `<paths.socket_path>.lifecycle.lock` for its lifetime, while a
+standalone apply holds it for the operation. A standalone apply therefore fails
+while the daemon is running. Adoption probes configured local and SSH targets
+just in time; an unreachable SSH target is recorded as suspended and must be
+verified before replication resumes. Standalone clean cannot probe target
+recovery dependencies, so it retains those references and reports a blocker.
+Use the same configured socket path for all cooperating processes.
 
 ZFS CLI operations do not provide atomic compare-and-swap against independent
 administrative commands. Avoid concurrent external ZFS changes during lifecycle

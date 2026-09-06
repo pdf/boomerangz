@@ -23,6 +23,13 @@ type Reader interface {
 	GetStoredProperties(context.Context, []string) ([]zfs.Property, error)
 }
 
+// LifecycleReader is implemented by readers that can sparsely expose durable
+// source-root authority. Keeping it optional preserves compatibility with
+// read-only remote endpoints and focused discovery test readers.
+type LifecycleReader interface {
+	GetLifecycleProperties(context.Context) ([]zfs.Property, error)
+}
+
 // Entry is a detached dataset inspection. Uninspected policies lack local
 // overrides other than activation; require Inspected before using other fields.
 type Entry struct {
@@ -188,6 +195,22 @@ func (s *Scanner) Scan(ctx context.Context, retained []string) (*Generation, err
 	stored := group(activation)
 	entries := resolve(names, inventory, stored, nil, s.remotes)
 	inspect := make(map[string]bool)
+	if lifecycleReader, ok := s.reader.(LifecycleReader); ok {
+		rows, lifecycleErr := lifecycleReader.GetLifecycleProperties(ctx)
+		if lifecycleErr != nil {
+			return nil, lifecycleErr
+		}
+		if lifecycleErr = validateRows(rows, inventory, nil, false); lifecycleErr != nil {
+			return nil, lifecycleErr
+		}
+		for _, row := range rows {
+			if row.Source == zfs.SourceLocal {
+				addAncestors(inspect, row.Dataset)
+			}
+			stored[row.Dataset] = append(stored[row.Dataset], row)
+		}
+		entries = resolve(names, inventory, stored, nil, s.remotes)
+	}
 	for _, name := range names {
 		entry := entries[name]
 		// Invalid activation must be inspectable, even though it cannot enable work.

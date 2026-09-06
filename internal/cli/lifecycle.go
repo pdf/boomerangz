@@ -24,7 +24,7 @@ import (
 )
 
 // Standalone commands fail closed around daemon coordination and target probes.
-// The daemon phase must hold the same lock for its lifetime before accepting work.
+// The daemon holds the same lock for its lifetime before accepting work.
 type standaloneSafety struct{ socket string }
 
 func (s standaloneSafety) Quiescent(ctx context.Context, _ []string) error {
