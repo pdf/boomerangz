@@ -112,12 +112,13 @@ owned-snapshot destruction preserving a foreign snapshot. Checkpoint tests used
 a synthetic target and explicitly supplied source GUID; they do not claim real
 destination verification, which belongs to the transfer phase.
 
-The 2026-09-06 phase-4 authority run used the same kernel and ZFS versions in
-the transient `run-transfer-auth-260906` guest. The 52.13-second local transfer
+The final 2026-09-06 phase-4 authority run used the same kernel and ZFS versions
+in the transient `run-transfer-final-260906` guest. The 80.83-second local transfer
 matrix passed full bootstraps, direct and intermediary-preserving incrementals,
 foreign intermediate retention, received public-property isolation, native
 receive overrides, bookmark-based incrementals, persistent pool/dataset GUID
-bindings, and recursive `first`/`all` mappings on separate authoritative roots.
+bindings, recursive full and incremental `first`/`all` mappings on separate
+authoritative roots, and refusal of foreign latest destination history.
 The guarded cleanup verified the marker, serials, exact pool names and vdev parent
 disks before destroying both scratch pools; the transient domain then exited.
 

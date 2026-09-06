@@ -124,7 +124,38 @@ func Build(request Request, view View, installation string) (Plan, error) {
 	}
 	inventory := map[string]zfs.Dataset{}
 	for _, d := range view.Inventory {
+		if _, duplicate := inventory[d.Name]; duplicate {
+			return plan, fmt.Errorf("duplicate dataset in transfer inventory: %s", d.Name)
+		}
 		inventory[d.Name] = d
+	}
+	for _, object := range view.Source.Objects {
+		if object.Type != "filesystem" && object.Type != "volume" {
+			continue
+		}
+		dataset, exists := inventory[object.Name]
+		if !exists || string(dataset.Type) != object.Type || dataset.EncryptionRoot == "" {
+			return plan, fmt.Errorf("source dataset lacks complete matching inventory: %s", object.Name)
+		}
+	}
+	if view.DestinationIdentity.Name == "" || inventory[view.DestinationIdentity.Name].Name == "" || inventory[view.DestinationIdentity.Name].Type != view.DestinationIdentity.Type {
+		return plan, fmt.Errorf("destination identity does not match sparse inventory")
+	}
+	if view.DestinationExists {
+		destinationRoot, exists := dest[target]
+		if !exists || view.DestinationIdentity.Name != target || destinationRoot.GUID != view.DestinationIdentity.GUID || destinationRoot.Type != string(view.DestinationIdentity.Type) {
+			return plan, fmt.Errorf("destination identity does not match exact destination root")
+		}
+	} else {
+		nearest := ""
+		for name := range inventory {
+			if inside(target, name) && len(name) > len(nearest) {
+				nearest = name
+			}
+		}
+		if nearest != view.DestinationIdentity.Name {
+			return plan, fmt.Errorf("destination identity is not the nearest existing ancestor")
+		}
 	}
 	encrypted := inventory[request.Source].EncryptionRoot != "" && inventory[request.Source].EncryptionRoot != "-"
 	descendant := ""

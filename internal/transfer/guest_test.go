@@ -157,5 +157,19 @@ func TestGuestLocalTransfer(t *testing.T) {
 			t.Fatalf("recursive %s=%+v err=%v", discard, result, err)
 		}
 		t.Logf("recursive %s mapping verified: %s", discard, result.Plan.Destination)
+		if _, err := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(time.Minute), treePolicy); err != nil {
+			t.Fatal(err)
+		}
+		result, err = engine.Apply(t.Context(), req, nil)
+		if err != nil || !result.Verified || result.Plan.Mode != "incremental-all" {
+			t.Fatalf("recursive incremental %s=%+v err=%v", discard, result, err)
+		}
+		command("snapshot", result.Plan.Destination+"@foreign-destination")
+		if _, err := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(2*time.Minute), treePolicy); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := engine.Preview(t.Context(), req); err == nil {
+			t.Fatal("accepted foreign latest recursive destination snapshot")
+		}
 	}
 }

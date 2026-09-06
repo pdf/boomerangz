@@ -178,7 +178,21 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 		return result, err
 	}
 	if strings.Contains(plan.Base, "@") {
-		if _, err := l.lifecycle.Protect(ctx, request.Source, plan.Base, targetID); err != nil {
+		baseSnapshots := []string{plan.Base}
+		if plan.Send.Recursive {
+			_, component, _ := strings.Cut(plan.Base, "@")
+			objects := objectMap(before.Source)
+			for _, endpoint := range plan.Endpoints {
+				dataset := datasetOf(endpoint.Source)
+				candidate := dataset + "@" + component
+				if candidate != plan.Base {
+					if object, exists := objects[candidate]; exists && object.Type == "snapshot" {
+						baseSnapshots = append(baseSnapshots, candidate)
+					}
+				}
+			}
+		}
+		if _, err := l.lifecycle.ProtectSet(ctx, request.Source, baseSnapshots, targetID); err != nil {
 			return result, err
 		}
 	}

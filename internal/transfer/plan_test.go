@@ -205,6 +205,7 @@ func TestBuildRecursiveEndpointsAndNamespaceExclusions(t *testing.T) {
 	childEnd.Name = "tank/data/child" + strings.TrimPrefix(rootEnd.Name, "tank/data")
 	childEnd.GUID = 200
 	view.Source.Objects = append(view.Source.Objects, zfs.Object{Name: "tank/data/child", Type: "filesystem", GUID: 2, CreateTXG: 1}, childEnd)
+	view.Inventory = append(view.Inventory, zfs.Dataset{Name: "tank/data/child", Type: zfs.Filesystem, EncryptionRoot: "-"})
 	for _, p := range slices.Clone(view.Source.Properties) {
 		if p.Dataset == rootEnd.Name {
 			p.Dataset = childEnd.Name
