@@ -50,9 +50,9 @@ lifecycle lock as standalone commands, and reconstructs sparse lifecycle state
 after restart. Queued cancelled tickets are discarded; running management
 operations finish before quiescence. The transfer engine supplies destination
 GUID verification and just-in-time target probes before references can be
-released for local and SSH targets. Standalone clean still fails closed where
-live target coordination is unavailable until the control API can coordinate
-with the daemon.
+released for local and SSH targets. Clean uses the local control API when a
+daemon is running, so quiescence and live local or SSH target checks remain
+inside the daemon. Standalone clean uses the same read-only target verifier.
 
 ## Test-only properties and received layers
 

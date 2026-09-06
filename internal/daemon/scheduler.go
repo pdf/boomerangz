@@ -18,6 +18,13 @@ type Schedule struct {
 	Dataset  string
 	Policy   policy.Effective
 	Deadline time.Time
+	Force    bool
+}
+
+// Lookup returns the current policy for an active scheduled root.
+func (s *Scheduler) Lookup(dataset string) (Schedule, bool) {
+	item, exists := s.entry(dataset)
+	return Schedule{Dataset: dataset, Policy: item.policy.Clone(), Deadline: item.next}, exists
 }
 
 type deadline struct {

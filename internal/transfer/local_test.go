@@ -19,6 +19,7 @@ type localBackend struct {
 	source      zfs.State
 	destination zfs.State
 	destExists  bool
+	identity    *zfs.DatasetIdentity
 	writes      []string
 }
 
@@ -46,6 +47,9 @@ func (b *localBackend) InspectState(_ context.Context, dataset string, _ bool) (
 }
 
 func (b *localBackend) InspectDatasetIdentity(_ context.Context, dataset string) (zfs.DatasetIdentity, error) {
+	if b.identity != nil && b.identity.Name == dataset {
+		return *b.identity, nil
+	}
 	switch dataset {
 	case "backup":
 		return zfs.DatasetIdentity{Name: dataset, Type: zfs.Filesystem, GUID: 10, Pool: "backup", PoolGUID: 11}, nil

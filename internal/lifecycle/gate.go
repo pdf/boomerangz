@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/pdf/boomerangz/internal/zfs"
@@ -175,27 +176,48 @@ func (g *Gate) WaitQuiescent(ctx context.Context, dataset string) error {
 	}
 	for {
 		g.mu.Lock()
-		s := g.get(dataset)
-		if s.enabled {
-			g.mu.Unlock()
-			return fmt.Errorf("scope is still enabled")
-		}
 		running := false
-		for t := range s.tickets {
-			if t.running {
-				running = true
-				break
+		changes := make([]chan struct{}, 0, len(g.scopes))
+		for name, s := range g.scopes {
+			related := name == dataset || strings.HasPrefix(dataset, name+"/") || strings.HasPrefix(name, dataset+"/")
+			if !related {
+				continue
+			}
+			if s.enabled {
+				g.mu.Unlock()
+				return fmt.Errorf("related scheduling scope %s is still enabled", name)
+			}
+			changes = append(changes, s.changed)
+			for t := range s.tickets {
+				if t.running {
+					running = true
+				}
 			}
 		}
-		changed := s.changed
 		g.mu.Unlock()
 		if !running {
 			return ctx.Err()
 		}
+		waitCtx, cancel := context.WithCancel(ctx)
+		changed := make(chan struct{}, 1)
+		for _, source := range changes {
+			go func() {
+				select {
+				case <-source:
+					select {
+					case changed <- struct{}{}:
+					default:
+					}
+				case <-waitCtx.Done():
+				}
+			}()
+		}
 		select {
 		case <-ctx.Done():
+			cancel()
 			return ctx.Err()
 		case <-changed:
+			cancel()
 		}
 	}
 }

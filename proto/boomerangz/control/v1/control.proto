@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package boomerangz.control.v1;
+
+option go_package = "github.com/pdf/boomerangz/internal/control/rpc;rpc";
+
+service StatusService {
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  rpc WatchStatus(WatchStatusRequest) returns (stream WatchStatusResponse);
+  rpc ListDatasets(ListDatasetsRequest) returns (ListDatasetsResponse);
+}
+
+service ControlService {
+  rpc Trigger(TriggerRequest) returns (TriggerResponse);
+  rpc Reconcile(ReconcileRequest) returns (ReconcileResponse);
+  rpc Clean(CleanRequest) returns (CleanResponse);
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  StatusSnapshot status = 1;
+}
+
+message WatchStatusRequest {
+  uint32 interval_milliseconds = 1;
+}
+
+message WatchStatusResponse {
+  StatusSnapshot status = 1;
+}
+
+message QueueStatus {
+  string name = 1;
+  uint32 capacity = 2;
+  uint32 pending = 3;
+  repeated string job_ids = 4;
+}
+
+message JobStatus {
+  string pool = 1;
+  string job = 2;
+  string dataset = 3;
+  string target = 4;
+  string state = 5;
+  string reason = 6;
+  int64 changed_unix_nano = 7;
+  uint32 pending = 8;
+  uint32 queue_position = 9;
+  uint64 bytes = 10;
+  uint64 total_bytes = 11;
+  double bytes_per_second = 12;
+  int64 eta_nanoseconds = 13;
+  bool total_known = 14;
+}
+
+message DatasetStatus {
+  string name = 1;
+  bool active = 2;
+  bool recursive = 3;
+  int64 next_snapshot_unix_nano = 4;
+}
+
+message StatusSnapshot {
+  uint64 revision = 1;
+  int64 observed_unix_nano = 2;
+  uint64 generation = 3;
+  repeated DatasetStatus datasets = 4;
+  repeated QueueStatus queues = 5;
+  repeated JobStatus jobs = 6;
+}
+
+message ListDatasetsRequest {}
+
+message ListDatasetsResponse {
+  uint64 generation = 1;
+  repeated DatasetStatus datasets = 2;
+}
+
+message TriggerRequest {
+  repeated string datasets = 1;
+}
+
+message ReconcileRequest {}
+
+message TriggerResponse {
+  repeated string accepted = 1;
+}
+
+message ReconcileResponse {
+  bool accepted = 1;
+}
+
+message CleanRequest {
+  repeated string datasets = 1;
+  bool recursive = 2;
+  bool all = 3;
+  bool destroy_owned_snapshots = 4;
+  bool apply = 5;
+}
+
+message CleanAction {
+  string operation = 1;
+  string object = 2;
+  string property = 3;
+  uint64 guid = 4;
+}
+
+message CleanPlan {
+  string dataset = 1;
+  bool recursive = 2;
+  bool destroy_owned_snapshots = 3;
+  repeated CleanAction actions = 4;
+  repeated string blockers = 5;
+  repeated string warnings = 6;
+  uint32 applied = 7;
+}
+
+message CleanResponse {
+  repeated CleanPlan plans = 1;
+  string error = 2;
+}

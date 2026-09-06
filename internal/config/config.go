@@ -71,6 +71,7 @@ type ListenerConfig struct {
 	AuthMode string `toml:"auth_mode" json:"auth_mode,omitempty"`
 	TLSCert  string `toml:"tls_cert" json:"tls_cert,omitempty"`
 	TLSKey   string `toml:"tls_key" json:"tls_key,omitempty" secret:"true"`
+	ClientCA string `toml:"client_ca" json:"client_ca,omitempty"`
 }
 
 // Defaults returns a valid configuration with no remotes or listeners.

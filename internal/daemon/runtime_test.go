@@ -7,12 +7,14 @@ import (
 
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
 type runtimeBackend struct {
-	scanned chan struct{}
-	state   zfs.State
+	scanned  chan struct{}
+	state    zfs.State
+	identity zfs.DatasetIdentity
 }
 
 func (b *runtimeBackend) ListDatasets(context.Context) ([]zfs.Dataset, error) {
@@ -22,8 +24,8 @@ func (b *runtimeBackend) ListDatasets(context.Context) ([]zfs.Dataset, error) {
 	}
 	return nil, nil
 }
-func (*runtimeBackend) InspectDatasetIdentity(context.Context, string) (zfs.DatasetIdentity, error) {
-	return zfs.DatasetIdentity{}, nil
+func (b *runtimeBackend) InspectDatasetIdentity(context.Context, string) (zfs.DatasetIdentity, error) {
+	return b.identity, nil
 }
 func (*runtimeBackend) GetActivationProperties(context.Context) ([]zfs.Property, error) {
 	return nil, nil
@@ -82,9 +84,25 @@ func TestRuntimeGracefulShutdownWithoutPolicies(t *testing.T) {
 func TestSafetyRejectsLocalResumeState(t *testing.T) {
 	t.Parallel()
 	gate := &lifecycle.Gate{}
-	backend := &runtimeBackend{state: zfs.State{ResumeTokens: map[string]string{"backup/data": "token"}}}
+	canonical := "local:backup/data"
+	bindingProperty := policy.StateNamespace + "target:" + lifecycle.TargetID(canonical)
+	backend := &runtimeBackend{identity: zfs.DatasetIdentity{Name: "backup/data", Type: zfs.Filesystem, GUID: 91, Pool: "backup", PoolGUID: 90}, state: zfs.State{Properties: []zfs.Property{{Dataset: "tank/data", Name: bindingProperty, Value: `{"version":1,"transport":"local","canonical_target":"local:backup/data","destination_root":"backup/data","mapped_dataset":"backup/data","pool":"backup","pool_guid":90,"anchor":"backup/data","anchor_guid":91,"relative_path":""}`, Source: zfs.SourceLocal}}, ResumeTokens: map[string]string{"backup/data": "token"}}}
 	safety := newSafety(gate, backend, nil, nil)
-	if err := safety.CheckTarget(t.Context(), "local:backup/data"); err == nil {
+	if err := safety.CheckTarget(t.Context(), "tank/data", canonical); err == nil {
+		t.Fatal("resumable target was accepted")
+	}
+}
+
+func TestStandaloneTargetCheckerUsesSameLocalResumeCheck(t *testing.T) {
+	t.Parallel()
+	canonical := "local:backup/data"
+	bindingProperty := policy.StateNamespace + "target:" + lifecycle.TargetID(canonical)
+	backend := &runtimeBackend{identity: zfs.DatasetIdentity{Name: "backup/data", Type: zfs.Filesystem, GUID: 91, Pool: "backup", PoolGUID: 90}, state: zfs.State{Properties: []zfs.Property{{Dataset: "tank/data", Name: bindingProperty, Value: `{"version":1,"transport":"local","canonical_target":"local:backup/data","destination_root":"backup/data","mapped_dataset":"backup/data","pool":"backup","pool_guid":90,"anchor":"backup/data","anchor_guid":91,"relative_path":""}`, Source: zfs.SourceLocal}}, ResumeTokens: map[string]string{"backup/data": "token"}}}
+	checker, err := NewTargetChecker(backend, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checker.CheckTarget(t.Context(), "tank/data", canonical); err == nil {
 		t.Fatal("resumable target was accepted")
 	}
 }

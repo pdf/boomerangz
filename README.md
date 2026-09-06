@@ -5,7 +5,8 @@ continuously connected and intermittently connected systems.
 
 The current implementation provides configuration loading, sparse discovery,
 local policy inheritance, normalized retention grids, automatic snapshot and
-replication workers, and preview-first adoption and clean commands.
+replication workers, preview-first adoption and clean commands, and a versioned
+local control API with optional authenticated TLS access.
 
 Run the manager in the foreground:
 
@@ -15,6 +16,17 @@ boomerangz daemon
 
 The supplied systemd integration runs the same command as a dedicated service
 account. See [docs/daemon.md](docs/daemon.md) before enabling it.
+
+Inspect or watch a running daemon and request an immediate snapshot:
+
+```sh
+boomerangz status
+boomerangz status --watch
+boomerangz trigger pool/data
+```
+
+See [docs/control-api.md](docs/control-api.md) for output behavior, local access,
+token pairing, and optional TLS listeners.
 
 On a ZFS system (use the disposable guest for development), inspect datasets:
 

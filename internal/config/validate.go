@@ -82,6 +82,9 @@ func (c Config) Validate() error {
 			if listener.TLSCert == "" || listener.TLSKey == "" {
 				problems = append(problems, fmt.Errorf("listener %q: TCP tls_cert and tls_key are required", name))
 			}
+			if (listener.AuthMode == "mtls" || listener.AuthMode == "mtls+token") && listener.ClientCA == "" {
+				problems = append(problems, fmt.Errorf("listener %q: client_ca is required for mTLS", name))
+			}
 		default:
 			problems = append(problems, fmt.Errorf("listener %q: network must be unix or tcp", name))
 		}

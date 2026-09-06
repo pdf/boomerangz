@@ -21,7 +21,7 @@ func (s testCleanSafety) Quiescent(context.Context, []string) error {
 	}
 	return nil
 }
-func (s testCleanSafety) CheckTarget(context.Context, string) error {
+func (s testCleanSafety) CheckTarget(context.Context, string, string) error {
 	if s.offline {
 		return fmt.Errorf("target inaccessible")
 	}

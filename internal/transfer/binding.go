@@ -124,6 +124,37 @@ func InspectLocalTarget(ctx context.Context, reader localIdentityReader, request
 	return InspectTarget(ctx, reader, request, source)
 }
 
+// VerifyTargetBinding re-resolves the exact stored anchor before lifecycle
+// administration relies on a previously recorded destination.
+func VerifyTargetBinding(ctx context.Context, reader localIdentityReader, source zfs.State, sourceRoot, canonical, configuredRoot string) (TargetBinding, error) {
+	stored, err := storedTargetBinding(source, sourceRoot, canonical)
+	if err != nil {
+		return TargetBinding{}, err
+	}
+	if stored == nil {
+		return TargetBinding{}, fmt.Errorf("target has no persistent binding")
+	}
+	if err := validateBinding(*stored); err != nil {
+		return TargetBinding{}, err
+	}
+	if stored.DestinationRoot != configuredRoot {
+		return TargetBinding{}, fmt.Errorf("configured destination root differs from persistent binding")
+	}
+	identity, err := reader.InspectDatasetIdentity(ctx, stored.Anchor)
+	if err != nil {
+		return TargetBinding{}, err
+	}
+	request := Request{Source: sourceRoot, DestinationRoot: stored.DestinationRoot, Transport: stored.Transport, CanonicalTarget: canonical}
+	resolved, err := bindingForTarget(request, stored.MappedDataset, identity, stored.Transport, canonical)
+	if err != nil {
+		return TargetBinding{}, err
+	}
+	if resolved != *stored {
+		return TargetBinding{}, fmt.Errorf("target identity differs from persistent binding")
+	}
+	return *stored, nil
+}
+
 func canonicalLocalTarget(root string) string { return "local:" + root }
 
 func targetBindingProperty(canonical string) string {

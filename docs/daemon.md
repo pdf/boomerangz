@@ -20,6 +20,11 @@ transfers, and allow an already-running short management operation to finish.
 ZFS resume tokens, holds, bookmarks, and snapshot evidence remain available for
 recovery after restart.
 
+The daemon also serves the local status and control API at
+`paths.socket_path`. See [Status and remote control](control-api.md) for status
+watching, manual triggers, daemon-coordinated clean, and optional authenticated
+TCP listeners.
+
 ## systemd
 
 The source tree supplies:

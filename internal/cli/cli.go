@@ -12,6 +12,7 @@ import (
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/control"
 	"github.com/pdf/boomerangz/internal/daemon"
 	"github.com/pdf/boomerangz/internal/discovery"
 	"github.com/pdf/boomerangz/internal/identity"
@@ -65,6 +66,38 @@ func runWithReader(ctx context.Context, args []string, stdout, stderr io.Writer,
 	daemonCmd := app.Command("daemon", "Run snapshot and replication management in the foreground.")
 	daemonPath := daemonCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
 	daemonDropIns := daemonCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
+	statusCmd := app.Command("status", "Show live daemon status.")
+	statusPath := statusCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
+	statusDropIns := statusCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
+	statusCredential := statusCmd.Flag("credential", "Imported token bundle name or absolute path.").String()
+	statusWatch := statusCmd.Flag("watch", "Continuously watch status.").Short('w').Bool()
+	statusInterval := statusCmd.Flag("interval", "Maximum interval between watch updates.").Short('i').Default("2s").Duration()
+	triggerCmd := app.Command("trigger", "Queue an immediate snapshot for selected active roots.")
+	triggerPath := triggerCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
+	triggerDropIns := triggerCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
+	triggerCredential := triggerCmd.Flag("credential", "Imported token bundle name or absolute path.").String()
+	triggerDatasets := triggerCmd.Arg("datasets", "Active scheduling roots; empty selects all.").Strings()
+
+	authCmd := app.Command("auth", "Manage scoped control API tokens.")
+	authPath := authCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
+	authDropIns := authCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
+	tokenCmd := authCmd.Command("token", "Create, import, inspect, or revoke tokens.")
+	tokenCreateCmd := tokenCmd.Command("create", "Create a one-time pairing bundle.")
+	tokenCreateListener := tokenCreateCmd.Flag("listener", "Configured TCP token listener name.").String()
+	tokenCreateEndpoint := tokenCreateCmd.Flag("endpoint", "Client-visible host:port; defaults to listener address.").String()
+	tokenCreateCA := tokenCreateCmd.Flag("ca", "CA certificate bundle to embed instead of pinning the server key.").ExistingFile()
+	tokenCreateSystemCA := tokenCreateCmd.Flag("system-ca", "Use the client's system CA roots.").Bool()
+	tokenCreateServerName := tokenCreateCmd.Flag("server-name", "Expected TLS server name.").String()
+	tokenCreateClientCert := tokenCreateCmd.Flag("client-cert", "Client certificate to embed for mTLS plus token mode.").ExistingFile()
+	tokenCreateClientKey := tokenCreateCmd.Flag("client-key", "Client private key to embed for mTLS plus token mode.").ExistingFile()
+	tokenCreateScopes := tokenCreateCmd.Flag("scope", "Authorized scope; repeat for multiple scopes.").Default("status").Strings()
+	tokenCreateExpiry := tokenCreateCmd.Flag("expires-in", "Token lifetime; zero means no expiry.").Default("0s").Duration()
+	tokenImportCmd := tokenCmd.Command("import", "Import a pairing bundle for client use.")
+	tokenImportName := tokenImportCmd.Arg("name", "Local credential name.").Required().String()
+	tokenImportPath := tokenImportCmd.Arg("bundle", "Pairing bundle JSON file.").Required().ExistingFile()
+	tokenListCmd := tokenCmd.Command("list", "List token identifiers, scopes, and expiry.")
+	tokenRevokeCmd := tokenCmd.Command("revoke", "Revoke one token identifier.")
+	tokenRevokeID := tokenRevokeCmd.Arg("id", "Token identifier.").Required().String()
 	sshShellCmd := app.Command("ssh-shell", "Serve the restricted replication protocol over an SSH command channel.").Hidden()
 	sshShellRoot := sshShellCmd.Flag("root", "Allowed destination ZFS root.").Required().String()
 
@@ -126,7 +159,48 @@ func runWithReader(ctx context.Context, args []string, stdout, stderr io.Writer,
 		if err != nil {
 			return err
 		}
-		return runtime.Run(ctx)
+		controlServer, err := control.StartServer(loaded.Config, runtime, logger)
+		if err != nil {
+			return err
+		}
+		finished := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = controlServer.Close()
+			case <-finished:
+			}
+		}()
+		runErr := runtime.Run(ctx)
+		close(finished)
+		return errors.Join(runErr, controlServer.Close())
+	case statusCmd.FullCommand():
+		loaded, err := config.Load(*statusPath, *statusDropIns)
+		if err != nil {
+			return err
+		}
+		return runStatus(ctx, stdout, loaded.Config, *statusCredential, *statusWatch, *statusInterval)
+	case triggerCmd.FullCommand():
+		loaded, err := config.Load(*triggerPath, *triggerDropIns)
+		if err != nil {
+			return err
+		}
+		return runTrigger(ctx, stdout, loaded.Config, *triggerCredential, *triggerDatasets)
+	case tokenCreateCmd.FullCommand(), tokenImportCmd.FullCommand(), tokenListCmd.FullCommand(), tokenRevokeCmd.FullCommand():
+		loaded, err := config.Load(*authPath, *authDropIns)
+		if err != nil {
+			return err
+		}
+		switch command {
+		case tokenCreateCmd.FullCommand():
+			return runTokenCreate(stdout, loaded.Config, *tokenCreateListener, *tokenCreateEndpoint, *tokenCreateCA, *tokenCreateServerName, *tokenCreateSystemCA, *tokenCreateClientCert, *tokenCreateClientKey, *tokenCreateScopes, *tokenCreateExpiry)
+		case tokenImportCmd.FullCommand():
+			return runTokenImport(stdout, loaded.Config, *tokenImportName, *tokenImportPath)
+		case tokenListCmd.FullCommand():
+			return runTokenList(stdout, loaded.Config)
+		default:
+			return runTokenRevoke(stdout, loaded.Config, *tokenRevokeID)
+		}
 	case sshShellCmd.FullCommand():
 		executor, err := zfs.NewDirect("zfs")
 		if err != nil {
@@ -145,6 +219,11 @@ func runWithReader(ctx context.Context, args []string, stdout, stderr io.Writer,
 		loaded, err := config.Load(configPath, configDir)
 		if err != nil {
 			return err
+		}
+		if command == cleanCmd.FullCommand() {
+			if handled, controlErr := runDaemonClean(ctx, stdout, loaded.Config, *cleanNames, *cleanRecursive, *cleanAll, *cleanDestroy, *cleanApply); handled {
+				return controlErr
+			}
 		}
 		if reader == nil {
 			reader, err = zfs.NewDirect("zfs")

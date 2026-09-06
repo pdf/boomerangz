@@ -192,6 +192,34 @@ func TestTargetBindingDetectsReplacementAndMappingDrift(t *testing.T) {
 	}
 }
 
+func TestVerifyTargetBindingRejectsSameNamedReplacement(t *testing.T) {
+	t.Parallel()
+	request, view := testFixture(t)
+	plan, err := Build(request, view, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := encodeBinding(plan.TargetBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.Source.Properties = append(view.Source.Properties, zfs.Property{
+		Dataset: request.Source,
+		Name:    targetBindingProperty(plan.TargetBinding.CanonicalTarget),
+		Value:   encoded,
+		Source:  zfs.SourceLocal,
+	})
+	identity := view.DestinationIdentity
+	backend := &localBackend{source: view.Source, identity: &identity}
+	if _, err := VerifyTargetBinding(t.Context(), backend, view.Source, request.Source, plan.TargetBinding.CanonicalTarget, request.DestinationRoot); err != nil {
+		t.Fatalf("stable target rejected: %v", err)
+	}
+	identity.GUID++
+	if _, err := VerifyTargetBinding(t.Context(), backend, view.Source, request.Source, plan.TargetBinding.CanonicalTarget, request.DestinationRoot); err == nil {
+		t.Fatal("same-named replacement accepted")
+	}
+}
+
 func TestBookmarkBaseRequiresRecordedTargetProof(t *testing.T) {
 	t.Parallel()
 	request, view := testFixture(t)

@@ -14,11 +14,12 @@ import (
 )
 
 // CleanSafety must establish quiescence for the duration of apply, and reject
-// inaccessible targets or targets with resume state. Neither check may abandon
-// a receive or release a hold as a side effect. Preview uses the same checks.
+// inaccessible, identity-mismatched, or resumable targets. Neither check may
+// abandon a receive or release a hold as a side effect. Preview uses the same
+// checks.
 type CleanSafety interface {
 	Quiescent(context.Context, []string) error
-	CheckTarget(context.Context, string) error
+	CheckTarget(context.Context, string, string) error
 }
 
 type cleanBackend interface {
@@ -170,7 +171,7 @@ func (s *Service) cleanPlan(ctx context.Context, dataset string, options CleanOp
 		for _, r := range refs {
 			if safety == nil {
 				plan.Blockers = append(plan.Blockers, "target not verified: "+r.Target)
-			} else if err := safety.CheckTarget(ctx, r.Target); err != nil {
+			} else if err := safety.CheckTarget(ctx, name, r.Target); err != nil {
 				plan.Blockers = append(plan.Blockers, fmt.Sprintf("target %s: %v", r.Target, err))
 			}
 			for _, source := range r.sources() {

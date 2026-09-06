@@ -10,6 +10,7 @@ production system.
 - [Initial CachyOS test results](integration-spike-cachyos-260809.md)
 - [Phase 5 hand-off](phase-5-handoff.md)
 - [Phase 6 hand-off](phase-6-handoff.md)
+- [Phase 7 hand-off](phase-7-handoff.md)
 
 ## Protobuf APIs
 

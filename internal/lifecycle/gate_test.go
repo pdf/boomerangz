@@ -77,3 +77,17 @@ func TestQuiescenceWaitsForResultReconstruction(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestQuiescenceRejectsRelatedActiveRoot(t *testing.T) {
+	t.Parallel()
+	var gate Gate
+	if err := gate.SetEnabled("tank/root", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.WaitQuiescent(t.Context(), "tank/root/child"); err == nil {
+		t.Fatal("child was considered quiescent under an active root")
+	}
+	if err := gate.WaitQuiescent(t.Context(), "tank"); err == nil {
+		t.Fatal("ancestor was considered quiescent with an active descendant")
+	}
+}

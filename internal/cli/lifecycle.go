@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/daemon"
 	"github.com/pdf/boomerangz/internal/discovery"
 	"github.com/pdf/boomerangz/internal/identity"
 	"github.com/pdf/boomerangz/internal/lifecycle"
@@ -23,9 +24,12 @@ import (
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
-// Standalone commands fail closed around daemon coordination and target probes.
+// Standalone commands fail closed around daemon coordination.
 // The daemon holds the same lock for its lifetime before accepting work.
-type standaloneSafety struct{ socket string }
+type standaloneSafety struct {
+	socket  string
+	targets *daemon.TargetChecker
+}
 
 func (s standaloneSafety) Quiescent(ctx context.Context, _ []string) error {
 	if err := ctx.Err(); err != nil {
@@ -38,10 +42,13 @@ func (s standaloneSafety) Quiescent(ctx context.Context, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return fmt.Errorf("control socket exists; daemon-coordinated lifecycle operations are not yet available")
+	return fmt.Errorf("control socket exists; stop the daemon before this lifecycle operation")
 }
-func (standaloneSafety) CheckTarget(_ context.Context, target string) error {
-	return fmt.Errorf("target verification is not yet available for %s; retaining recovery references", target)
+func (s standaloneSafety) CheckTarget(ctx context.Context, source, target string) error {
+	if s.targets == nil {
+		return fmt.Errorf("target verification is unavailable for %s", target)
+	}
+	return s.targets.CheckTarget(ctx, source, target)
 }
 
 func lifecycleLock(cfg config.Config) (*os.File, error) {
@@ -289,6 +296,9 @@ func cleanScopes(ctx context.Context, executor zfs.Executor, names []string, rec
 }
 
 func runClean(ctx context.Context, out io.Writer, cfg config.Config, executor zfs.Executor, names []string, recursive, all, destroy, apply bool) (resultErr error) {
+	if handled, err := runDaemonClean(ctx, out, cfg, names, recursive, all, destroy, apply); handled {
+		return err
+	}
 	scopes, recursive, err := cleanScopes(ctx, executor, names, recursive, all)
 	if err != nil {
 		return err
@@ -304,7 +314,11 @@ func runClean(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 	if err != nil {
 		return err
 	}
-	safety := standaloneSafety{socket: cfg.Paths.SocketPath}
+	targets, err := daemon.NewTargetChecker(executor, cfg.Remotes)
+	if err != nil {
+		return err
+	}
+	safety := standaloneSafety{socket: cfg.Paths.SocketPath, targets: targets}
 	options := lifecycle.CleanOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy}
 	var plans []lifecycle.CleanPlan
 	blocked := false

@@ -2,8 +2,8 @@
 
 This describes every currently accepted global configuration field. Dataset
 policy belongs in [ZFS user properties](dataset-policy.md), not this file.
-The daemon uses these settings for automatic scheduling and transfers. Control
-listeners are not yet available.
+The daemon uses these settings for automatic scheduling, transfers, and control
+listeners.
 
 The primary file is `/etc/boomerangz/config.toml`. Files ending in `.toml` from
 `/etc/boomerangz/config.d` are applied afterward in bytewise filename order.
@@ -114,10 +114,10 @@ the same syntax as remote names. TCP is opt-in and never unauthenticated.
 | `auth_mode` | Empty | Required for TCP: `"token"` authorizes scoped tokens, `"mtls"` authenticates client certificates, or `"mtls+token"` requires both. Unused for Unix sockets, which rely on filesystem permissions and peer credentials. |
 | `tls_cert` | Empty | Server certificate-chain file, required for TCP. May be externally managed, including ACME-issued certificates. |
 | `tls_key` | Empty | Matching server private-key file, required for TCP; protect access to this file. |
+| `client_ca` | Empty | CA bundle used to authenticate client certificates; required for `mtls` and `mtls+token`. |
 
-TCP trust and certificate-renewal design details are maintained in the
-[development plan](../PLAN.md#91-listener-security). No additional trust-related
-TOML fields are accepted yet.
+See [Status and remote control](control-api.md) for listener hardening, token
+pairing, trust modes, certificate renewal, and client setup.
 
-The `config show` command redacts private-key fields. Secret token material will
-be stored in credential bundles rather than this configuration.
+The `config show` command redacts private-key fields. Secret token material is
+stored in credential bundles rather than this configuration.

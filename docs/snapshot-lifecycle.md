@@ -1,7 +1,8 @@
 # Snapshot lifecycle
 
 The administrative commands and automatic daemon lifecycle described below are
-available. Live daemon status is not yet available.
+available. Live status and control usage are documented in
+[Status and remote control](control-api.md).
 
 ## Ownership and snapshots
 
@@ -115,11 +116,13 @@ the selected scope. The clean operation is local; it never silently cleans
 another host.
 
 The daemon holds `<paths.socket_path>.lifecycle.lock` for its lifetime, while a
-standalone apply holds it for the operation. A standalone apply therefore fails
-while the daemon is running. Adoption probes configured local and SSH targets
-just in time; an unreachable SSH target is recorded as suspended and must be
-verified before replication resumes. Standalone clean cannot probe target
-recovery dependencies, so it retains those references and reports a blocker.
+standalone apply holds it for the operation. Clean coordinates through the
+daemon's control socket when it is running. The current adoption and identity
+recovery commands refuse to run while that socket exists. Adoption probes
+configured local and SSH targets just in time; an unreachable SSH target is
+recorded as suspended and must be verified before replication resumes.
+Standalone and daemon-coordinated clean perform the same just-in-time
+configured-target checks.
 Use the same configured socket path for all cooperating processes.
 
 ZFS CLI operations do not provide atomic compare-and-swap against independent

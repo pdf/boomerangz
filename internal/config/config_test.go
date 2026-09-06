@@ -151,6 +151,19 @@ func TestWorkerSchemaMigration(t *testing.T) {
 	}
 }
 
+func TestMTLSListenerRequiresClientCA(t *testing.T) {
+	t.Parallel()
+	cfg := Defaults()
+	cfg.Listeners["remote"] = ListenerConfig{Network: "tcp", Address: "127.0.0.1:8443", AuthMode: "mtls", TLSCert: "/cert", TLSKey: "/key"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "client_ca") {
+		t.Fatalf("validation error=%v", err)
+	}
+	cfg.Listeners["remote"] = ListenerConfig{Network: "tcp", Address: "127.0.0.1:8443", AuthMode: "mtls", TLSCert: "/cert", TLSKey: "/key", ClientCA: "/ca"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeTestFile(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {

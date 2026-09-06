@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,6 +68,7 @@ type Runtime struct {
 	pending      *transfer.PendingSet
 	remotes      map[string]*replicationssh.Client
 	safety       *Safety
+	locks        *keyLocks
 	status       *StatusStore
 	logger       *slog.Logger
 	now          func() time.Time
@@ -85,6 +87,7 @@ type Runtime struct {
 	delayCancel    context.CancelFunc
 	delayWait      sync.WaitGroup
 	shuttingDown   bool
+	lifecycleAdmin sync.Mutex
 }
 
 // New constructs an operational daemon around typed local ZFS execution.
@@ -145,7 +148,7 @@ func New(cfg config.Config, source backend, installation string, logger *slog.Lo
 		config: cfg, backend: source, installation: installation,
 		gate: gate, scanner: scanner, scheduler: NewScheduler(), management: management,
 		local: local, remote: remote, localStream: stream, pending: &transfer.PendingSet{},
-		remotes: clients, logger: logger, status: status, now: time.Now, known: make(map[string]bool), active: make(map[string]bool),
+		remotes: clients, logger: logger, status: status, locks: sharedLocks, now: time.Now, known: make(map[string]bool), active: make(map[string]bool),
 		recursive: make(map[string]bool), policies: make(map[string]policy.Effective),
 		roads: make(map[string]roadState), retireFailures: make(map[string]int), delayed: make(map[string]time.Time), dirty: make(map[string]bool),
 	}
@@ -374,14 +377,16 @@ func (r *Runtime) enqueueRetirement(dataset string) {
 	}
 }
 
-func (r *Runtime) enqueueSnapshot(schedule Schedule) {
+func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 	ticket, err := r.gate.Queue(context.Background(), schedule.Dataset, lifecycle.Management)
 	if err != nil {
-		return
+		return false
 	}
 	dropped := func() {
 		ticket.Finish()
-		r.scheduler.Retry(schedule.Dataset, r.now().Add(time.Second))
+		if !schedule.Force {
+			r.scheduler.Retry(schedule.Dataset, r.now().Add(time.Second))
+		}
 	}
 	job := Job{ID: "snapshot:" + schedule.Dataset, Group: schedule.Dataset, Scope: schedule.Dataset, LockKey: schedule.Dataset, StartState: "snapshotting", Drop: dropped}
 	job.Run = func(context.Context) Outcome {
@@ -394,7 +399,7 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) {
 			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.config.Daemon.ReconcileInterval.Duration))
 			return Outcome{State: "failed", Reason: deadlineErr.Error()}
 		}
-		if !deadline.IsZero() && r.now().Before(deadline) {
+		if !schedule.Force && !deadline.IsZero() && r.now().Before(deadline) {
 			r.scheduler.Retry(schedule.Dataset, deadline)
 			return Outcome{State: "scheduled", Reason: "existing owned snapshot sets the next deadline"}
 		}
@@ -418,7 +423,9 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) {
 		if submitErr != nil {
 			r.logger.Error("queue snapshot", "dataset", schedule.Dataset, "error", submitErr)
 		}
+		return false
 	}
+	return true
 }
 
 func (r *Runtime) nextOwnedSnapshot(dataset string, cadence time.Duration) (time.Time, error) {
@@ -532,7 +539,9 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 		if hasPending {
 			requestSnapshot = pending.Name
 		}
-		result, applyErr := engine.Apply(ticket.Context(), transfer.Request{Source: dataset, DestinationRoot: target, Snapshot: requestSnapshot, Policy: effective}, nil)
+		result, applyErr := engine.Apply(ticket.Context(), transfer.Request{Source: dataset, DestinationRoot: target, Snapshot: requestSnapshot, Policy: effective}, func(progress zfs.Progress) {
+			r.recordProgress("transfer", jobID, dataset, canonical, progress)
+		})
 		if applyErr != nil {
 			return Outcome{State: "blocked", Reason: applyErr.Error()}
 		}
@@ -612,7 +621,9 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 		if startErr := ticket.Start(); startErr != nil {
 			return Outcome{State: "blocked", Reason: startErr.Error()}
 		}
-		outcome, reconcileErr := road.coordinator.Reconcile(ticket.Context(), nil)
+		outcome, reconcileErr := road.coordinator.Reconcile(ticket.Context(), func(progress zfs.Progress) {
+			r.recordProgress("transfer", jobID, dataset, road.request.CanonicalTarget, progress)
+		})
 		if outcome.Status == "waiting-retry" && !outcome.NotBefore.IsZero() {
 			r.schedule(jobID, outcome.NotBefore, func() { r.enqueueRemote(dataset, remote, effective, "") })
 		}
@@ -650,6 +661,14 @@ func (r *Runtime) isDirty(key string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.dirty[key]
+}
+
+func (r *Runtime) recordProgress(pool, job, dataset, target string, progress zfs.Progress) {
+	event := Event{Pool: pool, Job: job, Scope: dataset, Target: target, State: "sending", At: r.now().UTC(), Bytes: progress.Bytes, TotalBytes: progress.Estimate.Bytes, BytesPerSecond: progress.BytesPerSecond, TotalKnown: progress.Estimate.Known}
+	if progress.ETA != nil {
+		event.ETA = *progress.ETA
+	}
+	r.status.Record(event)
 }
 
 func (r *Runtime) schedule(key string, at time.Time, run func()) {
@@ -762,7 +781,193 @@ func (r *Runtime) Run(ctx context.Context) error {
 // Reconcile coalesces an explicit local discovery hint.
 func (r *Runtime) Reconcile() { r.scanner.Request() }
 
-// QueueStatus exposes pool pressure without implementing the Phase 7 API.
+// Trigger queues an immediate snapshot for each selected active root. Empty
+// selection means every active root. Normal queue deduplication still applies.
+func (r *Runtime) Trigger(datasets []string) ([]string, error) {
+	r.mu.Lock()
+	if r.shuttingDown {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("daemon is shutting down")
+	}
+	if len(datasets) == 0 {
+		datasets = mapsKeys(r.active)
+	} else {
+		datasets = slices.Clone(datasets)
+	}
+	r.mu.Unlock()
+	slices.Sort(datasets)
+	datasets = slices.Compact(datasets)
+	schedules := make([]Schedule, 0, len(datasets))
+	for _, dataset := range datasets {
+		if err := zfs.ValidateDataset(dataset); err != nil {
+			return nil, err
+		}
+		schedule, exists := r.scheduler.Lookup(dataset)
+		if !exists {
+			return nil, fmt.Errorf("dataset %s is not an active scheduling root", dataset)
+		}
+		schedule.Force = true
+		schedules = append(schedules, schedule)
+	}
+	accepted := make([]string, 0, len(schedules))
+	for _, schedule := range schedules {
+		if r.enqueueSnapshot(schedule) {
+			accepted = append(accepted, schedule.Dataset)
+		}
+	}
+	return accepted, nil
+}
+
+// DatasetStatus is the detached daemon view used by the control API.
+type DatasetStatus struct {
+	Name         string
+	Active       bool
+	Recursive    bool
+	NextSnapshot time.Time
+}
+
+// ControlSnapshot is one coherent-enough operational view. ZFS is not queried.
+type ControlSnapshot struct {
+	Revision   uint64
+	Observed   time.Time
+	Generation uint64
+	Datasets   []DatasetStatus
+	Queues     map[string]QueueSnapshot
+	Jobs       []Event
+}
+
+// ControlStatus builds a cheap in-memory status snapshot.
+func (r *Runtime) ControlStatus() ControlSnapshot {
+	revision, jobs := r.status.SnapshotRevision()
+	deadlines := r.scheduler.Entries()
+	r.mu.Lock()
+	names := mapsKeys(r.known)
+	slices.Sort(names)
+	result := ControlSnapshot{Revision: revision, Observed: r.now().UTC(), Queues: r.QueueStatus(), Jobs: jobs}
+	if r.generation != nil {
+		result.Generation = r.generation.ID()
+	}
+	for _, name := range names {
+		result.Datasets = append(result.Datasets, DatasetStatus{Name: name, Active: r.active[name], Recursive: r.recursive[name], NextSnapshot: deadlines[name]})
+	}
+	r.mu.Unlock()
+	return result
+}
+
+// WaitStatus waits for a worker transition after revision.
+func (r *Runtime) WaitStatus(ctx context.Context, revision uint64) error {
+	return r.status.Wait(ctx, revision)
+}
+
+// Clean runs explicit preview-first decommissioning inside the daemon's live
+// lifecycle boundary. Apply never starts when any selected plan is blocked.
+func (r *Runtime) Clean(ctx context.Context, names []string, recursive, all, destroy, apply bool) ([]lifecycle.CleanPlan, error) {
+	r.lifecycleAdmin.Lock()
+	defer r.lifecycleAdmin.Unlock()
+	r.mu.Lock()
+	shuttingDown := r.shuttingDown
+	r.mu.Unlock()
+	if shuttingDown {
+		return nil, fmt.Errorf("daemon is shutting down")
+	}
+	if all && len(names) != 0 {
+		return nil, fmt.Errorf("all cannot be combined with dataset names")
+	}
+	if !all && len(names) == 0 {
+		return nil, fmt.Errorf("specify dataset names or explicit all")
+	}
+	if all {
+		inventory, err := r.backend.ListDatasets(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, dataset := range inventory {
+			names = append(names, dataset.Name)
+		}
+		recursive = true
+	}
+	names = slices.Clone(names)
+	slices.Sort(names)
+	names = slices.Compact(names)
+	var scopes []string
+	for _, name := range names {
+		if err := zfs.ValidateDataset(name); err != nil {
+			return nil, err
+		}
+		covered := false
+		if recursive {
+			for _, root := range scopes {
+				if strings.HasPrefix(name, root+"/") {
+					covered = true
+					break
+				}
+			}
+		}
+		if !covered {
+			scopes = append(scopes, name)
+		}
+	}
+	r.mu.Lock()
+	lockNames := slices.Clone(scopes)
+	for known := range r.known {
+		for _, scope := range scopes {
+			if strings.HasPrefix(known, scope+"/") || strings.HasPrefix(scope, known+"/") {
+				lockNames = append(lockNames, known)
+			}
+		}
+	}
+	r.mu.Unlock()
+	slices.Sort(lockNames)
+	lockNames = slices.Compact(lockNames)
+	releases := make([]func(), 0, len(lockNames))
+	for _, name := range lockNames {
+		release, lockErr := r.locks.acquire(ctx, name)
+		if lockErr != nil {
+			for index := len(releases) - 1; index >= 0; index-- {
+				releases[index]()
+			}
+			return nil, lockErr
+		}
+		releases = append(releases, release)
+	}
+	defer func() {
+		for index := len(releases) - 1; index >= 0; index-- {
+			releases[index]()
+		}
+	}()
+	service, err := lifecycle.NewCleanService(r.backend)
+	if err != nil {
+		return nil, err
+	}
+	options := lifecycle.CleanOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy}
+	plans := make([]lifecycle.CleanPlan, 0, len(scopes))
+	blocked := false
+	for _, name := range scopes {
+		plan, planErr := service.Clean(ctx, name, options, false, r.safety)
+		if planErr != nil {
+			return plans, planErr
+		}
+		plans = append(plans, plan)
+		blocked = blocked || len(plan.Blockers) != 0
+	}
+	if !apply {
+		return plans, nil
+	}
+	if blocked {
+		return plans, fmt.Errorf("clean blocked; no changes applied")
+	}
+	for index, name := range scopes {
+		plan, planErr := service.Clean(ctx, name, options, true, r.safety)
+		plans[index] = plan
+		if planErr != nil {
+			return plans, planErr
+		}
+	}
+	r.Reconcile()
+	return plans, nil
+}
+
+// QueueStatus exposes detached worker-pool pressure.
 func (r *Runtime) QueueStatus() map[string]QueueSnapshot {
 	return map[string]QueueSnapshot{"management": r.management.Snapshot(), "local_transfer": r.local.Snapshot(), "remote_transfer": r.remote.Snapshot()}
 }

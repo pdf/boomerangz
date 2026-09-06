@@ -522,11 +522,11 @@ quiescent before cleaning. Unlike delayed retirement, explicit clean may clear
 the selected public configuration and remains the immediate operator-controlled
 path.
 
-The standalone implementation fails closed if the configured control socket
-exists. Until the control API can coordinate a live daemon, the CLI reports
-unverified targets as blockers and retains their recovery references.
-Standalone applies share an exclusive `<socket_path>.lifecycle.lock`; the
-daemon holds that same lock for its lifetime before accepting work.
+When the configured control socket exists, explicit clean runs through the
+daemon so live work can be quiesced and targets verified. Standalone clean uses
+the same just-in-time configured-target verifier.
+Standalone applies share an exclusive `<socket_path>.lifecycle.lock`; the daemon
+holds that same lock for its lifetime before accepting work.
 
 For each selected local dataset clean:
 
