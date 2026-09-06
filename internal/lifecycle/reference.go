@@ -81,7 +81,7 @@ func referenceRecords(state zfs.State, dataset, lineage string) ([]Reference, er
 		if p.Dataset != dataset || !strings.HasPrefix(p.Name, ReferencePrefix) {
 			continue
 		}
-		// A received proof describes another source's targets. It is cleanup
+		// A received proof describes another source's targets. It is clean
 		// metadata, not authority to claim local holds or bookmarks.
 		if p.Source != zfs.SourceLocal {
 			continue

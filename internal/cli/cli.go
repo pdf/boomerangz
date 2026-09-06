@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/discovery"
+	remoterpc "github.com/pdf/boomerangz/internal/replication/rpc"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
@@ -57,6 +59,8 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 
 	versionCmd := app.Command("version", "Show version information.")
 	versionJSON := versionCmd.Flag("json", "Emit JSON.").Bool()
+	sshShellCmd := app.Command("ssh-shell", "Serve the restricted replication protocol over an SSH command channel.").Hidden()
+	sshShellRoot := sshShellCmd.Flag("root", "Allowed destination ZFS root.").Required().String()
 
 	datasetCmd := app.Command("dataset", "Dataset inspection and explicit lifecycle administration.")
 	datasetPath := datasetCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
@@ -67,12 +71,12 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 	adoptCmd := datasetCmd.Command("adopt", "Preview transfer of an existing lineage to this installation.")
 	adoptName := adoptCmd.Arg("dataset", "Exact ZFS dataset name.").Required().String()
 	adoptApply := adoptCmd.Flag("apply", "Apply the adoption after revalidation.").Bool()
-	cleanupCmd := datasetCmd.Command("clean", "Preview explicit local decommissioning; preserves snapshots by default.")
-	cleanupNames := cleanupCmd.Arg("datasets", "Exact ZFS dataset scopes.").Strings()
-	cleanupRecursive := cleanupCmd.Flag("recursive", "Include descendants of the selected scopes.").Bool()
-	cleanupAll := cleanupCmd.Flag("all", "Explicitly select all local datasets recursively.").Bool()
-	cleanupDestroy := cleanupCmd.Flag("destroy-owned-snapshots", "Also delete fully proven owned snapshots without dependencies.").Bool()
-	cleanupApply := cleanupCmd.Flag("apply", "Apply cleanup after revalidation.").Bool()
+	cleanCmd := datasetCmd.Command("clean", "Preview explicit local decommissioning; preserves snapshots by default.")
+	cleanNames := cleanCmd.Arg("datasets", "Exact ZFS dataset scopes.").Strings()
+	cleanRecursive := cleanCmd.Flag("recursive", "Include descendants of the selected scopes.").Bool()
+	cleanAll := cleanCmd.Flag("all", "Explicitly select all local datasets recursively.").Bool()
+	cleanDestroy := cleanCmd.Flag("destroy-owned-snapshots", "Also delete fully proven owned snapshots without dependencies.").Bool()
+	cleanApply := cleanCmd.Flag("apply", "Apply clean after revalidation.").Bool()
 
 	identityCmd := app.Command("identity", "Inspect and recover installation identity.")
 	identityPath := identityCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
@@ -87,7 +91,17 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 	}
 
 	switch command {
-	case adoptCmd.FullCommand(), cleanupCmd.FullCommand(), recoverCmd.FullCommand():
+	case sshShellCmd.FullCommand():
+		executor, err := zfs.NewDirect("zfs")
+		if err != nil {
+			return err
+		}
+		service, err := remoterpc.NewServer(executor, *sshShellRoot, "zfs")
+		if err != nil {
+			return err
+		}
+		return remoterpc.ServeStdio(ctx, service, os.Stdin, stdout)
+	case adoptCmd.FullCommand(), cleanCmd.FullCommand(), recoverCmd.FullCommand():
 		configPath, configDir := *datasetPath, *datasetDropIns
 		if command == recoverCmd.FullCommand() {
 			configPath, configDir = *identityPath, *identityDropIns
@@ -112,7 +126,7 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 		if command == adoptCmd.FullCommand() {
 			return runAdopt(ctx, stdout, loaded.Config, executor, *adoptName, *adoptApply)
 		}
-		return runCleanup(ctx, stdout, loaded.Config, executor, *cleanupNames, *cleanupRecursive, *cleanupAll, *cleanupDestroy, *cleanupApply)
+		return runClean(ctx, stdout, loaded.Config, executor, *cleanNames, *cleanRecursive, *cleanAll, *cleanDestroy, *cleanApply)
 	case listCmd.FullCommand(), inspectCmd.FullCommand():
 		loaded, err := config.Load(*datasetPath, *datasetDropIns)
 		if err != nil {

@@ -34,8 +34,7 @@ type TargetBinding struct {
 }
 
 // LocalTargetInspection is the adoption-time identity view of one configured
-// local destination. Unbound is safe only because dataset adopt --apply is the
-// operator's explicit acceptance of the displayed GUIDs and mapping.
+// destination. The historical name is retained for API stability.
 type LocalTargetInspection struct {
 	ConfiguredName    string         `json:"configured_name"`
 	Transport         string         `json:"transport"`
@@ -45,6 +44,7 @@ type LocalTargetInspection struct {
 	Stored            *TargetBinding `json:"stored_binding,omitempty"`
 	Resolved          *TargetBinding `json:"resolved_identity,omitempty"`
 	Status            string         `json:"status"`
+	EndpointMode      string         `json:"endpoint_mode,omitempty"`
 }
 
 type localIdentityReader interface {
@@ -52,10 +52,19 @@ type localIdentityReader interface {
 	InspectDatasetIdentity(context.Context, string) (zfs.DatasetIdentity, error)
 }
 
-// InspectLocalTarget resolves the exact dataset or nearest existing ancestor
-// and compares it with any persistent source-root binding.
-func InspectLocalTarget(ctx context.Context, reader localIdentityReader, request Request, source zfs.State) (LocalTargetInspection, error) {
-	inspection := LocalTargetInspection{ConfiguredName: request.DestinationRoot, Transport: "local", CanonicalEndpoint: canonicalLocalTarget(request.DestinationRoot), DestinationRoot: request.DestinationRoot}
+// InspectTarget resolves the exact dataset or nearest existing ancestor and
+// compares it with any persistent source-root binding for local or SSH targets.
+func InspectTarget(ctx context.Context, reader localIdentityReader, request Request, source zfs.State) (LocalTargetInspection, error) {
+	transport, canonical := requestTransport(request), canonicalTarget(request)
+	configured := request.DestinationRoot
+	if transport == "ssh" {
+		configured = request.RemoteName
+	}
+	inspection := LocalTargetInspection{ConfiguredName: configured, Transport: transport, CanonicalEndpoint: canonical, DestinationRoot: request.DestinationRoot}
+	if (transport != "local" && transport != "ssh") || canonical == "" {
+		inspection.Status = "invalid-mapping"
+		return inspection, fmt.Errorf("unsupported or incomplete target transport")
+	}
 	mapped, err := zfs.MapReceiveDataset(request.Source, request.DestinationRoot, zfs.ReceiveDiscard(request.Policy.Discard))
 	if err != nil {
 		inspection.Status = "invalid-mapping"
@@ -82,7 +91,7 @@ func InspectLocalTarget(ctx context.Context, reader localIdentityReader, request
 		inspection.Status = "unavailable"
 		return inspection, err
 	}
-	resolved, err := bindingFor(request, mapped, identity)
+	resolved, err := bindingForTarget(request, mapped, identity, transport, canonical)
 	if err != nil {
 		inspection.Status = "invalid-mapping"
 		return inspection, err
@@ -110,17 +119,62 @@ func InspectLocalTarget(ctx context.Context, reader localIdentityReader, request
 	return inspection, nil
 }
 
+// InspectLocalTarget preserves the Phase 4 local-target API.
+func InspectLocalTarget(ctx context.Context, reader localIdentityReader, request Request, source zfs.State) (LocalTargetInspection, error) {
+	return InspectTarget(ctx, reader, request, source)
+}
+
 func canonicalLocalTarget(root string) string { return "local:" + root }
 
 func targetBindingProperty(canonical string) string {
 	return targetBindingPrefix + lifecycle.TargetID(canonical)
 }
 
+func targetSuspendedProperty(canonical string) string {
+	return targetBindingProperty(canonical) + ":suspended"
+}
+
+// TargetSuspended reports whether adoption has gated a remote pending explicit
+// identity revalidation.
+func TargetSuspended(state zfs.State, root, canonical string) (bool, error) {
+	property := targetSuspendedProperty(canonical)
+	found := false
+	for _, row := range state.Properties {
+		if row.Dataset != root || row.Name != property {
+			continue
+		}
+		if row.Source != zfs.SourceLocal || found || row.Value != "unverified" {
+			return false, fmt.Errorf("target suspension marker is invalid")
+		}
+		found = true
+	}
+	if state.Received[root][property] != "" {
+		return false, fmt.Errorf("hidden received target suspension marker requires explicit resolution")
+	}
+	return found, nil
+}
+
+// SetTargetSuspended records or clears an adoption-time remote safety gate.
+func SetTargetSuspended(ctx context.Context, executor zfs.Executor, source, canonical string, suspended bool) error {
+	if executor == nil || canonical == "" || strings.ContainsAny(canonical, "\x00\r\n") {
+		return fmt.Errorf("valid target suspension request required")
+	}
+	property := targetSuspendedProperty(canonical)
+	if suspended {
+		return executor.SetProperties(ctx, source, map[string]string{property: "unverified"})
+	}
+	return executor.InheritProperty(ctx, source, property)
+}
+
 func bindingFor(request Request, mapped string, identity zfs.DatasetIdentity) (TargetBinding, error) {
+	return bindingForTarget(request, mapped, identity, "local", canonicalLocalTarget(request.DestinationRoot))
+}
+
+func bindingForTarget(request Request, mapped string, identity zfs.DatasetIdentity, transport, canonical string) (TargetBinding, error) {
 	binding := TargetBinding{
 		Version:         targetBindingVersion,
-		Transport:       "local",
-		CanonicalTarget: canonicalLocalTarget(request.DestinationRoot),
+		Transport:       transport,
+		CanonicalTarget: canonical,
 		DestinationRoot: request.DestinationRoot,
 		MappedDataset:   mapped,
 		Pool:            identity.Pool,
@@ -163,7 +217,7 @@ func storedTargetBinding(state zfs.State, root, canonical string) (*TargetBindin
 }
 
 func validateBinding(binding TargetBinding) error {
-	if binding.Version != targetBindingVersion || binding.Transport != "local" || binding.CanonicalTarget == "" || binding.DestinationRoot == "" || binding.MappedDataset == "" || binding.Pool == "" || binding.PoolGUID == 0 || binding.Anchor == "" || binding.AnchorGUID == 0 {
+	if binding.Version != targetBindingVersion || (binding.Transport != "local" && binding.Transport != "ssh") || binding.CanonicalTarget == "" || binding.DestinationRoot == "" || binding.MappedDataset == "" || binding.Pool == "" || binding.PoolGUID == 0 || binding.Anchor == "" || binding.AnchorGUID == 0 {
 		return fmt.Errorf("target binding is incomplete or unsupported")
 	}
 	if targetBindingProperty(binding.CanonicalTarget) == targetBindingPrefix {

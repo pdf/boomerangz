@@ -6,12 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 
@@ -20,6 +18,7 @@ import (
 	"github.com/pdf/boomerangz/internal/identity"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
+	replicationssh "github.com/pdf/boomerangz/internal/replication/ssh"
 	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
@@ -95,6 +94,8 @@ func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 	if oldOwner != "" && !identity.Valid(oldOwner) {
 		return fmt.Errorf("existing local owner is invalid")
 	}
+	ownedLineage, authorityErr := lifecycle.RootAuthority(state, dataset, installation)
+	alreadyOwned := authorityErr == nil && ownedLineage == lineage
 	var remoteNames []string
 	for name := range cfg.Remotes {
 		remoteNames = append(remoteNames, name)
@@ -128,25 +129,60 @@ func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 		return inspections, blockers
 	}
 	localTargets, blockers := inspectLocal()
-	type remoteTarget struct {
-		ConfiguredName    string `json:"configured_name"`
-		Transport         string `json:"transport"`
-		CanonicalEndpoint string `json:"canonical_endpoint"`
-		DestinationRoot   string `json:"destination_root"`
-		Status            string `json:"status"`
+	inspectRemote := func() ([]transfer.LocalTargetInspection, []string) {
+		var inspections []transfer.LocalTargetInspection
+		var remoteBlockers []string
+		for _, name := range effective.Remote {
+			remote := cfg.Remotes[name]
+			client, clientErr := replicationssh.New("ssh", replicationssh.Config{Host: remote.Host, Port: remote.Port, User: remote.User, Root: remote.Root, IdentityFile: remote.IdentityFile, ShellPath: remote.SSHShellPath, ConnectTimeout: remote.ConnectTimeout.Duration})
+			if clientErr != nil {
+				remoteBlockers = append(remoteBlockers, fmt.Sprintf("remote target %s: %v", name, clientErr))
+				continue
+			}
+			inspection := transfer.LocalTargetInspection{ConfiguredName: name, Transport: "ssh", CanonicalEndpoint: client.CanonicalTarget(), DestinationRoot: remote.Root, EndpointMode: remote.Endpoint, Status: "unavailable"}
+			endpoint, openErr := replicationssh.OpenEndpoint(ctx, client, "zfs", remote.Endpoint)
+			if openErr != nil {
+				if replicationssh.IsUnavailable(openErr) {
+					inspection.Status = "unverified-suspended"
+				} else {
+					remoteBlockers = append(remoteBlockers, fmt.Sprintf("remote target %s: %v", name, openErr))
+				}
+				inspections = append(inspections, inspection)
+				continue
+			}
+			inspection.EndpointMode = endpoint.Mode
+			request := transfer.Request{Source: dataset, DestinationRoot: remote.Root, Policy: effective, Transport: "ssh", RemoteName: name, CanonicalTarget: client.CanonicalTarget()}
+			resolved, inspectErr := transfer.InspectTarget(ctx, endpoint.Executor, request, state)
+			resolved.EndpointMode = endpoint.Mode
+			inspection = resolved
+			closeErr := endpoint.Close()
+			if inspectErr != nil {
+				if replicationssh.IsUnavailable(inspectErr) {
+					inspection.Status = "unverified-suspended"
+				} else {
+					remoteBlockers = append(remoteBlockers, fmt.Sprintf("remote target %s: %v", name, inspectErr))
+				}
+			}
+			if closeErr != nil {
+				remoteBlockers = append(remoteBlockers, fmt.Sprintf("remote target %s close: %v", name, closeErr))
+			}
+			inspections = append(inspections, inspection)
+		}
+		return inspections, remoteBlockers
 	}
-	var remoteTargets []remoteTarget
-	for _, name := range effective.Remote {
-		remote := cfg.Remotes[name]
-		port := remote.Port
-		if port == 0 {
-			port = 22
+	remoteTargets, remoteBlockers := inspectRemote()
+	blockers = append(blockers, remoteBlockers...)
+	suspendedTargets := make(map[string]bool)
+	for _, remote := range remoteTargets {
+		if remote.CanonicalEndpoint == "" {
+			continue
 		}
-		endpoint := net.JoinHostPort(remote.Host, strconv.Itoa(port))
-		if remote.User != "" {
-			endpoint = remote.User + "@" + endpoint
+		suspended, suspendedErr := transfer.TargetSuspended(state, dataset, remote.CanonicalEndpoint)
+		if suspendedErr != nil {
+			blockers = append(blockers, fmt.Sprintf("remote target %s: %v", remote.ConfiguredName, suspendedErr))
+			continue
 		}
-		remoteTargets = append(remoteTargets, remoteTarget{ConfiguredName: name, Transport: remote.Transport, CanonicalEndpoint: "ssh://" + endpoint, DestinationRoot: remote.Root, Status: "unverified-suspended"})
+		suspendedTargets[remote.CanonicalEndpoint] = suspended
 	}
 	type adoptionResult struct {
 		Dataset       string                           `json:"dataset"`
@@ -155,7 +191,7 @@ func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 		NewOwner      string                           `json:"new_owner"`
 		Policy        policy.Effective                 `json:"policy"`
 		LocalTargets  []transfer.LocalTargetInspection `json:"local_targets,omitempty"`
-		RemoteTargets []remoteTarget                   `json:"remote_targets,omitempty"`
+		RemoteTargets []transfer.LocalTargetInspection `json:"remote_targets,omitempty"`
 		Blockers      []string                         `json:"blockers,omitempty"`
 		Warning       string                           `json:"warning"`
 		Applied       bool                             `json:"applied"`
@@ -171,24 +207,47 @@ func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 	}
 	if apply {
 		revalidated, revalidationBlockers := inspectLocal()
-		if len(revalidationBlockers) > 0 || !reflect.DeepEqual(localTargets, revalidated) {
+		revalidatedRemote, remoteRevalidationBlockers := inspectRemote()
+		if len(revalidationBlockers) > 0 || len(remoteRevalidationBlockers) > 0 || !reflect.DeepEqual(localTargets, revalidated) || !reflect.DeepEqual(remoteTargets, revalidatedRemote) {
 			result.Blockers = append(result.Blockers, "target identity changed during adoption; retry preview")
 			return errors.Join(fmt.Errorf("adoption blocked; no owner change applied"), encoder.Encode(result))
 		}
-		service, err := lifecycle.NewService(executor, installation)
-		if err != nil {
-			return err
+		if alreadyOwned {
+			current, inspectErr := executor.InspectState(ctx, dataset, false)
+			if inspectErr != nil || !reflect.DeepEqual(state, current) {
+				result.Blockers = append(result.Blockers, "source state changed during target revalidation; retry preview")
+				return errors.Join(fmt.Errorf("target revalidation blocked; no changes applied"), inspectErr, encoder.Encode(result))
+			}
 		}
-		_, err = service.AdoptDataset(ctx, dataset, effective)
-		if err != nil {
-			return err
+		for _, remote := range revalidatedRemote {
+			if remote.Status == "unverified-suspended" {
+				if err := transfer.SetTargetSuspended(ctx, executor, dataset, remote.CanonicalEndpoint, true); err != nil {
+					return err
+				}
+			}
+		}
+		if !alreadyOwned {
+			service, serviceErr := lifecycle.NewService(executor, installation)
+			if serviceErr != nil {
+				return serviceErr
+			}
+			if _, serviceErr = service.AdoptDataset(ctx, dataset, effective); serviceErr != nil {
+				return serviceErr
+			}
+		}
+		for _, remote := range revalidatedRemote {
+			if remote.Status != "unverified-suspended" && suspendedTargets[remote.CanonicalEndpoint] {
+				if err := transfer.SetTargetSuspended(ctx, executor, dataset, remote.CanonicalEndpoint, false); err != nil {
+					return err
+				}
+			}
 		}
 		result.Applied = true
 	}
 	return encoder.Encode(result)
 }
 
-func cleanupScopes(ctx context.Context, executor zfs.Executor, names []string, recursive, all bool) ([]string, bool, error) {
+func cleanScopes(ctx context.Context, executor zfs.Executor, names []string, recursive, all bool) ([]string, bool, error) {
 	if all && len(names) > 0 {
 		return nil, false, fmt.Errorf("--all cannot be combined with dataset names")
 	}
@@ -229,8 +288,8 @@ func cleanupScopes(ctx context.Context, executor zfs.Executor, names []string, r
 	return scopes, recursive, nil
 }
 
-func runCleanup(ctx context.Context, out io.Writer, cfg config.Config, executor zfs.Executor, names []string, recursive, all, destroy, apply bool) (resultErr error) {
-	scopes, recursive, err := cleanupScopes(ctx, executor, names, recursive, all)
+func runClean(ctx context.Context, out io.Writer, cfg config.Config, executor zfs.Executor, names []string, recursive, all, destroy, apply bool) (resultErr error) {
+	scopes, recursive, err := cleanScopes(ctx, executor, names, recursive, all)
 	if err != nil {
 		return err
 	}
@@ -241,16 +300,16 @@ func runCleanup(ctx context.Context, out io.Writer, cfg config.Config, executor 
 		}
 		defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
 	}
-	service, err := lifecycle.NewCleanupService(executor)
+	service, err := lifecycle.NewCleanService(executor)
 	if err != nil {
 		return err
 	}
 	safety := standaloneSafety{socket: cfg.Paths.SocketPath}
-	options := lifecycle.CleanupOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy}
-	var plans []lifecycle.CleanupPlan
+	options := lifecycle.CleanOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy}
+	var plans []lifecycle.CleanPlan
 	blocked := false
 	for _, name := range scopes {
-		plan, err := service.Cleanup(ctx, name, options, false, safety)
+		plan, err := service.Clean(ctx, name, options, false, safety)
 		if err != nil {
 			return err
 		}
@@ -259,7 +318,7 @@ func runCleanup(ctx context.Context, out io.Writer, cfg config.Config, executor 
 	}
 	if apply && !blocked {
 		for i, name := range scopes {
-			plan, err := service.Cleanup(ctx, name, options, true, safety)
+			plan, err := service.Clean(ctx, name, options, true, safety)
 			plans[i] = plan
 			if err != nil {
 				resultErr = err
@@ -267,7 +326,7 @@ func runCleanup(ctx context.Context, out io.Writer, cfg config.Config, executor 
 			}
 		}
 	} else if apply && blocked {
-		resultErr = fmt.Errorf("cleanup blocked; no changes applied")
+		resultErr = fmt.Errorf("clean blocked; no changes applied")
 	}
 	encoder := json.NewEncoder(out)
 	encoder.SetIndent("", "  ")

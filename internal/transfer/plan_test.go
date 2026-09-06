@@ -79,6 +79,33 @@ func TestBuildFullIncrementalAndNoop(t *testing.T) {
 	}
 }
 
+func TestBuildRemoteUsesIndependentDestinationInventory(t *testing.T) {
+	t.Parallel()
+	request, view := testFixture(t)
+	request.Transport = "ssh"
+	request.RemoteName = "home"
+	request.CanonicalTarget = "ssh://replicator@backup.example.net:22/tank/data"
+	request.DestinationRoot = "tank/data"
+	request.Policy.Remote = []string{"home"}
+	view.DestinationInventory = []zfs.Dataset{{Name: "tank", Type: zfs.Filesystem, EncryptionRoot: "-"}}
+	view.DestinationIdentity = zfs.DatasetIdentity{Name: "tank", Type: zfs.Filesystem, GUID: 50, Pool: "tank", PoolGUID: 51}
+
+	plan, err := Build(request, view, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != "full" || plan.Destination != "tank/data" || plan.TargetBinding.Transport != "ssh" || plan.TargetBinding.CanonicalTarget != request.CanonicalTarget {
+		t.Fatalf("remote plan=%+v", plan)
+	}
+	if plan.TargetBinding.PoolGUID != 51 || plan.TargetBinding.Anchor != "tank" {
+		t.Fatalf("remote destination identity was not used: %+v", plan.TargetBinding)
+	}
+	view.Source.Properties = append(view.Source.Properties, zfs.Property{Dataset: request.Source, Name: targetSuspendedProperty(request.CanonicalTarget), Value: "unverified", Source: zfs.SourceLocal})
+	if _, err := Build(request, view, fixtureInstallation); err == nil || !strings.Contains(err.Error(), "suspended") {
+		t.Fatalf("suspended remote was not rejected: %v", err)
+	}
+}
+
 func TestBuildRefusesUnsafeDestinations(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{"overlap", "unconfigured", "existing-empty", "foreign-latest", "resume-child", "name-collision", "bad-lineage", "foreign-owner", "default-activation"} {

@@ -10,25 +10,25 @@ import (
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
-type testCleanupSafety struct {
+type testCleanSafety struct {
 	offline bool
 	busy    bool
 }
 
-func (s testCleanupSafety) Quiescent(context.Context, []string) error {
+func (s testCleanSafety) Quiescent(context.Context, []string) error {
 	if s.busy {
 		return fmt.Errorf("active job")
 	}
 	return nil
 }
-func (s testCleanupSafety) CheckTarget(context.Context, string) error {
+func (s testCleanSafety) CheckTarget(context.Context, string) error {
 	if s.offline {
 		return fmt.Errorf("target inaccessible")
 	}
 	return nil
 }
 
-func TestCleanupPreviewApply(t *testing.T) {
+func TestCleanPreviewApply(t *testing.T) {
 	t.Parallel()
 	for _, destroy := range []bool{false, true} {
 		b := backendWithSnapshots(t)
@@ -43,12 +43,12 @@ func TestCleanupPreviewApply(t *testing.T) {
 			t.Fatal(err)
 		}
 		b.writes = nil
-		options := CleanupOptions{DestroyOwnedSnapshots: destroy}
-		preview, err := s.Cleanup(t.Context(), "tank/data", options, false, testCleanupSafety{})
+		options := CleanOptions{DestroyOwnedSnapshots: destroy}
+		preview, err := s.Clean(t.Context(), "tank/data", options, false, testCleanSafety{})
 		if err != nil || len(preview.Blockers) != 0 || len(b.writes) != 0 {
 			t.Fatalf("preview: %v %v", preview, err)
 		}
-		applied, err := s.Cleanup(t.Context(), "tank/data", options, true, testCleanupSafety{})
+		applied, err := s.Clean(t.Context(), "tank/data", options, true, testCleanSafety{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -68,14 +68,14 @@ func TestCleanupPreviewApply(t *testing.T) {
 	}
 }
 
-func TestCleanupBlockers(t *testing.T) {
+func TestCleanBlockers(t *testing.T) {
 	t.Parallel()
 	for _, reason := range []string{"busy", "resume", "hold", "bookmark", "ancestor", "offline", "hidden-lineage", "snapshot-lineage"} {
 		t.Run(reason, func(t *testing.T) {
 			b := backendWithSnapshots(t)
 			addTestAuthority(b)
 			s, _ := NewService(b, testInstallation)
-			safety := testCleanupSafety{}
+			safety := testCleanSafety{}
 			switch reason {
 			case "busy":
 				safety.busy = true
@@ -102,20 +102,20 @@ func TestCleanupBlockers(t *testing.T) {
 					}
 				}
 			}
-			plan, err := s.Cleanup(t.Context(), "tank/data", CleanupOptions{}, true, safety)
+			plan, err := s.Clean(t.Context(), "tank/data", CleanOptions{}, true, safety)
 			if err == nil || len(plan.Blockers) == 0 || len(b.writes) != 0 {
-				t.Fatalf("unsafe cleanup: %v %v", plan, err)
+				t.Fatalf("unsafe clean: %v %v", plan, err)
 			}
 		})
 	}
 }
 
-func TestCleanupPreservesNonNamespaceSettings(t *testing.T) {
+func TestCleanPreservesNonNamespaceSettings(t *testing.T) {
 	t.Parallel()
 	b := backendWithSnapshots(t)
 	b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: "compression", Value: "zstd", Source: zfs.SourceLocal})
 	s, _ := NewService(b, testInstallation)
-	if _, err := s.Cleanup(t.Context(), "tank/data", CleanupOptions{}, true, testCleanupSafety{}); err != nil {
+	if _, err := s.Clean(t.Context(), "tank/data", CleanOptions{}, true, testCleanSafety{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(b.state.Properties) != 1 || b.state.Properties[0].Name != "compression" {
@@ -123,14 +123,14 @@ func TestCleanupPreservesNonNamespaceSettings(t *testing.T) {
 	}
 }
 
-func TestCleanupDoesNotTrustReceivedReferences(t *testing.T) {
+func TestCleanDoesNotTrustReceivedReferences(t *testing.T) {
 	t.Parallel()
 	b := backendWithSnapshots(t)
 	key := ReferencePrefix + "foreign"
 	b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: key, Value: "received proof", Source: zfs.SourceReceived})
 	b.state.Received = map[string]map[string]string{"tank/data": {key: "received proof"}}
 	s, _ := NewService(b, testInstallation)
-	if _, err := s.Cleanup(t.Context(), "tank/data", CleanupOptions{}, true, testCleanupSafety{}); err != nil {
+	if _, err := s.Clean(t.Context(), "tank/data", CleanOptions{}, true, testCleanSafety{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(b.state.Properties) != 0 || b.state.Received["tank/data"][key] != "received proof" {
@@ -138,7 +138,7 @@ func TestCleanupDoesNotTrustReceivedReferences(t *testing.T) {
 	}
 }
 
-func TestCleanupStopsOnUnexpectedMutation(t *testing.T) {
+func TestCleanStopsOnUnexpectedMutation(t *testing.T) {
 	t.Parallel()
 	b := backendWithSnapshots(t)
 	addTestAuthority(b)
@@ -148,7 +148,7 @@ func TestCleanupStopsOnUnexpectedMutation(t *testing.T) {
 		}
 	}
 	s, _ := NewService(b, testInstallation)
-	plan, err := s.Cleanup(t.Context(), "tank/data", CleanupOptions{}, true, testCleanupSafety{})
+	plan, err := s.Clean(t.Context(), "tank/data", CleanOptions{}, true, testCleanSafety{})
 	if err == nil || plan.Applied != 1 || len(b.writes) != 1 {
 		t.Fatalf("continued after replacement: %v %v", plan, err)
 	}

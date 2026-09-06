@@ -9,6 +9,7 @@ import (
 // Default global daemon settings and filesystem paths.
 const (
 	DefaultReconcileInterval     = time.Minute
+	DefaultInactiveGracePeriod   = 24 * time.Hour
 	DefaultManagementWorkers     = 0
 	DefaultLocalTransferWorkers  = 2
 	DefaultRemoteTransferWorkers = 1
@@ -28,6 +29,7 @@ type Config struct {
 // DaemonConfig controls reconciliation and worker concurrency.
 type DaemonConfig struct {
 	ReconcileInterval     Duration `toml:"reconcile_interval" json:"reconcile_interval"`
+	InactiveGracePeriod   Duration `toml:"inactive_grace_period" json:"inactive_grace_period"`
 	ManagementWorkers     int      `toml:"management_workers" json:"management_workers"`
 	LocalTransferWorkers  int      `toml:"local_transfer_workers" json:"local_transfer_workers"`
 	RemoteTransferWorkers int      `toml:"remote_transfer_workers" json:"remote_transfer_workers"`
@@ -52,11 +54,13 @@ type PathsConfig struct {
 // RemoteConfig defines an SSH replication destination.
 type RemoteConfig struct {
 	Transport      string   `toml:"transport" json:"transport"`
+	Endpoint       string   `toml:"endpoint" json:"endpoint,omitempty"`
 	Host           string   `toml:"host" json:"host"`
 	Port           int      `toml:"port" json:"port"`
 	User           string   `toml:"user" json:"user"`
 	Root           string   `toml:"root" json:"root"`
 	IdentityFile   string   `toml:"identity_file" json:"identity_file,omitempty"`
+	SSHShellPath   string   `toml:"ssh_shell_path" json:"ssh_shell_path,omitempty"`
 	ConnectTimeout Duration `toml:"connect_timeout" json:"connect_timeout"`
 }
 
@@ -74,6 +78,7 @@ func Defaults() Config {
 	return Config{
 		Daemon: DaemonConfig{
 			ReconcileInterval:     Duration{DefaultReconcileInterval},
+			InactiveGracePeriod:   Duration{DefaultInactiveGracePeriod},
 			ManagementWorkers:     DefaultManagementWorkers,
 			LocalTransferWorkers:  DefaultLocalTransferWorkers,
 			RemoteTransferWorkers: DefaultRemoteTransferWorkers,

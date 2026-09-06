@@ -33,11 +33,12 @@ leave the last complete generation unchanged. ZFS does not provide an atomic
 snapshot across these commands: other concurrent property edits converge on
 the next successful scan. Concurrent scans are serialized, reconciliation
 hints coalesce, and the coordinator accepts a configurable periodic interval.
-Pending/resumable dataset names are supplied by the future recovery layer.
+Pending and resumable work is represented by the transfer recovery layer; the
+daemon phase will feed that state into discovery and scheduling.
 
 Generation comparison reports changed and removed datasets. Disabling a dataset
 is visible in the next generation. The [lifecycle service](../snapshot-lifecycle.md)
-provides cancellation/quiescence gates and preview/apply cleanup; wiring those
+provides cancellation/quiescence gates and preview/apply clean; wiring those
 gates to live workers and exposing reconstructed recovery status remain in the
 daemon phase. Namespace exclusion during actual receives belongs to the transfer
 phase.
@@ -49,12 +50,13 @@ must wire activation transitions to the gate, hold the same lifecycle lock as
 standalone commands, and reconstruct recovery status. Queued cancelled tickets
 must be discarded; running management operations finish before quiescence.
 Transfer implementations must supply destination GUID verification and safe target
-probes before references can be released. The standalone CLI fails closed where
-these integrations are unavailable.
+probes before references can be released. The transfer engine now enforces that
+boundary for local and SSH targets; standalone clean still fails closed where
+live target coordination is unavailable.
 
 ## Test-only properties and received layers
 
-`org.boomerangz:cleanup-probe` and `org.boomerangz:state:probe` are disposable
+`org.boomerangz:clean-probe` and `org.boomerangz:state:probe` are disposable
 VM fixtures, not supported configuration or production metadata. OpenZFS 2.4.3
 retained hidden received values after plain inherit; `inherit -S` restored them.
 No direct libzfs removal path is pursued. See the integration test notes.

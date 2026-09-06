@@ -123,6 +123,28 @@ type localTestStream struct {
 	fail    bool
 }
 
+type remoteTestStream struct {
+	source      *localBackend
+	destination *localBackend
+}
+
+func (s remoteTestStream) Run(_ context.Context, send zfs.SendOptions, receive zfs.ReceiveOptions, estimate zfs.Estimate, _ func(zfs.Progress)) (zfs.Progress, error) {
+	var endpoint zfs.Object
+	for _, object := range s.source.source.Objects {
+		if object.Name == send.Snapshot {
+			endpoint = object
+		}
+	}
+	component := strings.TrimPrefix(endpoint.Name, "tank/data@")
+	s.destination.destExists = true
+	s.destination.inventory = append(s.destination.inventory, zfs.Dataset{Name: "backup/data", Type: zfs.Filesystem, EncryptionRoot: "-"})
+	s.destination.destination = zfs.State{Objects: []zfs.Object{
+		{Name: receive.Root, Type: "filesystem", GUID: 20, CreateTXG: 20},
+		{Name: receive.Root + "@" + component, Type: "snapshot", GUID: endpoint.GUID, CreateTXG: 21},
+	}}
+	return zfs.Progress{Bytes: estimate.Bytes}, nil
+}
+
 func (s localTestStream) Run(_ context.Context, send zfs.SendOptions, receive zfs.ReceiveOptions, estimate zfs.Estimate, _ func(zfs.Progress)) (zfs.Progress, error) {
 	s.backend.writes = append(s.backend.writes, "stream")
 	if s.fail {
@@ -130,7 +152,11 @@ func (s localTestStream) Run(_ context.Context, send zfs.SendOptions, receive zf
 	}
 	var endpoint zfs.Object
 	for _, object := range s.backend.source.Objects {
-		if object.Name == send.Snapshot {
+		selected := object.Name == send.Snapshot
+		if send.ResumeToken != "" && object.Type == "snapshot" && len(s.backend.source.Holds[object.Name]) > 0 {
+			selected = true
+		}
+		if selected && object.CreateTXG > endpoint.CreateTXG {
 			endpoint = object
 		}
 	}
@@ -142,6 +168,92 @@ func (s localTestStream) Run(_ context.Context, send zfs.SendOptions, receive zf
 		{Name: receive.Root + "@" + component, Type: "snapshot", GUID: endpoint.GUID, CreateTXG: 21},
 	}}
 	return zfs.Progress{Bytes: estimate.Bytes}, nil
+}
+
+func TestApplyResumesHeldReceiveAfterRestart(t *testing.T) {
+	t.Parallel()
+	backend, request := newLocalBackend(t)
+	failed, err := NewLocal(backend, localTestStream{backend: backend, fail: true}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := failed.Apply(t.Context(), request, nil); err == nil {
+		t.Fatal("initial interrupted transfer succeeded")
+	}
+	backend.destExists = true
+	backend.inventory = append(backend.inventory, zfs.Dataset{Name: "backup/data", Type: zfs.Filesystem, EncryptionRoot: "-"})
+	backend.destination = zfs.State{
+		Objects:      []zfs.Object{{Name: "backup/data", Type: "filesystem", GUID: 20, CreateTXG: 20}},
+		ResumeTokens: map[string]string{"backup/data": "1-resume-token"},
+	}
+
+	// A new engine instance proves recovery is reconstructed from ZFS state,
+	// rather than retained process memory.
+	restarted, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := restarted.Preview(t.Context(), request)
+	if err != nil || preview.Mode != "resume" || preview.Send.ResumeToken != "1-resume-token" {
+		t.Fatalf("preview=%+v err=%v", preview, err)
+	}
+	result, err := restarted.Apply(t.Context(), request, nil)
+	if err != nil || !result.Verified || result.Plan.Mode != "resume" {
+		t.Fatalf("result=%+v err=%v writes=%v", result, err, backend.writes)
+	}
+	if len(backend.source.Holds[result.Plan.Snapshot]) != 0 {
+		t.Fatal("verified resume retained source hold")
+	}
+}
+
+func TestApplyResumeSelectsEndpointProofAheadOfHeldIncrementalBase(t *testing.T) {
+	t.Parallel()
+	request, view := testFixture(t)
+	addDestinationBase(&view)
+	backend := &localBackend{inventory: slices.Clone(view.Inventory), source: view.Source, destination: view.Destination, destExists: true}
+	failed, err := NewLocal(backend, localTestStream{backend: backend, fail: true}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := failed.Apply(t.Context(), request, nil); err == nil {
+		t.Fatal("initial incremental transfer succeeded")
+	}
+	if len(backend.source.Holds) < 2 {
+		t.Fatalf("incremental endpoint and base were not both held: %v", backend.source.Holds)
+	}
+	backend.destination.ResumeTokens = map[string]string{"backup/data": "1-incremental-token"}
+	restarted, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := restarted.Apply(t.Context(), request, nil)
+	if err != nil || !result.Verified || result.Plan.Mode != "resume" || result.Plan.Snapshot != view.Source.Objects[2].Name {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestRemoteApplyKeepsSourceAndDestinationExecutorsSeparate(t *testing.T) {
+	t.Parallel()
+	source, request := newLocalBackend(t)
+	destination := &localBackend{inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem, EncryptionRoot: "-"}}}
+	request.Transport = "ssh"
+	request.RemoteName = "home"
+	request.CanonicalTarget = "ssh://replicator@backup.example.net:22/backup/data"
+	request.Policy.Remote = []string{"home"}
+	engine, err := NewRemote(source, destination, remoteTestStream{source: source, destination: destination}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Apply(t.Context(), request, nil)
+	if err != nil || !result.Verified || result.Plan.TargetBinding.Transport != "ssh" {
+		t.Fatalf("result=%+v err=%v source writes=%v destination writes=%v", result, err, source.writes, destination.writes)
+	}
+	if !slices.ContainsFunc(source.writes, func(write string) bool { return strings.Contains(write, targetBindingPrefix) }) {
+		t.Fatal("source-side target binding was not persisted locally")
+	}
+	if !slices.ContainsFunc(destination.writes, func(write string) bool { return strings.HasPrefix(write, "set backup/data") }) {
+		t.Fatal("destination reconciliation did not use the remote executor")
+	}
 }
 
 func newLocalBackend(t *testing.T) (*localBackend, Request) {

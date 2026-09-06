@@ -119,7 +119,7 @@ they do not prevent the daemon from managing unrelated datasets.
 
 ### 3.1 Property source and activation
 
-Configuration and cleanup discovery read only locally set and received
+Configuration and clean discovery read only locally set and received
 `org.boomerangz:*` properties. `boomerangz` resolves inheritance itself, but
 only locally configured public properties participate in effective policy.
 
@@ -462,7 +462,7 @@ Transient progress and process IDs remain in memory. Errors are retained in
 structured logs. After restart, the daemon reconstructs pending work from
 properties, snapshots, bookmarks, holds, and destination resume tokens.
 
-### 5.5 Deactivation and explicit cleanup
+### 5.5 Deactivation, delayed retirement, and explicit clean
 
 An active dataset becomes inactive when its resolved locally configured
 `enabled` value changes away from `on`. Removing a dataset's local property does
@@ -479,16 +479,48 @@ On an active-to-inactive transition, `boomerangz`:
   records their reconstructed result; and
 - exposes the dataset as disabled with retained recovery state in status output.
 
-Deactivation does not automatically destroy snapshots or bookmarks, release
-holds, abort receive resume tokens, or clear properties. This makes a temporary
-disable reversible and prevents a configuration edit from silently removing
-the only viable recovery path.
+Immediate deactivation does not destroy snapshots or bookmarks, release holds,
+abort receive resume tokens, or clear properties. This makes a temporary disable
+reversible and prevents a configuration edit from silently removing the only
+viable recovery path.
+
+The daemon records the first observed inactive time durably on an owned source
+root and schedules automatic retirement after `inactive_grace_period`, which
+defaults to 24 hours. Zero disables automatic retirement. The exact, locally set
+`org.boomerangz:state:inactive` marker is versioned and binds its UTC timestamp
+to the dataset GUID, lineage, and owner; inherited or received copies are never
+authority. If the daemon did not observe the transition, the grace period begins
+on the first later discovery of the inactive owned root; it never infers an
+earlier timestamp. Reactivation before the deadline clears the marker and
+cancels retirement. Reducing the configured interval may make an existing
+inactive root immediately eligible, so status shows the recorded time, deadline,
+planned effects, and blockers.
+
+After the grace period, automatic retirement uses the same ownership, GUID,
+quiescence, target-identity, and resume-state proofs as explicit clean. It:
+
+1. destroys only proven boomerangz-owned source snapshots and proven owned
+   replica snapshots within recorded target bindings;
+2. releases only proven holds and bookmarks and clears obsolete internal
+   recovery metadata after every target dependency is resolved;
+3. preserves locally configured public policy, especially an `enabled=off`
+   value needed to mask an active ancestor; and
+4. never destroys a live dataset, foreign snapshot, unknown reference, clone,
+   or interrupted receive.
+
+Remote target retirement is probed just in time. An unavailable target, active
+resume token, or ambiguous ownership leaves retirement pending with bounded
+retry and visible status; it never causes source proof to be discarded. This
+means automatic retirement reclaims safely attributable snapshot space without
+turning a temporary network outage into destructive abandonment.
 
 `boomerangz dataset clean` is the explicit decommissioning workflow. It
 accepts exact dataset scopes, `--recursive`, or an explicit `--all`; defaults to
 a read-only preview; and requires `--apply` before changing ZFS state. It
 coordinates with the daemon when one is running so the selected scope is
-quiescent before cleanup.
+quiescent before cleaning. Unlike delayed retirement, explicit clean may clear
+the selected public configuration and remains the immediate operator-controlled
+path.
 
 The phase-3 standalone implementation fails closed if the configured control
 socket exists. Daemon coordination and target probing are integration hooks for
@@ -510,7 +542,7 @@ For each selected local dataset clean:
    proven; and
 5. leaves snapshots and their data intact by default, after clearing their
    effective internal ownership metadata, so they become foreign snapshots.
-   Hidden received metadata may remain and can be restored externally; cleanup
+   Hidden received metadata may remain and can be restored externally; clean
    must report this limitation and must not promise irreversible erasure.
 
 An additional `--destroy-owned-snapshots` option may delete only snapshots that
@@ -518,13 +550,13 @@ pass the complete ownership proof and have no holds, clones, resume dependency,
 or other ZFS blocker. It is never implied by `--all` and is separately visible
 in the preview.
 
-Cleanup never reverts or clears non-`org.boomerangz:*` properties previously
+Clean never reverts or clears non-`org.boomerangz:*` properties previously
 applied through `set_prop`; their prior values are unknown and they may now be
 intentional target configuration. It also never aborts a destination resume
 token implicitly. An interrupted receive must first be resumed or explicitly
 abandoned through the separately guarded administrative workflow. Offline or
 unreachable targets are reported as incomplete and must be cleaned on their
-own host; package removal does not run destructive cleanup automatically.
+own host; package removal does not run destructive clean automatically.
 
 ## 6. Efficient dataset discovery
 
@@ -980,8 +1012,9 @@ build tag. Shared disposable-pool helpers live in
 
 The module declares Go 1.26 language semantics and pins the supported Go 1.26
 patch toolchain. Development tools are declared with `tool` directives in
-`go.mod` and invoked through `go tool`, including golangci-lint and any gRPC
-code-generation tools.
+`go.mod` and invoked through `go tool`, including golangci-lint, Buf, and the
+gRPC code-generation plugins. Buf owns protobuf formatting, linting, breaking
+change checks, and code generation through checked-in configuration.
 
 The golangci-lint configuration uses schema version 2, begins with a sensible
 standard set, and adds focused correctness checks rather than every available
@@ -994,6 +1027,9 @@ go test ./...
 go test -race ./...
 go vet ./...
 go tool golangci-lint run
+go tool buf format --diff --exit-code
+go tool buf lint
+go tool buf generate
 ```
 
 Generated gRPC API files are committed. CI regenerates them and fails if the
@@ -1002,7 +1038,7 @@ working tree changes.
 ### 13.1 Test strategy
 
 Unit tests cover policy resolution, command construction, scheduling, pruning,
-deactivation and cleanup planning, lineage authority and adoption, ownership
+deactivation and clean planning, lineage authority and adoption, ownership
 proofs, destination mapping, authentication scopes, and configuration merging.
 
 Fuzz tests cover:
@@ -1076,14 +1112,16 @@ and refusal to clean ambiguous or resume-dependent state.
    grid parsing, effective-policy inspection, and immutable generations.
 3. **Snapshot lifecycle**: implement lineage, naming, recursive and non-recursive
    snapshots, grid pruning, holds, bookmarks, adoption, deactivation, and
-   preview-first cleanup.
+   preview-first clean.
 4. **Local transfer**: implement full bootstrap, `-i`, `-I`, progress,
    receive-property handling, and GUID verification.
 5. **SSH and roadwarrior recovery**: implement JIT direct-ZFS probing, the
    optional versioned SSH-shell endpoint, explicit capability fallback, retry
-   with jitter, resume tokens, pending coalescing, and offline reconciliation.
+   with jitter, resume tokens, pending coalescing, offline reconciliation,
+   durable inactive grace state, and ownership-safe retirement planning.
 6. **Daemon and workers**: implement internal scheduling, independent bounded
-   worker pools, fairness, graceful shutdown, and systemd integration.
+   worker pools, fairness, execution of due retirement plans, graceful shutdown,
+   and systemd integration.
 7. **Control plane and UI**: implement gRPC over Unix sockets, status/watch,
    terminal progress, token pairing, and optional secured TCP listeners.
 8. **Hardening and packaging**: run destructive integration and fault tests,

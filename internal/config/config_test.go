@@ -73,6 +73,25 @@ func TestDefaultsValidate(t *testing.T) {
 	if config.Daemon.ReconcileInterval.Duration != time.Minute {
 		t.Fatalf("interval = %s, want 1m", config.Daemon.ReconcileInterval)
 	}
+	if config.Daemon.InactiveGracePeriod.Duration != 24*time.Hour {
+		t.Fatalf("inactive grace period = %s, want 24h", config.Daemon.InactiveGracePeriod)
+	}
+}
+
+func TestRemoteEndpointModes(t *testing.T) {
+	t.Parallel()
+	for _, endpoint := range []string{"", "auto", "direct", "ssh-shell"} {
+		cfg := Defaults()
+		cfg.Remotes["home"] = RemoteConfig{Transport: "ssh", Endpoint: endpoint, Host: "backup.example.net", Root: "tank/backups"}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("endpoint %q rejected: %v", endpoint, err)
+		}
+	}
+	cfg := Defaults()
+	cfg.Remotes["home"] = RemoteConfig{Transport: "ssh", Endpoint: "shell-command", Host: "backup.example.net", Root: "tank/backups"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("accepted unknown remote endpoint mode")
+	}
 }
 
 func TestWorkerSizing(t *testing.T) {
@@ -106,6 +125,11 @@ func TestWorkerSizing(t *testing.T) {
 		if err := invalid.Validate(); err == nil {
 			t.Fatalf("accepted invalid %s limit", field)
 		}
+	}
+	invalid := cfg
+	invalid.Daemon.InactiveGracePeriod.Duration = -time.Second
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("accepted negative inactive grace period")
 	}
 }
 

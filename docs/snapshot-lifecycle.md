@@ -40,8 +40,9 @@ Multiple candidate lineages or resume state block adoption. Adoption is
 exact-dataset only. Every preview shows the effective policy and target set. Local
 targets include their mapped dataset, stored binding, current pool/dataset GUID
 identity, and verification status; unavailable or mismatched local targets block
-apply. Remote targets remain unverified and suspended until the remote phase can
-independently revalidate them.
+apply. Remote targets are probed during adoption. An unreachable target is
+recorded as suspended and cannot receive work; rerun adoption when it is
+reachable to review its identity and mapping and clear the suspension.
 
 If the installation identity directory is lost while the original pools remain,
 the separate preview-first recovery command inventories activated roots:
@@ -64,18 +65,21 @@ colliding properties for the shared snapshot UUID. Versioned bookmarks record
 replication checkpoints. Old references remain until their dependencies are
 resolved; interrupted operations retain recovery metadata for retry.
 
-Cleanup verifies reference records, snapshot metadata, and GUIDs before releasing
-holds or deleting bookmarks. Unknown boomerangz-looking references block cleanup;
+Clean verifies reference records, snapshot metadata, and GUIDs before releasing
+holds or deleting bookmarks. Unknown boomerangz-looking references block clean;
 foreign references are never claimed. All internal property names and record
 contents are documented in [the property reference](dataset-policy.md).
 
 ## Deactivation
 
 Disabling management must preserve snapshots, holds, bookmarks and resume tokens.
-It is not a substitute for explicit decommissioning. Automatic scheduling and
-transfer cancellation are not yet available in this release.
+The default `inactive_grace_period` keeps an owned dataset recoverable for 24
+hours before it becomes eligible for automatic retirement; setting the period
+to zero disables automatic retirement. The durable inactive marker and
+ownership-safe retirement preview are available now. Scheduled execution begins
+with daemon scheduling.
 
-## Explicit cleanup
+## Explicit clean
 
 ```sh
 boomerangz dataset clean pool/data
@@ -97,16 +101,19 @@ including target settings previously applied through `set_prop`.
 
 Apply re-inventories before the first mutation and checks every subsequent
 transition against its intended effect. Failures stop further operations and
-report partial progress; cleanup does not roll back or implicitly abandon receives.
+report partial progress; clean does not roll back or implicitly abandon receives.
 Blockers include resume state, unproven references, conflicting lineage,
 unavailable target verification, and exposing inherited `enabled=on` from outside
-the selected scope. Cleanup is local; it never silently cleans another host.
+the selected scope. The clean operation is local; it never silently cleans
+another host.
 
 Standalone applies hold an exclusive `<paths.socket_path>.lifecycle.lock` for
 their duration. An existing control socket causes refusal: daemon coordination is
-not implemented yet. Target probing is also not implemented yet, so the CLI retains target references
-and reports a blocker rather than assuming the target has no recovery dependency.
-Use the same configured socket path for all cooperating processes.
+not implemented yet. Adoption probes configured local and SSH targets just in
+time; an unreachable SSH target is recorded as suspended and must be verified
+before replication resumes. Clean cannot yet probe target recovery dependencies,
+so it retains those references and reports a blocker. Use the same configured
+socket path for all cooperating processes.
 
 ZFS CLI operations do not provide atomic compare-and-swap against independent
 administrative commands. Avoid concurrent external ZFS changes during lifecycle
@@ -116,7 +123,7 @@ administration; observed changes cause refusal but cannot eliminate every race.
 
 Plain `zfs inherit` removes local values but only masks received values. `zfs inherit -S` can restore them. Hidden dynamic names
 can disappear from `zfs get all`; explicit known ownership-key queries still reveal
-their received values. Cleanup reports this limitation and never claims permanent
+their received values. The clean operation reports this limitation and never claims permanent
 erasure of received values. Restoring hidden snapshot metadata externally
 can restore ownership evidence; received public properties still never affect
 boomerangz policy.

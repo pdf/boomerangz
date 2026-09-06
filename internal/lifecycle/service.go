@@ -40,9 +40,9 @@ func NewService(backend Backend, installation string) (*Service, error) {
 	return &Service{backend: backend, installation: installation}, nil
 }
 
-// NewCleanupService constructs the explicitly administrative cleanup surface.
+// NewCleanService constructs the explicitly administrative clean surface.
 // It cannot authorize snapshot, reference, transfer, or adoption operations.
-func NewCleanupService(backend Backend) (*Service, error) {
+func NewCleanService(backend Backend) (*Service, error) {
 	if backend == nil {
 		return nil, fmt.Errorf("lifecycle backend is required")
 	}
@@ -219,7 +219,7 @@ func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive 
 		// Do not silently fork a lineage after reinstall or property removal.
 		for _, p := range state.Properties {
 			if strings.HasPrefix(p.Name, policy.StateNamespace) {
-				return Metadata{}, fmt.Errorf("existing internal metadata requires explicit adoption or cleanup")
+				return Metadata{}, fmt.Errorf("existing internal metadata requires explicit adoption or clean")
 			}
 		}
 		for _, values := range state.Received {

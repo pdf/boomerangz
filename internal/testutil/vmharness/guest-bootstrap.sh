@@ -91,7 +91,7 @@ setup() {
 	dd if=/dev/urandom of="$payload_device" bs=1M count=32 status=none
 	zfs create -o mountpoint=none "$destination_pool/data"
 	zfs allow -u "$test_user" snapshot,destroy,bookmark,hold,mount,release,send,userprop "$source_pool/data"
-	zfs allow -u "$test_user" compression,create,destroy,mount,mountpoint,readonly,receive,receive:append "$destination_pool/data"
+	zfs allow -u "$test_user" compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop "$destination_pool/data"
 
 	printf 'source_pool=%s\ndestination_pool=%s\n' "$source_pool" "$destination_pool"
 }

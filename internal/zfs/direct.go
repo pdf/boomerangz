@@ -15,7 +15,10 @@ import (
 
 const propertyNamespace = "org.boomerangz:"
 
-type commandRunner interface {
+// CommandRunner executes one fixed binary with typed arguments. It permits
+// transports such as SSH shell to reuse Direct's parsers without exposing raw
+// command construction to callers.
+type CommandRunner interface {
 	Run(context.Context, ...string) ([]byte, error)
 }
 
@@ -45,8 +48,8 @@ func (b *boundedOutput) Write(data []byte) (int, error) {
 
 // Direct executes typed operations using a locally installed zfs binary.
 type Direct struct {
-	runner     commandRunner
-	poolRunner commandRunner
+	runner     CommandRunner
+	poolRunner CommandRunner
 }
 
 // NewDirect creates a direct executor for an explicit zfs executable path.
@@ -55,6 +58,15 @@ func NewDirect(path string) (*Direct, error) {
 		return nil, errors.New("zfs executable path is required")
 	}
 	return &Direct{runner: execRunner{path: path}, poolRunner: execRunner{path: filepath.Join(filepath.Dir(path), "zpool")}}, nil
+}
+
+// NewDirectWithRunners creates an executor over bounded, transport-owned zfs
+// and zpool runners.
+func NewDirectWithRunners(zfsRunner, zpoolRunner CommandRunner) (*Direct, error) {
+	if zfsRunner == nil || zpoolRunner == nil {
+		return nil, errors.New("zfs and zpool command runners are required")
+	}
+	return &Direct{runner: zfsRunner, poolRunner: zpoolRunner}, nil
 }
 
 // InspectDatasetIdentity resolves an exact dataset GUID and the containing pool

@@ -14,7 +14,11 @@ import (
 
 // SendOptions describes a snapshot stream, never arbitrary command flags.
 type SendOptions struct {
+	// Source is used to validate local stream topology. It is normally derived
+	// from Snapshot, but is required when resuming from an opaque token.
+	Source        string
 	Snapshot      string
+	ResumeToken   string
 	Base          string
 	Intermediates bool
 	Recursive     bool
@@ -68,6 +72,19 @@ func MapReceiveDataset(source, root string, discard ReceiveDiscard) (string, err
 }
 
 func sendArgs(options SendOptions, estimate bool) ([]string, error) {
+	if options.ResumeToken != "" {
+		if err := validateResumeToken(options.ResumeToken); err != nil {
+			return nil, err
+		}
+		if options.Snapshot != "" || options.Base != "" || options.Intermediates || options.Recursive || options.LargeBlocks || options.Compressed || options.EmbeddedData || options.Raw || options.Properties {
+			return nil, fmt.Errorf("resume token cannot be combined with snapshot send options")
+		}
+		args := []string{"send"}
+		if estimate {
+			args = append(args, "-nP")
+		}
+		return append(args, "-t", options.ResumeToken), nil
+	}
 	if err := validateSnapshot(options.Snapshot); err != nil {
 		return nil, err
 	}
@@ -107,6 +124,23 @@ func sendArgs(options SendOptions, estimate bool) ([]string, error) {
 		args = append(args, flag, options.Base)
 	}
 	return append(args, options.Snapshot), nil
+}
+
+func validateResumeToken(token string) error {
+	if len(token) > 1024*1024 || strings.HasPrefix(token, "-") {
+		return fmt.Errorf("invalid receive resume token")
+	}
+	for _, r := range token {
+		if r < 0x21 || r > 0x7e {
+			return fmt.Errorf("invalid receive resume token")
+		}
+	}
+	return nil
+}
+
+// SendArguments returns the validated argv for a zfs send operation.
+func SendArguments(options SendOptions, estimate bool) ([]string, error) {
+	return sendArgs(options, estimate)
 }
 
 func streamProperty(name string) bool {
@@ -159,6 +193,11 @@ func receiveArgs(options ReceiveOptions) ([]string, error) {
 		args = append(args, "-x", key)
 	}
 	return append(args, options.Root), nil
+}
+
+// ReceiveArguments returns the validated argv for a zfs receive operation.
+func ReceiveArguments(options ReceiveOptions) ([]string, error) {
+	return receiveArgs(options)
 }
 
 // Estimate is explicitly unknown when the installed ZFS cannot estimate a send.
@@ -273,6 +312,10 @@ type LocalStream struct {
 	command func(context.Context, ...string) *exec.Cmd
 }
 
+// CommandFactory constructs one process from an already validated argument
+// vector. Transport packages use it to add a constrained process boundary.
+type CommandFactory func(context.Context, []string) *exec.Cmd
+
 // NewLocalStream selects an explicit ZFS executable, independently of query APIs.
 func NewLocalStream(path string) (*LocalStream, error) {
 	if path == "" {
@@ -283,6 +326,32 @@ func NewLocalStream(path string) (*LocalStream, error) {
 
 // Run copies one validated local ZFS send stream into a validated receive process.
 func (s *LocalStream) Run(ctx context.Context, send SendOptions, receive ReceiveOptions, estimate Estimate, report func(Progress)) (Progress, error) {
+	source := send.Source
+	if source == "" {
+		source, _, _ = strings.Cut(send.Snapshot, "@")
+	}
+	if err := validateDataset(source); err != nil {
+		return Progress{}, err
+	}
+	target, err := MapReceiveDataset(source, receive.Root, receive.Discard)
+	if err != nil {
+		return Progress{}, err
+	}
+	if source == target || strings.HasPrefix(source, target+"/") || strings.HasPrefix(target, source+"/") {
+		return Progress{}, fmt.Errorf("source and destination scopes overlap")
+	}
+	return RunPipeline(ctx, send, receive, estimate, report,
+		func(ctx context.Context, args []string) *exec.Cmd { return s.command(ctx, args...) },
+		func(ctx context.Context, args []string) *exec.Cmd { return s.command(ctx, args...) },
+	)
+}
+
+// RunPipeline validates both ZFS operations and copies a bounded stream between
+// transport-owned sender and receiver processes.
+func RunPipeline(ctx context.Context, send SendOptions, receive ReceiveOptions, estimate Estimate, report func(Progress), senderCommand, receiverCommand CommandFactory) (Progress, error) {
+	if senderCommand == nil || receiverCommand == nil {
+		return Progress{}, fmt.Errorf("sender and receiver commands are required")
+	}
 	sendArg, err := sendArgs(send, false)
 	if err != nil {
 		return Progress{}, err
@@ -291,17 +360,9 @@ func (s *LocalStream) Run(ctx context.Context, send SendOptions, receive Receive
 	if err != nil {
 		return Progress{}, err
 	}
-	source, _, _ := strings.Cut(send.Snapshot, "@")
-	target, err := MapReceiveDataset(source, receive.Root, receive.Discard)
-	if err != nil {
-		return Progress{}, err
-	}
-	if source == target || strings.HasPrefix(source, target+"/") || strings.HasPrefix(target, source+"/") {
-		return Progress{}, fmt.Errorf("source and destination scopes overlap")
-	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	sender, receiver := s.command(runCtx, sendArg...), s.command(runCtx, receiveArg...)
+	sender, receiver := senderCommand(runCtx, sendArg), receiverCommand(runCtx, receiveArg)
 	sender.WaitDelay = 2 * time.Second
 	receiver.WaitDelay = 2 * time.Second
 	var sendLog, receiveLog diagnosticBuffer
@@ -345,7 +406,7 @@ func (s *LocalStream) Run(ctx context.Context, send SendOptions, receive Receive
 	err = errors.Join(copyErr, closeErr, sendErr, receiveErr, ctx.Err())
 	result := writer.emit(err == nil)
 	if err != nil {
-		return result, fmt.Errorf("local stream: %w; sender: %s; receiver: %s", err, sendLog.String(), receiveLog.String())
+		return result, fmt.Errorf("stream pipeline: %w; sender: %s; receiver: %s", err, sendLog.String(), receiveLog.String())
 	}
 	return result, nil
 }

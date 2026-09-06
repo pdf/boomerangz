@@ -13,6 +13,7 @@ replace earlier arrays. Unknown fields are errors.
 ```toml
 [daemon]
 reconcile_interval = "1m"
+inactive_grace_period = "24h"
 management_workers = 0
 local_transfer_workers = 2
 remote_transfer_workers = 1
@@ -33,6 +34,7 @@ useful host, account, or destination dataset.
 | Field | Default | Purpose and constraints |
 | --- | --- | --- |
 | `reconcile_interval` | `"1m"` | Interval between global dataset discovery/reconciliation passes; not the snapshot cadence, which comes from each dataset's grid. Positive Go duration. |
+| `inactive_grace_period` | `"24h"` | Time an owned dataset remains safely recoverable after becoming inactive before it is eligible for automatic retirement. Zero disables automatic retirement; negative durations are invalid. Scheduled execution begins with the daemon phase. |
 | `management_workers` | `0` | Concurrent short ZFS management tasks. `0` automatically uses the logical CPU count available to the process; positive integers select an explicit limit. Negative values are invalid. |
 | `local_transfer_workers` | `2` | Maximum concurrent same-host transfers, independently limiting local storage load. Integer of at least one. |
 | `remote_transfer_workers` | `1` | Maximum concurrent network transfers across all remotes, independently limiting network load. Integer of at least one. |
@@ -74,12 +76,14 @@ accepted transport type; there is no default remote.
 | Field | Default | Purpose and constraints |
 | --- | --- | --- |
 | `transport` | Required | Connection protocol; currently must be `"ssh"`. |
+| `endpoint` | `"auto"` | `"direct"` uses remote ZFS tooling without requiring boomerangz; `"ssh-shell"` requires the constrained remote boomerangz service; `"auto"` prefers SSH shell and falls back to direct mode only when the service is unavailable. |
 | `host` | Required | User-selected SSH server hostname or address. |
 | `port` | `0` | SSH server port, from 0 to 65535; zero leaves the SSH default in effect. |
 | `user` | Empty | SSH login account; empty leaves account selection to SSH. |
 | `root` | Required | Destination ZFS dataset used as the receive path base, not a filesystem path. Final mapping also depends on `org.boomerangz:discard`. |
 | `identity_file` | Empty | Dedicated SSH private-key file; empty leaves identity selection to SSH. This field contains a path, not key contents. |
-| `connect_timeout` | `"0s"` | Limits connection establishment, not total transfer duration. Nonnegative Go duration; zero selects the application default, whose runtime value is not yet defined because SSH transfers are unavailable. |
+| `ssh_shell_path` | `"boomerangz"` | Remote executable name or absolute path used by `"auto"` and `"ssh-shell"` endpoint modes. It is not a shell fragment. |
+| `connect_timeout` | `"0s"` | Limits connection establishment, not total transfer duration. A nonnegative Go duration; zero selects the 10-second application default. |
 
 Illustrative only—replace these details with your own before use:
 
@@ -95,7 +99,8 @@ connect_timeout = "10s"
 ```
 
 Arbitrary SSH options, passwords, and shell fragments are intentionally absent
-from the schema.
+from the schema. See [SSH destinations](remote-ssh.md) for account delegation,
+host-key, direct-mode, and restricted SSH-shell setup.
 
 ## Listeners
 

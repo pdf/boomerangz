@@ -145,20 +145,20 @@ func TestGuestLifecycle(t *testing.T) {
 	}
 	// No transfer has run against this synthetic target; the test knows it has
 	// no active work or resume dependency. Production callers must probe targets.
-	cleanupPreview, err := service.Cleanup(t.Context(), root, CleanupOptions{Recursive: true}, false, testCleanupSafety{})
-	if err != nil || len(cleanupPreview.Blockers) > 0 {
-		t.Fatalf("cleanup preview=%v err=%v", cleanupPreview, err)
+	cleanPreview, err := service.Clean(t.Context(), root, CleanOptions{Recursive: true}, false, testCleanSafety{})
+	if err != nil || len(cleanPreview.Blockers) > 0 {
+		t.Fatalf("clean preview=%v err=%v", cleanPreview, err)
 	}
-	applied, err := service.Cleanup(t.Context(), root, CleanupOptions{Recursive: true}, true, testCleanupSafety{})
-	if err != nil || applied.Applied != len(cleanupPreview.Actions) {
-		t.Fatalf("cleanup apply=%v err=%v", applied, err)
+	applied, err := service.Clean(t.Context(), root, CleanOptions{Recursive: true}, true, testCleanSafety{})
+	if err != nil || applied.Applied != len(cleanPreview.Actions) {
+		t.Fatalf("clean apply=%v err=%v", applied, err)
 	}
 	state, err = direct.InspectState(t.Context(), root, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(state.Properties) != 0 || len(snapshotsIn(state, root)) != 1 || len(snapshotsIn(state, root+"/child")) != 1 {
-		t.Fatal("cleanup did not preserve snapshots and clear metadata")
+		t.Fatal("clean did not preserve snapshots and clear metadata")
 	}
 	if binary := os.Getenv("BOOMERANGZ_LIFECYCLE_GUEST_CLI"); binary != "" {
 		cliRoot := root + "/cli"
@@ -182,7 +182,7 @@ func TestGuestLifecycle(t *testing.T) {
 		}
 		remaining := snapshotsIn(state, cliRoot)
 		if len(remaining) != 1 || remaining[0].Name != cliRoot+"@foreign" || len(state.Properties) != 0 {
-			t.Fatal("CLI cleanup failed to delete owned snapshot or preserve foreign snapshot")
+			t.Fatal("CLI clean failed to delete owned snapshot or preserve foreign snapshot")
 		}
 	}
 	t.Logf("verified lifecycle on %s", root)

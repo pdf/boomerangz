@@ -39,6 +39,29 @@ func TestStreamArguments(t *testing.T) {
 	}
 }
 
+func TestResumeSendArguments(t *testing.T) {
+	t.Parallel()
+	args, err := sendArgs(SendOptions{Source: "tank/data", ResumeToken: "1-a_valid/token+value="}, false)
+	if err != nil || !reflect.DeepEqual(args, []string{"send", "-t", "1-a_valid/token+value="}) {
+		t.Fatalf("args=%v err=%v", args, err)
+	}
+	args, err = sendArgs(SendOptions{Source: "tank/data", ResumeToken: "1-token"}, true)
+	if err != nil || !reflect.DeepEqual(args, []string{"send", "-nP", "-t", "1-token"}) {
+		t.Fatalf("estimate args=%v err=%v", args, err)
+	}
+	for _, options := range []SendOptions{
+		{ResumeToken: "-option"},
+		{ResumeToken: "token with space"},
+		{ResumeToken: "token\nvalue"},
+		{ResumeToken: "1-token", Snapshot: "tank/data@end"},
+		{ResumeToken: "1-token", Recursive: true},
+	} {
+		if _, err := sendArgs(options, false); err == nil {
+			t.Fatalf("accepted invalid resume send %#v", options)
+		}
+	}
+}
+
 func TestReceiveMapping(t *testing.T) {
 	t.Parallel()
 	for mode, want := range map[ReceiveDiscard]string{ReceiveExact: "backup/root", ReceiveDropFirst: "backup/root/projects/app", ReceiveDropAll: "backup/root/app"} {

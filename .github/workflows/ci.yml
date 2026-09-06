@@ -20,3 +20,7 @@ jobs:
       - run: go test -race ./...
       - run: go vet ./...
       - run: go tool golangci-lint run
+      - run: go tool buf format --diff --exit-code
+      - run: go tool buf lint
+      - run: go tool buf generate
+      - run: git diff --exit-code

@@ -97,7 +97,7 @@ before creating uniquely named fixtures beneath the source pool's `data` subtree
 The guest account additionally needs delegated `create` for these fixture datasets.
 Fixtures remain until the guarded bootstrap tears down the test pools.
 
-To include command-line adoption and cleanup, also copy the built boomerangz CLI
+To include command-line adoption and clean, also copy the built boomerangz CLI
 and a test TOML file into the guest, then set `BOOMERANGZ_LIFECYCLE_GUEST_CLI` and
 `BOOMERANGZ_LIFECYCLE_GUEST_CONFIG` to those guest paths. Use a writable guest-only
 socket path in that TOML for the standalone lifecycle lock. Do not set these
@@ -107,7 +107,7 @@ The 2026-09-05 run used Linux `6.18.42-1-cachyos-lts`, `zfs-2.4.3-1` and matchin
 `zfs-kmod-2.4.3-1`, in the transient `run-lifecycle-260905` guest. The Go service
 and CLI passed creation of recursive and non-recursive snapshots, held-snapshot
 protection, exact-dataset pruning, lineage adoption, target-specific hold and
-bookmark creation/release, recursive cleanup preserving snapshot data, and CLI
+bookmark creation/release, recursive clean preserving snapshot data, and CLI
 owned-snapshot destruction preserving a foreign snapshot. Checkpoint tests used
 a synthetic target and explicitly supplied source GUID; they do not claim real
 destination verification, which belongs to the transfer phase.
@@ -121,6 +121,13 @@ bindings, recursive full and incremental `first`/`all` mappings on separate
 authoritative roots, and refusal of foreign latest destination history.
 The guarded cleanup verified the marker, serials, exact pool names and vdev parent
 disks before destroying both scratch pools; the transient domain then exited.
+
+The 2026-09-06 Phase 5 remote run used the transient
+`run-remote-260906a` guest. Direct SSH and gRPC over the persistent
+`ssh-shell` command channel each transferred and verified a 33,637,624-byte ZFS
+stream. The run also confirmed that destination delegation needs `userprop` for
+lineage and ownership reconciliation; the guarded bootstrap now grants it, in
+line with the documented SSH destination baseline.
 
 `guest-property-layers.sh` separately demonstrated that receive exclusions and
 plain inheritance retain hidden received values, including snapshot user-property

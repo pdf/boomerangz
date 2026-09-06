@@ -46,6 +46,15 @@ func (r Reference) SnapshotName(dataset string) string {
 	return r.snapshot()
 }
 
+// Members returns the protected source snapshot set, including the legacy
+// single-root representation as one member.
+func (r Reference) Members() []ReferenceSource {
+	return slices.Clone(r.sources())
+}
+
+// HoldName returns the deterministic target hold associated with this proof.
+func (r Reference) HoldName() string { return r.hold() }
+
 // ReleaseCompletedHold keeps the verified bookmark/record but releases its hold.
 // The caller must have verified the destination and excluded active/resume work.
 func (s *Service) ReleaseCompletedHold(ctx context.Context, dataset string, r Reference) error {

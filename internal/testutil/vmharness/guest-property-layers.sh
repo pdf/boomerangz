@@ -31,7 +31,7 @@ verify_pool "$destination_pool" "$3" dst
 
 readonly source=$source_pool/data/child
 readonly target=$destination_pool/data/property-layers
-readonly property=org.boomerangz:cleanup-probe
+readonly property=org.boomerangz:clean-probe
 readonly metadata=org.boomerangz:state:probe
 ! zfs list -H "$target" >/dev/null 2>&1 || fail "probe target already exists"
 zfs version

@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package boomerangz.replication.v1;
+
+option go_package = "github.com/pdf/boomerangz/internal/replication/rpc;rpc";
+
+service RemoteService {
+  rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+  rpc ListDatasets(ListDatasetsRequest) returns (ListDatasetsResponse);
+  rpc InspectDatasetIdentity(InspectDatasetIdentityRequest) returns (InspectDatasetIdentityResponse);
+  rpc InspectState(InspectStateRequest) returns (InspectStateResponse);
+  rpc SetProperties(SetPropertiesRequest) returns (SetPropertiesResponse);
+  rpc InheritProperty(InheritPropertyRequest) returns (InheritPropertyResponse);
+  rpc Receive(stream ReceiveRequest) returns (ReceiveResponse);
+}
+
+message CapabilitiesRequest {}
+
+message CapabilitiesResponse {
+  uint32 protocol_version = 1;
+  repeated string operations = 2;
+}
+
+message ListDatasetsRequest {}
+
+message Dataset {
+  string name = 1;
+  string type = 2;
+  string encryption_root = 3;
+}
+
+message ListDatasetsResponse {
+  repeated Dataset datasets = 1;
+}
+
+message InspectDatasetIdentityRequest {
+  string dataset = 1;
+}
+
+message InspectDatasetIdentityResponse {
+  string name = 1;
+  string type = 2;
+  uint64 guid = 3;
+  string pool = 4;
+  uint64 pool_guid = 5;
+}
+
+message InspectStateRequest {
+  string dataset = 1;
+  bool recursive = 2;
+}
+
+message Object {
+  string name = 1;
+  string type = 2;
+  uint64 guid = 3;
+  int64 creation = 4;
+  uint64 create_txg = 5;
+}
+
+message Property {
+  string dataset = 1;
+  string name = 2;
+  string value = 3;
+  string source = 4;
+}
+
+message ReceivedProperty {
+  string dataset = 1;
+  string name = 2;
+  string value = 3;
+}
+
+message NamedValue {
+  string name = 1;
+  string value = 2;
+}
+
+message NamedValues {
+  string name = 1;
+  repeated string values = 2;
+}
+
+message InspectStateResponse {
+  repeated Object objects = 1;
+  repeated Property properties = 2;
+  repeated ReceivedProperty received = 3;
+  repeated NamedValue resume_tokens = 4;
+  repeated NamedValues clones = 5;
+  repeated NamedValues holds = 6;
+}
+
+message SetPropertiesRequest {
+  string dataset = 1;
+  map<string, string> properties = 2;
+}
+
+message InheritPropertyRequest {
+  string dataset = 1;
+  string property = 2;
+}
+
+message SetPropertiesResponse {}
+
+message InheritPropertyResponse {}
+
+message ReceiveOptions {
+  string root = 1;
+  string discard = 2;
+  map<string, string> set = 3;
+  repeated string exclude = 4;
+}
+
+message ReceiveRequest {
+  ReceiveOptions options = 1;
+  bytes data = 2;
+}
+
+message ReceiveResponse {
+  uint64 bytes = 1;
+}

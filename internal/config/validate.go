@@ -16,6 +16,9 @@ func (c Config) Validate() error {
 	if c.Daemon.ReconcileInterval.Duration <= 0 {
 		problems = append(problems, errors.New("daemon.reconcile_interval must be positive"))
 	}
+	if c.Daemon.InactiveGracePeriod.Duration < 0 {
+		problems = append(problems, errors.New("daemon.inactive_grace_period must be nonnegative (0 disables automatic retirement)"))
+	}
 	if c.Daemon.ManagementWorkers < 0 {
 		problems = append(problems, errors.New("daemon.management_workers must be nonnegative (0 selects automatic sizing)"))
 	}
@@ -41,6 +44,9 @@ func (c Config) Validate() error {
 		if remote.Transport != "ssh" {
 			problems = append(problems, fmt.Errorf("remote %q: transport must be ssh", name))
 		}
+		if remote.Endpoint != "" && remote.Endpoint != "auto" && remote.Endpoint != "direct" && remote.Endpoint != "ssh-shell" {
+			problems = append(problems, fmt.Errorf("remote %q: endpoint must be auto, direct, or ssh-shell", name))
+		}
 		if remote.Host == "" || remote.Root == "" {
 			problems = append(problems, fmt.Errorf("remote %q: host and root are required", name))
 		}
@@ -49,6 +55,9 @@ func (c Config) Validate() error {
 		}
 		if remote.ConnectTimeout.Duration < 0 {
 			problems = append(problems, fmt.Errorf("remote %q: connect_timeout cannot be negative", name))
+		}
+		if remote.SSHShellPath != "" && remote.SSHShellPath != "boomerangz" && (!filepath.IsAbs(remote.SSHShellPath) || strings.ContainsAny(remote.SSHShellPath, "\x00\r\n\t ")) {
+			problems = append(problems, fmt.Errorf("remote %q: ssh_shell_path must be boomerangz or an absolute executable path", name))
 		}
 		if strings.ContainsAny(remote.Root, "@#\t\r\n ") || strings.HasPrefix(remote.Root, "/") {
 			problems = append(problems, fmt.Errorf("remote %q: root must be a ZFS dataset name", name))

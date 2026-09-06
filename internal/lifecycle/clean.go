@@ -7,55 +7,62 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
-// CleanupSafety must establish quiescence for the duration of apply, and reject
+// CleanSafety must establish quiescence for the duration of apply, and reject
 // inaccessible targets or targets with resume state. Neither check may abandon
 // a receive or release a hold as a side effect. Preview uses the same checks.
-type CleanupSafety interface {
+type CleanSafety interface {
 	Quiescent(context.Context, []string) error
 	CheckTarget(context.Context, string) error
 }
 
-type cleanupBackend interface {
+type cleanBackend interface {
 	referenceBackend
 	GetActivationProperties(context.Context) ([]zfs.Property, error)
 }
 
-// CleanupOptions always select an exact local dataset unless Recursive is set.
+// CleanOptions always select an exact local dataset unless Recursive is set.
 // DestroyOwnedSnapshots is independent of scope selection and defaults false.
-type CleanupOptions struct {
+type CleanOptions struct {
 	Recursive             bool `json:"recursive"`
 	DestroyOwnedSnapshots bool `json:"destroy_owned_snapshots"`
 }
 
-// CleanupAction is informational, never accepted as a raw mutation request.
-type CleanupAction struct {
+// CleanAction is informational, never accepted as a raw mutation request.
+type CleanAction struct {
 	Operation string `json:"operation"`
 	Object    string `json:"object"`
 	Property  string `json:"property,omitempty"`
 	GUID      uint64 `json:"guid,omitempty"`
 }
 
-// CleanupPlan includes all blockers. No mutation occurs if any blocker remains.
+// CleanPlan includes all blockers. No mutation occurs if any blocker remains.
 // Hidden received values cannot be exhaustively enumerated or erased by the CLI.
-type CleanupPlan struct {
-	Dataset  string          `json:"dataset"`
-	Options  CleanupOptions  `json:"options"`
-	Actions  []CleanupAction `json:"actions"`
-	Blockers []string        `json:"blockers"`
-	Warnings []string        `json:"warnings"`
-	Applied  int             `json:"applied"`
+type CleanPlan struct {
+	Dataset  string        `json:"dataset"`
+	Options  CleanOptions  `json:"options"`
+	Actions  []CleanAction `json:"actions"`
+	Blockers []string      `json:"blockers"`
+	Warnings []string      `json:"warnings"`
+	Applied  int           `json:"applied"`
 }
 
-func (s *Service) cleanupPlan(ctx context.Context, dataset string, options CleanupOptions, safety CleanupSafety) (CleanupPlan, zfs.State, error) {
-	plan := CleanupPlan{Dataset: dataset, Options: options, Warnings: []string{"inherit masks received properties; hidden received values may remain and can be restored externally"}}
-	backend, ok := s.backend.(cleanupBackend)
+type cleanMode struct {
+	retirement bool
+	now        time.Time
+	grace      time.Duration
+}
+
+func (s *Service) cleanPlan(ctx context.Context, dataset string, options CleanOptions, safety CleanSafety, mode cleanMode) (CleanPlan, zfs.State, error) {
+	plan := CleanPlan{Dataset: dataset, Options: options, Warnings: []string{"inherit masks received properties; hidden received values may remain and can be restored externally"}}
+	backend, ok := s.backend.(cleanBackend)
 	if !ok {
-		return plan, zfs.State{}, fmt.Errorf("cleanup operations unavailable")
+		return plan, zfs.State{}, fmt.Errorf("clean operations unavailable")
 	}
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return plan, zfs.State{}, err
@@ -70,6 +77,24 @@ func (s *Service) cleanupPlan(ctx context.Context, dataset string, options Clean
 	activation, err := backend.GetActivationProperties(ctx)
 	if err != nil {
 		return plan, state, err
+	}
+	if mode.retirement {
+		active, activationErr := locallyActive(activation, dataset)
+		if activationErr != nil {
+			plan.Blockers = append(plan.Blockers, activationErr.Error())
+		} else if active {
+			plan.Blockers = append(plan.Blockers, "retirement requires an inactive source root")
+		}
+		inactive, inactiveErr := inactivePlan(state, dataset, s.installation, active, mode.now, mode.grace)
+		if inactiveErr != nil {
+			plan.Blockers = append(plan.Blockers, inactiveErr.Error())
+		} else if inactive.Action != "" {
+			plan.Blockers = append(plan.Blockers, "inactive marker transition must complete before retirement")
+		} else if !inactive.Automatic {
+			plan.Blockers = append(plan.Blockers, "automatic retirement is disabled")
+		} else if !inactive.Due {
+			plan.Blockers = append(plan.Blockers, "inactive grace period has not elapsed")
+		}
 	}
 	selected := map[string]bool{}
 	var datasets []string
@@ -86,7 +111,10 @@ func (s *Service) cleanupPlan(ctx context.Context, dataset string, options Clean
 		plan.Blockers = append(plan.Blockers, err.Error())
 	}
 	for _, name := range datasets {
-		// Find the nearest activation ancestor outside the cleanup scope. A local
+		if mode.retirement {
+			continue
+		}
+		// Find the nearest activation ancestor outside the clean scope. A local
 		// off between this dataset and an on ancestor prevents reactivation.
 		nearest := ""
 		value := ""
@@ -97,7 +125,7 @@ func (s *Service) cleanupPlan(ctx context.Context, dataset string, options Clean
 			}
 		}
 		if value == "on" {
-			plan.Blockers = append(plan.Blockers, fmt.Sprintf("cleanup of %s would expose enabled=on from %s", name, nearest))
+			plan.Blockers = append(plan.Blockers, fmt.Sprintf("cleaning %s would expose enabled=on from %s", name, nearest))
 		}
 	}
 	rootLineage, err := storedLineage(state, dataset)
@@ -153,7 +181,7 @@ func (s *Service) cleanupPlan(ctx context.Context, dataset string, options Clean
 						plan.Blockers = append(plan.Blockers, "held snapshot ownership changed: "+snapshot)
 					} else {
 						provedHolds[snapshot+"\x00"+r.hold()] = true
-						plan.Actions = append(plan.Actions, CleanupAction{Operation: "release", Object: snapshot, Property: r.hold(), GUID: source.GUID})
+						plan.Actions = append(plan.Actions, CleanAction{Operation: "release", Object: snapshot, Property: r.hold(), GUID: source.GUID})
 					}
 				}
 				for _, o := range state.Objects {
@@ -162,7 +190,7 @@ func (s *Service) cleanupPlan(ctx context.Context, dataset string, options Clean
 							plan.Blockers = append(plan.Blockers, "bookmark ownership changed: "+o.Name)
 						} else {
 							provedBookmarks[o.Name] = true
-							plan.Actions = append(plan.Actions, CleanupAction{Operation: "destroy-bookmark", Object: o.Name, GUID: o.GUID})
+							plan.Actions = append(plan.Actions, CleanAction{Operation: "destroy-bookmark", Object: o.Name, GUID: o.GUID})
 						}
 					}
 				}
@@ -195,22 +223,32 @@ func (s *Service) cleanupPlan(ctx context.Context, dataset string, options Clean
 					}
 				}
 				if blocked {
-					plan.Warnings = append(plan.Warnings, "retaining dependent snapshot: "+snapshot.Name)
+					if mode.retirement {
+						plan.Blockers = append(plan.Blockers, "dependent owned snapshot prevents retirement: "+snapshot.Name)
+					} else {
+						plan.Warnings = append(plan.Warnings, "retaining dependent snapshot: "+snapshot.Name)
+					}
 					continue
 				}
 				destroyed[snapshot.Name] = true
-				plan.Actions = append(plan.Actions, CleanupAction{Operation: "destroy-snapshot", Object: snapshot.Name, GUID: snapshot.GUID})
+				plan.Actions = append(plan.Actions, CleanAction{Operation: "destroy-snapshot", Object: snapshot.Name, GUID: snapshot.GUID})
 			}
 		}
 	}
 	keys := map[string]bool{}
 	for _, p := range state.Properties {
+		if mode.retirement && (policy.IsPublic(p.Name) || strings.Contains(p.Dataset, "@") || strings.Contains(p.Dataset, "#")) {
+			continue
+		}
 		if strings.HasPrefix(p.Name, policy.Namespace) && !destroyed[p.Dataset] {
 			keys[p.Dataset+"\x00"+p.Name] = true
 		}
 	}
 	for object, values := range state.Received {
 		for key := range values {
+			if mode.retirement && (policy.IsPublic(key) || strings.Contains(object, "@") || strings.Contains(object, "#")) {
+				continue
+			}
 			if strings.HasPrefix(key, policy.Namespace) && !destroyed[object] {
 				keys[object+"\x00"+key] = true
 			}
@@ -218,11 +256,11 @@ func (s *Service) cleanupPlan(ctx context.Context, dataset string, options Clean
 	}
 	for key := range keys {
 		object, property, _ := strings.Cut(key, "\x00")
-		plan.Actions = append(plan.Actions, CleanupAction{Operation: "inherit", Object: object, Property: property})
+		plan.Actions = append(plan.Actions, CleanAction{Operation: "inherit", Object: object, Property: property})
 	}
 	// Drop references before destroying snapshots, clear snapshot metadata before
 	// dataset-level proofs, and clear dataset lineage last. Exact commands only.
-	rank := func(a CleanupAction) int {
+	rank := func(a CleanAction) int {
 		switch a.Operation {
 		case "destroy-bookmark":
 			return 0
@@ -239,7 +277,7 @@ func (s *Service) cleanupPlan(ctx context.Context, dataset string, options Clean
 		}
 		return 4
 	}
-	slices.SortFunc(plan.Actions, func(a, b CleanupAction) int {
+	slices.SortFunc(plan.Actions, func(a, b CleanAction) int {
 		if rank(a) != rank(b) {
 			return rank(a) - rank(b)
 		}
@@ -254,27 +292,31 @@ func (s *Service) cleanupPlan(ctx context.Context, dataset string, options Clean
 	return plan, state, nil
 }
 
-// Cleanup previews by default. Apply reconstructs and compares the entire plan
+// Clean previews by default. Apply reconstructs and compares the entire plan
 // before the first write and checks the remaining inventory before every write.
 // Partial progress is reported; it never rolls back, aborts receives, or uses -S.
-func (s *Service) Cleanup(ctx context.Context, dataset string, options CleanupOptions, apply bool, safety CleanupSafety) (CleanupPlan, error) {
+func (s *Service) Clean(ctx context.Context, dataset string, options CleanOptions, apply bool, safety CleanSafety) (CleanPlan, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	plan, state, err := s.cleanupPlan(ctx, dataset, options, safety)
+	return s.clean(ctx, dataset, options, apply, safety, cleanMode{})
+}
+
+func (s *Service) clean(ctx context.Context, dataset string, options CleanOptions, apply bool, safety CleanSafety, mode cleanMode) (CleanPlan, error) {
+	plan, state, err := s.cleanPlan(ctx, dataset, options, safety, mode)
 	if err != nil || !apply {
 		return plan, err
 	}
 	if len(plan.Blockers) > 0 {
-		return plan, fmt.Errorf("cleanup blocked")
+		return plan, fmt.Errorf("clean blocked")
 	}
-	fresh, current, err := s.cleanupPlan(ctx, dataset, options, safety)
+	fresh, current, err := s.cleanPlan(ctx, dataset, options, safety, mode)
 	if err != nil {
 		return plan, err
 	}
 	if !reflect.DeepEqual(plan, fresh) || !reflect.DeepEqual(state, current) {
-		return plan, fmt.Errorf("cleanup state changed; preview again")
+		return plan, fmt.Errorf("clean state changed; preview again")
 	}
-	backend := s.backend.(cleanupBackend)
+	backend := s.backend.(cleanBackend)
 	for _, action := range plan.Actions {
 		if err := s.unchanged(ctx, dataset, options.Recursive, current); err != nil {
 			return plan, err
@@ -289,7 +331,7 @@ func (s *Service) Cleanup(ctx context.Context, dataset string, options CleanupOp
 		case "inherit":
 			err = backend.InheritProperty(ctx, action.Object, action.Property)
 		default:
-			err = fmt.Errorf("unknown cleanup operation")
+			err = fmt.Errorf("unknown clean operation")
 		}
 		if err != nil {
 			return plan, err
@@ -300,13 +342,13 @@ func (s *Service) Cleanup(ctx context.Context, dataset string, options CleanupOp
 		if err != nil {
 			return plan, err
 		}
-		if !cleanupTransition(current, after, action) {
-			return plan, fmt.Errorf("unexpected state change after cleanup action on %s", action.Object)
+		if !cleanTransition(current, after, action) {
+			return plan, fmt.Errorf("unexpected state change after clean action on %s", action.Object)
 		}
 		current = after
 		// Unexpected dependencies appearing during apply always stop further work.
 		if len(current.ResumeTokens) > 0 {
-			return plan, fmt.Errorf("resume state appeared during cleanup")
+			return plan, fmt.Errorf("resume state appeared during clean")
 		}
 	}
 	return plan, nil
@@ -315,7 +357,7 @@ func (s *Service) Cleanup(ctx context.Context, dataset string, options CleanupOp
 // Only the exact intended effect may become the baseline for the next command.
 // Received keys may disappear from CLI enumeration after inheritance, but may
 // not appear or change value unnoticed.
-func cleanupTransition(before, after zfs.State, action CleanupAction) bool {
+func cleanTransition(before, after zfs.State, action CleanAction) bool {
 	expected := before
 	expected.Objects = slices.Clone(before.Objects)
 	expected.Properties = slices.Clone(before.Properties)

@@ -19,16 +19,44 @@ type Request struct {
 	DestinationRoot string
 	Snapshot        string
 	Policy          policy.Effective
+	// Transport defaults to local. RemoteName and CanonicalTarget are required
+	// for ssh and are derived from validated global configuration by the caller.
+	Transport       string
+	RemoteName      string
+	CanonicalTarget string
 }
 
 // View is a complete preflight inventory. Destination includes descendants even
 // for nonrecursive sends, so a descendant resume token is never overlooked.
 type View struct {
-	Inventory           []zfs.Dataset
-	Source              zfs.State
-	Destination         zfs.State
-	DestinationExists   bool
-	DestinationIdentity zfs.DatasetIdentity
+	Inventory            []zfs.Dataset
+	DestinationInventory []zfs.Dataset
+	Source               zfs.State
+	Destination          zfs.State
+	DestinationExists    bool
+	DestinationIdentity  zfs.DatasetIdentity
+	BindingIdentity      zfs.DatasetIdentity
+}
+
+func requestTransport(request Request) string {
+	if request.Transport == "" {
+		return "local"
+	}
+	return request.Transport
+}
+
+func destinationInventory(request Request, view View) []zfs.Dataset {
+	if requestTransport(request) == "local" || view.DestinationInventory == nil {
+		return view.Inventory
+	}
+	return view.DestinationInventory
+}
+
+func canonicalTarget(request Request) string {
+	if requestTransport(request) == "local" && request.CanonicalTarget == "" {
+		return canonicalLocalTarget(request.DestinationRoot)
+	}
+	return request.CanonicalTarget
 }
 
 // Expected records the exact received snapshot and source GUID to verify.
@@ -79,6 +107,21 @@ func ownership(state zfs.State, object zfs.Object, lineage string) (lifecycle.Me
 	return lifecycle.Ownership(snapshot, lineage)
 }
 
+func completeReceiveExclusions(options *zfs.ReceiveOptions, p policy.Effective, source zfs.State) {
+	for key := range p.Values {
+		if policy.IsPublic(key) {
+			options.Exclude = append(options.Exclude, key)
+		}
+	}
+	for _, property := range source.Properties {
+		if policy.IsPublic(property.Name) || strings.HasPrefix(property.Name, lifecycle.ReferencePrefix) || strings.HasPrefix(property.Name, targetBindingPrefix) {
+			options.Exclude = append(options.Exclude, property.Name)
+		}
+	}
+	slices.Sort(options.Exclude)
+	options.Exclude = slices.Compact(options.Exclude)
+}
+
 // Build validates mapping, lineage, history and receive isolation without writes.
 func Build(request Request, view View, installation string) (Plan, error) {
 	plan := Plan{Source: request.Source}
@@ -92,15 +135,35 @@ func Build(request Request, view View, installation string) (Plan, error) {
 	if err := lifecycle.ActiveRoot(p, request.Source); err != nil {
 		return plan, err
 	}
-	if !slices.Contains(p.Local, request.DestinationRoot) {
-		return plan, fmt.Errorf("destination is not configured by the source local property")
+	transport := requestTransport(request)
+	canonical := request.CanonicalTarget
+	switch transport {
+	case "local":
+		if !slices.Contains(p.Local, request.DestinationRoot) {
+			return plan, fmt.Errorf("destination is not configured by the source local property")
+		}
+		if canonical == "" {
+			canonical = canonicalLocalTarget(request.DestinationRoot)
+		}
+		if canonical != canonicalLocalTarget(request.DestinationRoot) {
+			return plan, fmt.Errorf("local canonical target does not match destination")
+		}
+	case "ssh":
+		if request.RemoteName == "" || !slices.Contains(p.Remote, request.RemoteName) {
+			return plan, fmt.Errorf("remote is not configured by the source remote property")
+		}
+		if canonical == "" || strings.ContainsAny(canonical, "\x00\r\n") {
+			return plan, fmt.Errorf("canonical remote target is required")
+		}
+	default:
+		return plan, fmt.Errorf("unsupported transfer transport %q", transport)
 	}
 	target, err := zfs.MapReceiveDataset(request.Source, request.DestinationRoot, zfs.ReceiveDiscard(p.Discard))
 	if err != nil {
 		return plan, err
 	}
 	plan.Destination = target
-	if inside(target, request.Source) || inside(request.Source, target) {
+	if transport == "local" && (inside(target, request.Source) || inside(request.Source, target)) {
 		return plan, fmt.Errorf("source and destination scopes overlap")
 	}
 	source := objectMap(view.Source)
@@ -138,7 +201,15 @@ func Build(request Request, view View, installation string) (Plan, error) {
 			return plan, fmt.Errorf("source dataset lacks complete matching inventory: %s", object.Name)
 		}
 	}
-	if view.DestinationIdentity.Name == "" || inventory[view.DestinationIdentity.Name].Name == "" || inventory[view.DestinationIdentity.Name].Type != view.DestinationIdentity.Type {
+	destinationRows := destinationInventory(request, view)
+	destinationDatasets := map[string]zfs.Dataset{}
+	for _, d := range destinationRows {
+		if _, duplicate := destinationDatasets[d.Name]; duplicate {
+			return plan, fmt.Errorf("duplicate dataset in destination transfer inventory: %s", d.Name)
+		}
+		destinationDatasets[d.Name] = d
+	}
+	if view.DestinationIdentity.Name == "" || destinationDatasets[view.DestinationIdentity.Name].Name == "" || destinationDatasets[view.DestinationIdentity.Name].Type != view.DestinationIdentity.Type {
 		return plan, fmt.Errorf("destination identity does not match sparse inventory")
 	}
 	if view.DestinationExists {
@@ -148,7 +219,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		}
 	} else {
 		nearest := ""
-		for name := range inventory {
+		for name := range destinationDatasets {
 			if inside(target, name) && len(name) > len(nearest) {
 				nearest = name
 			}
@@ -181,10 +252,17 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		return plan, err
 	}
 	plan.Lineage = lineage
+	suspended, err := TargetSuspended(view.Source, request.Source, canonical)
+	if err != nil {
+		return plan, err
+	}
+	if suspended {
+		return plan, fmt.Errorf("target is suspended pending explicit remote revalidation")
+	}
 	if view.DestinationIdentity.Name == "" {
 		return plan, fmt.Errorf("destination identity is missing")
 	}
-	wantedBinding, err := bindingFor(request, target, view.DestinationIdentity)
+	wantedBinding, err := bindingForTarget(request, target, view.DestinationIdentity, transport, canonical)
 	if err != nil {
 		return plan, err
 	}
@@ -264,7 +342,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		plan.Endpoints = append(plan.Endpoints, Expected{Source: snap.Name, Destination: mapped + "@" + component, GUID: snap.GUID, Metadata: &metadata})
 	}
 	plan.Warnings = slices.Clone(p.Warnings)
-	plan.Send = zfs.SendOptions{Snapshot: endpoint.Name, Recursive: p.Send.Replicate, LargeBlocks: p.Send.LargeBlocks, Compressed: p.Send.Compressed, EmbeddedData: p.Send.EmbeddedData, Raw: p.Send.Raw, Properties: p.Send.Props}
+	plan.Send = zfs.SendOptions{Source: request.Source, Snapshot: endpoint.Name, Recursive: p.Send.Replicate, LargeBlocks: p.Send.LargeBlocks, Compressed: p.Send.Compressed, EmbeddedData: p.Send.EmbeddedData, Raw: p.Send.Raw, Properties: p.Send.Props}
 	plan.Receive = zfs.ReceiveOptions{Root: request.DestinationRoot, Discard: zfs.ReceiveDiscard(p.Discard), Set: maps.Clone(p.SetProperties), Exclude: slices.Clone(p.IgnoreProperties)}
 	already := view.DestinationExists
 	for _, expected := range plan.Endpoints {
@@ -287,7 +365,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 			}
 			parent = parent[:index]
 		}
-		if _, exists := inventory[parent]; !exists {
+		if _, exists := destinationDatasets[parent]; !exists {
 			return plan, fmt.Errorf("receive parent %s does not exist", parent)
 		}
 	} else {
@@ -374,18 +452,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 	}
 	// Include all known public keys and source recovery references, but retain the
 	// three minimal ownership keys. No prefix wildcard exists in receive -x.
-	for key := range p.Values {
-		if policy.IsPublic(key) {
-			plan.Receive.Exclude = append(plan.Receive.Exclude, key)
-		}
-	}
-	for _, property := range view.Source.Properties {
-		if policy.IsPublic(property.Name) || strings.HasPrefix(property.Name, lifecycle.ReferencePrefix) || strings.HasPrefix(property.Name, targetBindingPrefix) {
-			plan.Receive.Exclude = append(plan.Receive.Exclude, property.Name)
-		}
-	}
-	slices.Sort(plan.Receive.Exclude)
-	plan.Receive.Exclude = slices.Compact(plan.Receive.Exclude)
+	completeReceiveExclusions(&plan.Receive, p, view.Source)
 	slices.SortFunc(plan.Expected, func(a, b Expected) int { return strings.Compare(a.Source, b.Source) })
 	slices.SortFunc(plan.Endpoints, func(a, b Expected) int { return strings.Compare(a.Source, b.Source) })
 	slices.Sort(plan.Warnings)

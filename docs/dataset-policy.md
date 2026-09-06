@@ -59,7 +59,7 @@ transfer behavior; automatic transfers are not available in the current release.
 
 | Suffix | Default | Values | Purpose |
 | --- | --- | --- | --- |
-| `enabled` | `off` | `on`, `off` | Opts a dataset into automatic management; local `off` masks inherited activation. Disabling preserves snapshots and recovery metadata, rather than cleaning them up. |
+| `enabled` | `off` | `on`, `off` | Opts a dataset into automatic management; local `off` masks inherited activation. Disabling preserves snapshots and recovery metadata during the configured inactive grace period. |
 | `remote` | Unset | Comma-separated remote names | Selects destinations defined in global `[remotes.NAME]` tables. No remote is supplied automatically. |
 | `local` | Unset | Comma-separated dataset names | Selects receive destinations on this host. |
 | `policy` | `12x5m,24x1h,14x1d` | Grid of positive counts and durations (`m`, `h`, `d`, `w`, `mo`, `y`) | Determines snapshot cadence and retention windows, as described above. |
@@ -83,6 +83,7 @@ creation timestamp, and ZFS GUID must agree.
 | `org.boomerangz:state:owner` | Unset until managed | Installation UUID | Explicitly local source-root owner. It must match `<identity_dir>/installation-id` before automatic mutation; received and inherited values are provenance only. |
 | `org.boomerangz:state:snapshot` | Unset until managed | UUID | UUID identifying an individual managed snapshot. |
 | `org.boomerangz:state:created` | Unset until managed | RFC3339Nano UTC timestamp | Snapshot creation timestamp in UTC, matching the managed snapshot name. |
+| `org.boomerangz:state:inactive` | Unset while active | Versioned JSON identity and UTC timestamp | Explicitly local record of when an owned source root became inactive. It binds the grace-period start to the dataset GUID, lineage, and installation owner; reactivation removes it. |
 | `org.boomerangz:state:target:<target-id>` | Unset until first transfer | Versioned JSON identity | Persistent source-root binding for canonical transport, receive mapping, destination pool GUID, and existing destination or ancestor GUID. Every local job revalidates it; name, GUID, or mapping changes require explicit rebind/reseed. |
 | `org.boomerangz:state:reference:<target-id>:<snapshot-uuid>` | Unset until managed | JSON recovery proof | Local JSON recovery proof binding a non-secret canonical target identity, snapshot metadata and source GUID to a target hold and versioned bookmark. `target-id` is the SHA-256 hex digest of the target identity. Written before taking a hold; retained until both hold and bookmark are released. Never configure manually or populate with credentials. |
 

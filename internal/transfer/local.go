@@ -38,9 +38,11 @@ type Result struct {
 // coordinate other processes and retain a stable effective policy generation.
 type Local struct {
 	backend      Backend
+	target       zfs.Executor
 	stream       Stream
 	lifecycle    *lifecycle.Service
 	installation string
+	sameHost     bool
 	mu           sync.Mutex
 }
 
@@ -56,7 +58,24 @@ func NewLocal(backend Backend, stream Stream, installation string) (*Local, erro
 	if err != nil {
 		return nil, err
 	}
-	return &Local{backend: backend, stream: stream, lifecycle: service, installation: installation}, nil
+	return &Local{backend: backend, target: backend, stream: stream, lifecycle: service, installation: installation, sameHost: true}, nil
+}
+
+// NewRemote constructs an SSH-capable transfer engine. Source lifecycle writes
+// remain local; destination inspection and reconciliation use the remote typed
+// executor. The stream is responsible for the authenticated transport.
+func NewRemote(source Backend, destination zfs.Executor, stream Stream, installation string) (*Local, error) {
+	if source == nil || destination == nil || stream == nil {
+		return nil, fmt.Errorf("source, remote destination, and stream are required")
+	}
+	if !lifecycle.ValidID(installation) {
+		return nil, fmt.Errorf("valid installation identity required")
+	}
+	service, err := lifecycle.NewService(source, installation)
+	if err != nil {
+		return nil, err
+	}
+	return &Local{backend: source, target: destination, stream: stream, lifecycle: service, installation: installation}, nil
 }
 
 func (l *Local) load(ctx context.Context, request Request) (View, error) {
@@ -71,6 +90,14 @@ func (l *Local) load(ctx context.Context, request Request) (View, error) {
 	view.Inventory, err = l.backend.ListDatasets(ctx)
 	if err != nil {
 		return view, err
+	}
+	if l.sameHost {
+		view.DestinationInventory = view.Inventory
+	} else {
+		view.DestinationInventory, err = l.target.ListDatasets(ctx)
+		if err != nil {
+			return view, err
+		}
 	}
 	view.Source, err = l.backend.InspectState(ctx, request.Source, request.Policy.Send.Replicate)
 	if err != nil {
@@ -90,20 +117,30 @@ func (l *Local) load(ctx context.Context, request Request) (View, error) {
 		}
 		view.Source.Properties = append(view.Source.Properties, rows...)
 	}
-	for _, dataset := range view.Inventory {
+	bound, err := storedTargetBinding(view.Source, request.Source, canonicalTarget(request))
+	if err != nil {
+		return view, err
+	}
+	if bound != nil {
+		view.BindingIdentity, err = l.target.InspectDatasetIdentity(ctx, bound.Anchor)
+		if err != nil {
+			return view, err
+		}
+	}
+	for _, dataset := range view.DestinationInventory {
 		if dataset.Name == target {
 			view.DestinationExists = true
 			break
 		}
 	}
 	if view.DestinationExists {
-		view.Destination, err = l.backend.InspectState(ctx, target, true)
+		view.Destination, err = l.target.InspectState(ctx, target, true)
 		if err == nil {
-			view.DestinationIdentity, err = l.backend.InspectDatasetIdentity(ctx, target)
+			view.DestinationIdentity, err = l.target.InspectDatasetIdentity(ctx, target)
 		}
 	} else {
 		ancestor := ""
-		for _, dataset := range view.Inventory {
+		for _, dataset := range view.DestinationInventory {
 			if inside(target, dataset.Name) && len(dataset.Name) > len(ancestor) {
 				ancestor = dataset.Name
 			}
@@ -111,7 +148,7 @@ func (l *Local) load(ctx context.Context, request Request) (View, error) {
 		if ancestor == "" {
 			return view, fmt.Errorf("destination has no existing ancestor")
 		}
-		view.DestinationIdentity, err = l.backend.InspectDatasetIdentity(ctx, ancestor)
+		view.DestinationIdentity, err = l.target.InspectDatasetIdentity(ctx, ancestor)
 	}
 	return view, err
 }
@@ -123,6 +160,10 @@ func (l *Local) Preview(ctx context.Context, request Request) (Plan, error) {
 	view, err := l.load(ctx, request)
 	if err != nil {
 		return Plan{}, err
+	}
+	if len(view.Destination.ResumeTokens) > 0 {
+		plan, _, buildErr := BuildResume(request, view, l.installation)
+		return plan, buildErr
 	}
 	return Build(request, view, l.installation)
 }
@@ -154,65 +195,90 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 	if err != nil {
 		return result, err
 	}
-	plan, err := Build(request, before, l.installation)
+	resuming := len(before.Destination.ResumeTokens) > 0
+	var plan Plan
+	var ref lifecycle.Reference
+	if resuming {
+		plan, ref, err = BuildResume(request, before, l.installation)
+	} else {
+		plan, err = Build(request, before, l.installation)
+	}
 	result.Plan = plan
 	if err != nil {
 		return result, err
 	}
-	if plan.BindingNew {
-		value, encodeErr := encodeBinding(plan.TargetBinding)
-		if encodeErr != nil {
-			return result, encodeErr
+	if !resuming {
+		if plan.BindingNew {
+			value, encodeErr := encodeBinding(plan.TargetBinding)
+			if encodeErr != nil {
+				return result, encodeErr
+			}
+			if err := l.backend.SetProperties(ctx, request.Source, map[string]string{targetBindingProperty(plan.TargetBinding.CanonicalTarget): value}); err != nil {
+				return result, err
+			}
 		}
-		if err := l.backend.SetProperties(ctx, request.Source, map[string]string{targetBindingProperty(plan.TargetBinding.CanonicalTarget): value}); err != nil {
+		targetID := plan.TargetBinding.CanonicalTarget
+		endpointSnapshots := make([]string, 0, len(plan.Endpoints))
+		for _, endpoint := range plan.Endpoints {
+			endpointSnapshots = append(endpointSnapshots, endpoint.Source)
+		}
+		ref, err = l.lifecycle.ProtectSet(ctx, request.Source, endpointSnapshots, targetID)
+		if err != nil {
 			return result, err
 		}
-	}
-	targetID := plan.TargetBinding.CanonicalTarget
-	endpointSnapshots := make([]string, 0, len(plan.Endpoints))
-	for _, endpoint := range plan.Endpoints {
-		endpointSnapshots = append(endpointSnapshots, endpoint.Source)
-	}
-	ref, err := l.lifecycle.ProtectSet(ctx, request.Source, endpointSnapshots, targetID)
-	if err != nil {
-		return result, err
-	}
-	if strings.Contains(plan.Base, "@") {
-		baseSnapshots := []string{plan.Base}
-		if plan.Send.Recursive {
-			_, component, _ := strings.Cut(plan.Base, "@")
-			objects := objectMap(before.Source)
-			for _, endpoint := range plan.Endpoints {
-				dataset := datasetOf(endpoint.Source)
-				candidate := dataset + "@" + component
-				if candidate != plan.Base {
-					if object, exists := objects[candidate]; exists && object.Type == "snapshot" {
-						baseSnapshots = append(baseSnapshots, candidate)
+		if strings.Contains(plan.Base, "@") {
+			baseSnapshots := []string{plan.Base}
+			if plan.Send.Recursive {
+				_, component, _ := strings.Cut(plan.Base, "@")
+				objects := objectMap(before.Source)
+				for _, endpoint := range plan.Endpoints {
+					dataset := datasetOf(endpoint.Source)
+					candidate := dataset + "@" + component
+					if candidate != plan.Base {
+						if object, exists := objects[candidate]; exists && object.Type == "snapshot" {
+							baseSnapshots = append(baseSnapshots, candidate)
+						}
 					}
 				}
 			}
+			if _, err := l.lifecycle.ProtectSet(ctx, request.Source, baseSnapshots, targetID); err != nil {
+				return result, err
+			}
 		}
-		if _, err := l.lifecycle.ProtectSet(ctx, request.Source, baseSnapshots, targetID); err != nil {
-			return result, err
+		prepared, loadErr := l.load(ctx, request)
+		if loadErr != nil {
+			return result, loadErr
+		}
+		if !sourceStable(before.Source, prepared.Source) || !reflect.DeepEqual(before.Destination, prepared.Destination) || before.DestinationExists != prepared.DestinationExists {
+			return result, fmt.Errorf("transfer state changed during preparation; recovery holds retained")
+		}
+		fresh, buildErr := Build(request, prepared, l.installation)
+		if buildErr != nil {
+			return result, buildErr
+		}
+		if fresh.Snapshot != plan.Snapshot || fresh.Base != plan.Base || !reflect.DeepEqual(fresh.Expected, plan.Expected) || fresh.TargetBinding != plan.TargetBinding {
+			return result, fmt.Errorf("transfer history changed during preparation")
+		}
+		// Newly written recovery records must also be excluded from property streams.
+		plan = fresh
+		result.Plan = plan
+	} else {
+		prepared, loadErr := l.load(ctx, request)
+		if loadErr != nil {
+			return result, loadErr
+		}
+		if !reflect.DeepEqual(before, prepared) {
+			return result, fmt.Errorf("resumable transfer state changed during preflight")
+		}
+		fresh, freshRef, buildErr := BuildResume(request, prepared, l.installation)
+		if buildErr != nil || !reflect.DeepEqual(freshRef, ref) || !reflect.DeepEqual(fresh, plan) {
+			if buildErr != nil {
+				return result, buildErr
+			}
+			return result, fmt.Errorf("resumable transfer proof changed during preflight")
 		}
 	}
-	prepared, err := l.load(ctx, request)
-	if err != nil {
-		return result, err
-	}
-	if !sourceStable(before.Source, prepared.Source) || !reflect.DeepEqual(before.Destination, prepared.Destination) || before.DestinationExists != prepared.DestinationExists {
-		return result, fmt.Errorf("transfer state changed during preparation; recovery holds retained")
-	}
-	fresh, err := Build(request, prepared, l.installation)
-	if err != nil {
-		return result, err
-	}
-	if fresh.Snapshot != plan.Snapshot || fresh.Base != plan.Base || !reflect.DeepEqual(fresh.Expected, plan.Expected) || fresh.TargetBinding != plan.TargetBinding {
-		return result, fmt.Errorf("transfer history changed during preparation")
-	}
-	// Newly written recovery records must also be excluded from property streams.
-	plan = fresh
-	result.Plan = plan
+	targetID := plan.TargetBinding.CanonicalTarget
 	if plan.Mode != "up-to-date" {
 		result.Estimate, err = l.backend.EstimateSend(ctx, plan.Send)
 		if err != nil {
@@ -222,7 +288,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 		if err != nil {
 			probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
-			if state, probeErr := l.backend.InspectState(probeCtx, plan.Destination, true); probeErr == nil {
+			if state, probeErr := l.target.InspectState(probeCtx, plan.Destination, true); probeErr == nil {
 				for name := range state.ResumeTokens {
 					result.ResumeDatasets = append(result.ResumeDatasets, name)
 				}
@@ -231,7 +297,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 			return result, fmt.Errorf("transfer failed; source recovery references retained: %w", err)
 		}
 	}
-	destination, err := l.backend.InspectState(ctx, plan.Destination, true)
+	destination, err := l.target.InspectState(ctx, plan.Destination, true)
 	if err != nil {
 		return result, err
 	}
@@ -254,11 +320,16 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 		return result, fmt.Errorf("source recovery proof changed during transfer")
 	}
 	if plan.TargetBinding.Anchor != plan.Destination {
-		resolved, identityErr := l.backend.InspectDatasetIdentity(ctx, plan.Destination)
+		resolved, identityErr := l.target.InspectDatasetIdentity(ctx, plan.Destination)
 		if identityErr != nil {
 			return result, identityErr
 		}
-		promoted, bindingErr := bindingFor(request, plan.Destination, resolved)
+		transport := requestTransport(request)
+		canonical := request.CanonicalTarget
+		if transport == "local" && canonical == "" {
+			canonical = canonicalLocalTarget(request.DestinationRoot)
+		}
+		promoted, bindingErr := bindingForTarget(request, plan.Destination, resolved, transport, canonical)
 		if bindingErr != nil || promoted.PoolGUID != plan.TargetBinding.PoolGUID {
 			return result, fmt.Errorf("received destination identity could not be anchored")
 		}
@@ -276,7 +347,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 	if err := l.reconcile(ctx, plan, destination); err != nil {
 		return result, err
 	}
-	verified, err := l.backend.InspectState(ctx, plan.Destination, true)
+	verified, err := l.target.InspectState(ctx, plan.Destination, true)
 	if err != nil {
 		return result, err
 	}
@@ -339,7 +410,7 @@ func verifyGUIDs(plan Plan, state zfs.State) error {
 func (l *Local) reconcile(ctx context.Context, plan Plan, state zfs.State) error {
 	for _, property := range state.Properties {
 		if property.Source == zfs.SourceReceived && (policy.IsPublic(property.Name) || strings.HasPrefix(property.Name, lifecycle.ReferencePrefix) || strings.HasPrefix(property.Name, targetBindingPrefix)) {
-			if err := l.backend.InheritProperty(ctx, property.Dataset, property.Name); err != nil {
+			if err := l.target.InheritProperty(ctx, property.Dataset, property.Name); err != nil {
 				return err
 			}
 		}
@@ -354,7 +425,7 @@ func (l *Local) reconcile(ctx context.Context, plan Plan, state zfs.State) error
 			return fmt.Errorf("received dataset lineage conflicts with source")
 		}
 		if lineage == "" {
-			if err := l.backend.SetProperties(ctx, dataset, map[string]string{lifecycle.LineageProperty: plan.Lineage}); err != nil {
+			if err := l.target.SetProperties(ctx, dataset, map[string]string{lifecycle.LineageProperty: plan.Lineage}); err != nil {
 				return err
 			}
 		}
@@ -372,7 +443,7 @@ func (l *Local) reconcile(ctx context.Context, plan Plan, state zfs.State) error
 				return fmt.Errorf("received snapshot metadata conflicts with source: %s", expected.Destination)
 			}
 		}
-		if err := l.backend.SetProperties(ctx, expected.Destination, properties); err != nil {
+		if err := l.target.SetProperties(ctx, expected.Destination, properties); err != nil {
 			return err
 		}
 	}
