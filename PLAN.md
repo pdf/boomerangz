@@ -289,10 +289,12 @@ database.
 ### 5.1 Lineage
 
 On first management, `boomerangz` generates a cryptographically random lineage
-UUID and sets it locally on the source dataset or replication root:
+UUID and records both the lineage and the responsible installation locally on
+the source dataset or replication root:
 
 ```text
 org.boomerangz:state:lineage=<uuid>
+org.boomerangz:state:owner=<installation-uuid>
 ```
 
 Created snapshots carry internal metadata such as:
@@ -320,15 +322,91 @@ Deletion requires all of the following:
 
 Names alone are never proof of ownership.
 
-### 5.2 Recoverability
+### 5.2 Lineage authority
 
-The lineage lives with the dataset and its snapshots, so reinstalling
-`boomerangz` does not require restoring an installation UUID. A later
-`boomerangz dataset adopt` command can recover a missing dataset-level lineage
-from owned snapshots. It must refuse automatic adoption if multiple candidate
-lineages are present.
+Each installation has a cryptographically random, non-secret UUID stored at
+`/var/lib/boomerangz/identity/installation-id` by default. The path is
+configurable with the rest of the identity directory. It is independent of TLS
+keys, tokens, host names, and `/etc/machine-id`. The daemon creates it atomically
+when absent; packages never supply or overwrite it. Only the explicit identity
+recovery workflow may replace an existing value.
 
-### 5.3 Replication cursors and interrupted transfers
+The daemon reconstructs its responsibility set on every complete discovery
+generation. A lineage is actionable only when all of the following hold:
+
+- the source dataset or replication root is activated by locally configured
+  public policy;
+- `org.boomerangz:state:lineage` is explicitly local on that exact source root;
+- `org.boomerangz:state:owner` is explicitly local on that exact source root
+  and matches this installation's UUID; and
+- the lineage metadata is internally consistent with the snapshots and
+  recovery references the proposed operation would touch.
+
+Received or inherited owner and lineage values are provenance, not authority.
+A descendant covered by a replication root is governed by that root's matching
+owner and lineage; it does not acquire independent authority through
+inheritance. A valid but non-matching owner is reported as a dormant foreign
+lineage. `boomerangz` performs no snapshot creation, pruning, transfer,
+receive-property reconciliation, or recovery-state mutation for it.
+
+The local ZFS property source by itself is deliberately insufficient. Moving a
+pool and its disks to another host preserves locally set properties, whereas the
+new host has a different installation UUID. Consequently stale `local` target
+names cannot cause work on the new host before an explicit administrative
+decision.
+
+There is no separate database of assigned lineages. The installation UUID plus
+the owner markers on source roots form the persistent authority record; the
+daemon's responsibility set is a derived, immutable in-memory view. The local
+lifecycle lock prevents two daemon processes from acting as the same
+installation. Simultaneous management of the same writable datasets by
+different installations is unsupported and owner mismatch fails closed.
+
+### 5.3 Identity recovery and adoption
+
+The owner UUID is repeated on every independently managed source root. If the
+identity directory is lost but the original pools remain, `boomerangz identity
+recover` can inventory those local owner markers and restore the selected UUID
+to the identity file. It is preview-first and requires `--apply`; it refuses
+automatic recovery when locally activated roots contain no owner, multiple
+owners, invalid values, or conflicting lineage evidence. Recovery is an
+operator assertion that this is a continuation of the same installation, not a
+pool transfer.
+
+`boomerangz dataset adopt` is the separate pool-transfer and promotion
+workflow. After showing the existing lineage, old owner, effective policy, and
+every local and remote target, `--apply` changes the source-root owner to the
+current installation while preserving a consistent lineage. The preview emits
+a prominent warning that transferred policy may name destinations which are
+absent, unrelated, or inappropriate on the adopting host. It displays, for each
+target, the configured name, transport, canonical endpoint, destination root or
+dataset mapping, stored identity binding, current resolved identity, and
+verification status.
+
+The target review is part of every adoption preview. Interactive `--apply` asks
+for final confirmation after displaying that preview; in non-interactive use,
+`--apply` itself is the explicit confirmation and no second acknowledgement
+flag is required. Local target preflight includes pool and dataset GUIDs rather
+than trusting names alone. A verified identity or mapping mismatch blocks
+adoption. An unreachable remote may remain configured, but is marked unverified
+and suspended after adoption until its identity and destination are successfully
+revalidated; it cannot receive queued work merely because it becomes reachable.
+Adoption refuses ambiguous lineages and does not queue work until the owner
+change commits and each target is independently eligible. A missing
+dataset-level lineage may be recovered from owned snapshots only when exactly
+one candidate lineage is present.
+
+On startup, an absent installation-ID file causes a new UUID to be generated,
+but any roots carrying another local owner remain dormant. `identity recover`
+may replace that fresh UUID only while it owns no lineage and no work is active;
+otherwise it fails closed. This keeps first startup safe on both a restored
+system disk and a new host receiving physically transferred pool disks.
+
+If neither recovery nor adoption has been explicitly completed, the daemon
+leaves the lineage dormant. This makes loss of `/var/lib/boomerangz/identity`
+and physical pool migration safe by default.
+
+### 5.4 Replication cursors and interrupted transfers
 
 For every source-target pair:
 
@@ -340,6 +418,22 @@ For every source-target pair:
 - bookmark and hold names include a deterministic target identifier;
 - successful receive is confirmed by snapshot GUID before advancing the
   bookmark or releasing the hold.
+
+Before its first transfer, each configured target receives a persistent binding
+on the source root:
+
+```text
+org.boomerangz:state:target:<target-id>=<versioned JSON identity>
+```
+
+The binding records the canonical transport identity and destination mapping.
+For a local target it includes the destination pool GUID, the GUID of the
+existing destination root or nearest existing ancestor, and the intended
+relative dataset path. Every planned job re-resolves and verifies this binding;
+a missing target, a same-named replacement with another GUID, or a changed
+mapping is blocked rather than treated as a new destination. Rebinding or
+reseeding is an explicit preview-first administrative operation. Thus target
+safety does not depend solely on detecting whether the physical host changed.
 
 Recovery proofs use local
 `org.boomerangz:state:reference:<target-id>:<snapshot-uuid>` JSON properties on
@@ -368,7 +462,7 @@ Transient progress and process IDs remain in memory. Errors are retained in
 structured logs. After restart, the daemon reconstructs pending work from
 properties, snapshots, bookmarks, holds, and destination resume tokens.
 
-### 5.4 Deactivation and explicit cleanup
+### 5.5 Deactivation and explicit cleanup
 
 An active dataset becomes inactive when its resolved locally configured
 `enabled` value changes away from `on`. Removing a dataset's local property does
@@ -729,14 +823,15 @@ Other default paths are:
 ```text
 /etc/boomerangz/credentials.d/
 /var/lib/boomerangz/identity/
+/var/lib/boomerangz/identity/installation-id
 /run/boomerangz/boomerangz.sock
 ```
 
 The package creates these directories with restrictive ownership and modes.
-The daemon generates key material atomically on first use; packages never ship
-or overwrite private keys. Paths are user-configurable. Imported remote token
-bundles live in `credentials.d`; server identity and token verifiers live under
-the identity directory.
+The daemon generates the installation ID and key material atomically on first
+use; packages never ship or overwrite either. Paths are user-configurable.
+Imported remote token bundles live in `credentials.d`; the installation ID,
+server identity, and token verifiers live under the identity directory.
 
 The Arch package treats `config.toml` as a protected configuration file so
 upgrades produce normal `.pacnew` handling instead of overwriting local changes.
@@ -756,9 +851,10 @@ boomerangz daemon
 boomerangz status [-w|--watch] [-i|--interval 2s]
 boomerangz dataset list
 boomerangz dataset inspect <dataset>
-boomerangz dataset adopt <dataset>
+boomerangz dataset adopt [--apply] <dataset>
 boomerangz dataset clean [--recursive] [--all] [--apply]
-                            [--destroy-owned-snapshots] [<dataset>...]
+                          [--destroy-owned-snapshots] [<dataset>...]
+boomerangz identity recover [--owner <installation-uuid>] [--apply]
 boomerangz config check
 boomerangz config show
 boomerangz trigger [<dataset>...]
@@ -857,8 +953,8 @@ working tree changes.
 ### 13.1 Test strategy
 
 Unit tests cover policy resolution, command construction, scheduling, pruning,
-deactivation and cleanup planning, ownership proofs, destination mapping,
-authentication scopes, and configuration merging.
+deactivation and cleanup planning, lineage authority and adoption, ownership
+proofs, destination mapping, authentication scopes, and configuration merging.
 
 Fuzz tests cover:
 
@@ -917,6 +1013,8 @@ at controlled points. It verifies resume-token recovery, hold preservation,
 bookmark advancement, restart reconciliation, and source/destination pruning.
 VM integration tests also verify public-property exclusion, local and received
 property-layer cleanup, active-to-inactive transitions, preview/apply parity,
+identity loss and recovery, physical-pool-transfer owner mismatch, adoption
+target display and confirmation, offline-target suspension, target preflight,
 and refusal to clean ambiguous or resume-dependent state.
 
 ## 14. Delivery phases
