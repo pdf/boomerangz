@@ -2,13 +2,11 @@
 package lifecycle
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/pdf/boomerangz/internal/identity"
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
@@ -22,22 +20,11 @@ const (
 	nameTimeFormat   = "20060102T150405.000000000Z"
 )
 
-var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-
 // NewID creates an RFC 9562 version 4 UUID from cryptographic randomness.
-func NewID() (string, error) {
-	var data [16]byte
-	if _, err := rand.Read(data[:]); err != nil {
-		return "", fmt.Errorf("generate ownership UUID: %w", err)
-	}
-	data[6] = data[6]&0x0f | 0x40
-	data[8] = data[8]&0x3f | 0x80
-	value := hex.EncodeToString(data[:])
-	return value[:8] + "-" + value[8:12] + "-" + value[12:16] + "-" + value[16:20] + "-" + value[20:], nil
-}
+func NewID() (string, error) { return identity.New() }
 
 // ValidID accepts canonical UUIDs used as lineage and snapshot identities.
-func ValidID(value string) bool { return uuidPattern.MatchString(value) }
+func ValidID(value string) bool { return identity.Valid(value) }
 
 // Metadata is explicitly stored snapshot ownership information.
 type Metadata struct {
