@@ -602,6 +602,14 @@ coordinator, never concurrently, at a default interval of 60 seconds.
 Explicit reconciliation requests are coalesced. Changes made by `boomerangz`
 update or invalidate the affected cache entry immediately.
 
+Local reconciliation does not routinely probe remote targets. A direct SSH
+target is inspected just in time when work for it becomes due, during its
+bounded reconnect/retry sequence, or after an explicit remote reconciliation
+request. This avoids connections whose results would go stale before infrequent
+snapshot schedules need them. An optional remote `boomerangz ssh-shell` may
+serve an already validated local cache, but transfer-critical state is always
+revalidated by the receiving endpoint before it accepts a stream.
+
 Reconciliation and snapshot scheduling use independent timers. The snapshot
 scheduler consumes the latest immutable policy generation and maintains per-root
 deadlines; its required resolution is inferred from the minimum cadence among
@@ -718,8 +726,49 @@ SSH is the default v1 replication transport. It uses batch mode, strict host-key
 verification, argument-safe remote commands, and configurable connection
 settings. Password handling and arbitrary shell snippets are not supported.
 
-The transport boundary should allow a future native gRPC streaming transport
-without changing snapshot planning or recovery logic.
+Two SSH endpoint modes are supported:
+
+- direct SSH invokes a fixed, implementation-owned set of ZFS operations and
+  requires no `boomerangz` installation on the destination;
+- the optional `boomerangz ssh-shell` carries versioned gRPC services over the
+  command channel's stdin and stdout for probe, receive, resume-token,
+  verification, and reconciliation operations.
+
+One SSH command channel is a private ordered duplex byte stream for the life of
+a replication attempt. A small `net.Conn` adapter carries gRPC/HTTP2 over that
+stream; stderr remains a separate bounded diagnostic channel. The inner gRPC
+connection does not add TLS because the strictly verified SSH session already
+provides transport encryption and peer authentication. It never opens a remote
+TCP listener or relies on SSH port forwarding.
+
+SSH shell and the future native transport use the same protobuf service and
+message definitions, handlers, capability negotiation, and bounded streaming
+RPCs. Native mode adds its configured TLS and client authorization at the
+network listener. If a remote daemon is available, SSH shell may obtain
+non-authoritative inventory from its validated in-memory cache. SSH shell also
+works without a daemon by inspecting local ZFS state directly. Direct SSH/ZFS
+remains a first-class compatibility path when the remote binary is absent.
+
+Endpoint selection and fallback policy are explicit configuration. Automatic
+capability discovery may fall back from an unavailable SSH shell to direct ZFS
+only when configuration permits it; a required SSH shell never silently
+downgrades. Status reports the active endpoint mode. Cached discovery is never
+proof of destination identity, cursor state, or receive readiness: the remote
+side rechecks those preconditions immediately before receiving data.
+
+Document a recommended restricted SSH deployment using a dedicated account,
+key restrictions, disabled forwarding and PTY features, delegated permissions
+limited to configured destination roots, and an authorized-key forced command
+for `boomerangz ssh-shell`. Also document direct SSH/ZFS without requiring a
+remote installation. Do not recommend restricted shells or ad-hoc parsing of
+`SSH_ORIGINAL_COMMAND` as a security boundary; OpenSSH key restrictions and ZFS
+delegation reduce exposure but cannot enforce a ZFS-only command vocabulary
+without an audited dispatcher.
+
+ZFS data uses a bounded client-streaming or bidirectional-streaming RPC with
+gRPC flow control. Benchmark its framing and copying overhead against direct
+SSH/ZFS, but do not introduce a separate raw SSH-shell stream that could diverge
+from the native endpoint contract.
 
 ## 9. Control API and authentication
 
@@ -736,8 +785,8 @@ ControlService.Trigger
 ControlService.Reconcile
 ```
 
-A future native transport may add probe, receive, resume-token, verification,
-and prune RPCs.
+A future native transport exposes the same protobuf probe, receive,
+resume-token, verification, reconciliation, and prune services as SSH shell.
 
 ### 9.1 Listener security
 
@@ -1030,8 +1079,9 @@ and refusal to clean ambiguous or resume-dependent state.
    preview-first cleanup.
 4. **Local transfer**: implement full bootstrap, `-i`, `-I`, progress,
    receive-property handling, and GUID verification.
-5. **SSH and roadwarrior recovery**: implement remote probing, retry with jitter,
-   resume tokens, pending coalescing, and offline reconciliation.
+5. **SSH and roadwarrior recovery**: implement JIT direct-ZFS probing, the
+   optional versioned SSH-shell endpoint, explicit capability fallback, retry
+   with jitter, resume tokens, pending coalescing, and offline reconciliation.
 6. **Daemon and workers**: implement internal scheduling, independent bounded
    worker pools, fairness, graceful shutdown, and systemd integration.
 7. **Control plane and UI**: implement gRPC over Unix sockets, status/watch,
@@ -1039,7 +1089,8 @@ and refusal to clean ambiguous or resume-dependent state.
 8. **Hardening and packaging**: run destructive integration and fault tests,
    document delegated permissions, implement and harden the Linux helper if
    the integration matrix requires it, and produce the initial Arch package.
-9. **Native transport**: prototype and benchmark gRPC stream replication after
+9. **Native transport**: carry the shared remote endpoint operations over
+   authenticated gRPC, then prototype and benchmark stream replication after
    SSH-based replication is stable.
 
 ## 15. Pre-implementation decisions and validation
