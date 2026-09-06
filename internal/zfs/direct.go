@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -42,14 +44,77 @@ func (b *boundedOutput) Write(data []byte) (int, error) {
 }
 
 // Direct executes typed operations using a locally installed zfs binary.
-type Direct struct{ runner commandRunner }
+type Direct struct {
+	runner     commandRunner
+	poolRunner commandRunner
+}
 
 // NewDirect creates a direct executor for an explicit zfs executable path.
 func NewDirect(path string) (*Direct, error) {
 	if path == "" {
 		return nil, errors.New("zfs executable path is required")
 	}
-	return &Direct{runner: execRunner{path: path}}, nil
+	return &Direct{runner: execRunner{path: path}, poolRunner: execRunner{path: filepath.Join(filepath.Dir(path), "zpool")}}, nil
+}
+
+// InspectDatasetIdentity resolves an exact dataset GUID and the containing pool
+// GUID using typed, bounded queries. It does not infer identity from names.
+func (d *Direct) InspectDatasetIdentity(ctx context.Context, dataset string) (DatasetIdentity, error) {
+	var result DatasetIdentity
+	if err := validateDataset(dataset); err != nil {
+		return result, err
+	}
+	output, err := d.runner.Run(ctx, "list", "-H", "-p", "-d", "0", "-t", "filesystem,volume", "-o", "name,type,guid", dataset)
+	if err != nil {
+		return result, err
+	}
+	err = parseTable(output, 3, func(fields []string) error {
+		if result.Name != "" || fields[0] != dataset {
+			return fmt.Errorf("unexpected dataset identity row %q", fields[0])
+		}
+		typeName := DatasetType(fields[1])
+		if typeName != Filesystem && typeName != Volume {
+			return fmt.Errorf("unsupported dataset type %q", fields[1])
+		}
+		guid, parseErr := strconv.ParseUint(fields[2], 10, 64)
+		if parseErr != nil || guid == 0 {
+			return fmt.Errorf("invalid dataset GUID")
+		}
+		result.Name, result.Type, result.GUID = fields[0], typeName, guid
+		return nil
+	})
+	if err != nil {
+		return DatasetIdentity{}, err
+	}
+	if result.Name == "" {
+		return DatasetIdentity{}, fmt.Errorf("dataset identity is missing")
+	}
+	result.Pool, _, _ = strings.Cut(dataset, "/")
+	if d.poolRunner == nil {
+		return DatasetIdentity{}, fmt.Errorf("pool identity query is unavailable")
+	}
+	output, err = d.poolRunner.Run(ctx, "get", "-H", "-p", "-o", "name,property,value", "guid", result.Pool)
+	if err != nil {
+		return DatasetIdentity{}, err
+	}
+	err = parseTable(output, 3, func(fields []string) error {
+		if fields[0] != result.Pool || fields[1] != "guid" || result.PoolGUID != 0 {
+			return fmt.Errorf("unexpected pool identity row")
+		}
+		guid, parseErr := strconv.ParseUint(fields[2], 10, 64)
+		if parseErr != nil || guid == 0 {
+			return fmt.Errorf("invalid pool GUID")
+		}
+		result.PoolGUID = guid
+		return nil
+	})
+	if err != nil {
+		return DatasetIdentity{}, err
+	}
+	if result.PoolGUID == 0 {
+		return DatasetIdentity{}, fmt.Errorf("pool identity is missing")
+	}
+	return result, nil
 }
 
 // ListDatasets returns the global sparse filesystem and volume inventory.

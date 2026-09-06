@@ -19,6 +19,17 @@ type Dataset struct {
 	EncryptionRoot string
 }
 
+// DatasetIdentity is the stable local identity of an exact dataset and its
+// containing pool. Both GUIDs are required because names survive neither pool
+// replacement nor dataset replacement safely.
+type DatasetIdentity struct {
+	Name     string
+	Type     DatasetType
+	GUID     uint64
+	Pool     string
+	PoolGUID uint64
+}
+
 // PropertySource records whether a property is locally set or received.
 type PropertySource string
 
@@ -41,6 +52,7 @@ type Property struct {
 // commands or flags from its client.
 type Executor interface {
 	ListDatasets(context.Context) ([]Dataset, error)
+	InspectDatasetIdentity(context.Context, string) (DatasetIdentity, error)
 	GetActivationProperties(context.Context) ([]Property, error)
 	GetStoredProperties(context.Context, []string) ([]Property, error)
 	InspectState(context.Context, string, bool) (State, error)
@@ -56,10 +68,11 @@ type Executor interface {
 
 // Object is a filesystem, volume, snapshot, or bookmark in a lifecycle query.
 type Object struct {
-	Name     string
-	Type     string
-	GUID     uint64
-	Creation int64
+	Name      string
+	Type      string
+	GUID      uint64
+	Creation  int64
+	CreateTXG uint64
 }
 
 // State includes effective operational values and explicit namespace properties.

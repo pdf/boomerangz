@@ -10,6 +10,7 @@ import (
 )
 
 const testLineage = "12345678-1234-4234-8234-123456789abc"
+const testInstallation = "abcdefab-cdef-4abc-8def-abcdefabcdef"
 
 func owned(t *testing.T, created time.Time) Snapshot {
 	t.Helper()

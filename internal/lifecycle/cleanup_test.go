@@ -32,8 +32,9 @@ func TestCleanupPreviewApply(t *testing.T) {
 	t.Parallel()
 	for _, destroy := range []bool{false, true} {
 		b := backendWithSnapshots(t)
-		b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: LineageProperty, Value: testLineage, Source: zfs.SourceLocal}, zfs.Property{Dataset: "tank/data", Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal})
-		s, _ := NewService(b)
+		addTestAuthority(b)
+		b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal})
+		s, _ := NewService(b, testInstallation)
 		r, err := s.Protect(t.Context(), "tank/data", b.state.Objects[1].Name, "local:backup/data")
 		if err != nil {
 			t.Fatal(err)
@@ -54,7 +55,7 @@ func TestCleanupPreviewApply(t *testing.T) {
 		if !reflect.DeepEqual(preview.Actions, applied.Actions) || applied.Applied != len(preview.Actions) {
 			t.Fatal("preview/apply mismatch")
 		}
-		if len(b.state.Properties) != 0 || len(b.state.Holds[r.snapshot("tank/data")]) != 0 {
+		if len(b.state.Properties) != 0 || len(b.state.Holds[r.snapshot()]) != 0 {
 			t.Fatal("retained effective metadata or hold")
 		}
 		want := 3
@@ -72,8 +73,8 @@ func TestCleanupBlockers(t *testing.T) {
 	for _, reason := range []string{"busy", "resume", "hold", "bookmark", "ancestor", "offline", "hidden-lineage", "snapshot-lineage"} {
 		t.Run(reason, func(t *testing.T) {
 			b := backendWithSnapshots(t)
-			b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: LineageProperty, Value: testLineage, Source: zfs.SourceLocal})
-			s, _ := NewService(b)
+			addTestAuthority(b)
+			s, _ := NewService(b, testInstallation)
 			safety := testCleanupSafety{}
 			switch reason {
 			case "busy":
@@ -113,7 +114,7 @@ func TestCleanupPreservesNonNamespaceSettings(t *testing.T) {
 	t.Parallel()
 	b := backendWithSnapshots(t)
 	b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: "compression", Value: "zstd", Source: zfs.SourceLocal})
-	s, _ := NewService(b)
+	s, _ := NewService(b, testInstallation)
 	if _, err := s.Cleanup(t.Context(), "tank/data", CleanupOptions{}, true, testCleanupSafety{}); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func TestCleanupDoesNotTrustReceivedReferences(t *testing.T) {
 	key := ReferencePrefix + "foreign"
 	b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: key, Value: "received proof", Source: zfs.SourceReceived})
 	b.state.Received = map[string]map[string]string{"tank/data": {key: "received proof"}}
-	s, _ := NewService(b)
+	s, _ := NewService(b, testInstallation)
 	if _, err := s.Cleanup(t.Context(), "tank/data", CleanupOptions{}, true, testCleanupSafety{}); err != nil {
 		t.Fatal(err)
 	}
@@ -140,13 +141,13 @@ func TestCleanupDoesNotTrustReceivedReferences(t *testing.T) {
 func TestCleanupStopsOnUnexpectedMutation(t *testing.T) {
 	t.Parallel()
 	b := backendWithSnapshots(t)
-	b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: LineageProperty, Value: testLineage, Source: zfs.SourceLocal})
+	addTestAuthority(b)
 	b.beforeRead = func(b *memoryBackend) {
 		if b.reads == 4 {
 			b.state.Objects[0].GUID++
 		}
 	}
-	s, _ := NewService(b)
+	s, _ := NewService(b, testInstallation)
 	plan, err := s.Cleanup(t.Context(), "tank/data", CleanupOptions{}, true, testCleanupSafety{})
 	if err == nil || plan.Applied != 1 || len(b.writes) != 1 {
 		t.Fatalf("continued after replacement: %v %v", plan, err)

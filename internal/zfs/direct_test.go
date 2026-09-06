@@ -13,6 +13,21 @@ type fakeRunner struct {
 	args   []string
 }
 
+func TestInspectDatasetIdentity(t *testing.T) {
+	t.Parallel()
+	dataset := &fakeRunner{output: []byte("tank/data\tfilesystem\t42\n")}
+	pool := &fakeRunner{output: []byte("tank\tguid\t99\n")}
+	direct := &Direct{runner: dataset, poolRunner: pool}
+	identity, err := direct.InspectDatasetIdentity(t.Context(), "tank/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := DatasetIdentity{Name: "tank/data", Type: Filesystem, GUID: 42, Pool: "tank", PoolGUID: 99}
+	if !reflect.DeepEqual(identity, want) {
+		t.Fatalf("identity=%#v want=%#v", identity, want)
+	}
+}
+
 func TestActivationQuery(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{output: []byte("backup\torg.boomerangz:enabled\ton\treceived\n")}

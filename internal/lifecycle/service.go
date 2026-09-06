@@ -24,12 +24,25 @@ type Backend interface {
 // coordinate with other processes and stop submitting work on deactivation.
 // ZFS CLI commands do not offer compare-and-swap against external administrators.
 type Service struct {
-	backend Backend
-	mu      sync.Mutex
+	backend      Backend
+	installation string
+	mu           sync.Mutex
 }
 
 // NewService constructs an operational lifecycle service.
-func NewService(backend Backend) (*Service, error) {
+func NewService(backend Backend, installation string) (*Service, error) {
+	if backend == nil {
+		return nil, fmt.Errorf("lifecycle backend is required")
+	}
+	if !ValidID(installation) {
+		return nil, fmt.Errorf("valid installation identity required")
+	}
+	return &Service{backend: backend, installation: installation}, nil
+}
+
+// NewCleanupService constructs the explicitly administrative cleanup surface.
+// It cannot authorize snapshot, reference, transfer, or adoption operations.
+func NewCleanupService(backend Backend) (*Service, error) {
 	if backend == nil {
 		return nil, fmt.Errorf("lifecycle backend is required")
 	}
@@ -117,38 +130,61 @@ func AdoptionLineage(state zfs.State, dataset string) (string, error) {
 		return "", err
 	}
 	if lineage != "" {
-		return "", fmt.Errorf("dataset already has a lineage")
+		local := false
+		for _, row := range state.Properties {
+			local = local || row.Dataset == dataset && row.Name == LineageProperty && row.Source == zfs.SourceLocal && row.Value == lineage
+		}
+		if !local {
+			return "", fmt.Errorf("received lineage is provenance only; local lineage or unique owned snapshot proof required")
+		}
+		return lineage, nil
 	}
 	return Adopt(snapshotsIn(state, dataset))
 }
 
-// AdoptDataset restores a missing exact-dataset lineage, never overwriting an
-// existing or hidden lineage. It requires one uniquely proven snapshot lineage.
-func (s *Service) AdoptDataset(ctx context.Context, dataset string) (string, error) {
+// AdoptDataset applies an already reviewed adoption, restoring a missing exact
+// lineage when uniquely proven and changing the owner. Callers must first show
+// and verify every configured target; this low-level mutation never probes them.
+func (s *Service) AdoptDataset(ctx context.Context, dataset string, effective policy.Effective) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := zfs.ValidateDataset(dataset); err != nil {
+		return "", err
+	}
+	if err := ActiveRoot(effective, dataset); err != nil {
 		return "", err
 	}
 	state, err := s.backend.InspectState(ctx, dataset, false)
 	if err != nil {
 		return "", err
 	}
-	lineage, err := AdoptionLineage(state, dataset)
+	lineage, err := storedLineage(state, dataset)
 	if err != nil {
+		return "", err
+	}
+	if lineage == "" {
+		lineage, err = AdoptionLineage(state, dataset)
+		if err != nil {
+			return "", err
+		}
+	}
+	if current, authorityErr := RootAuthority(state, dataset, s.installation); authorityErr == nil && current == lineage {
+		return "", fmt.Errorf("dataset is already owned by this installation")
+	}
+	if err := ValidateLineageEvidence(state, dataset, lineage); err != nil {
 		return "", err
 	}
 	if err := s.unchanged(ctx, dataset, false, state); err != nil {
 		return "", err
 	}
-	if err := s.backend.SetProperties(ctx, dataset, map[string]string{LineageProperty: lineage}); err != nil {
+	if err := s.backend.SetProperties(ctx, dataset, map[string]string{LineageProperty: lineage, OwnerProperty: s.installation}); err != nil {
 		return "", err
 	}
 	after, err := s.backend.InspectState(ctx, dataset, false)
 	if err != nil {
 		return "", err
 	}
-	actual, err := storedLineage(after, dataset)
+	actual, err := RootAuthority(after, dataset, s.installation)
 	if err != nil || actual != lineage {
 		return "", fmt.Errorf("adopted lineage could not be verified")
 	}
@@ -158,10 +194,13 @@ func (s *Service) AdoptDataset(ctx context.Context, dataset string) (string, err
 // CreateSnapshot creates one snapshot or recursive snapshot set with metadata
 // attached atomically by zfs snapshot. Scheduling/cadence is the caller's concern.
 // Existing snapshot metadata requires explicit adoption if root lineage is lost.
-func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive bool, now time.Time) (Metadata, error) {
+func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive bool, now time.Time, effective policy.Effective) (Metadata, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := zfs.ValidateDataset(dataset); err != nil {
+		return Metadata{}, err
+	}
+	if err := ActiveRoot(effective, dataset); err != nil {
 		return Metadata{}, err
 	}
 	state, err := s.backend.InspectState(ctx, dataset, recursive)
@@ -195,6 +234,12 @@ func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive 
 			return Metadata{}, err
 		}
 	}
+	if !fresh {
+		lineage, err = RootAuthority(state, dataset, s.installation)
+		if err != nil {
+			return Metadata{}, err
+		}
+	}
 	for _, object := range state.Objects {
 		if object.Type != "filesystem" && object.Type != "volume" {
 			continue
@@ -215,14 +260,14 @@ func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive 
 		return Metadata{}, err
 	}
 	if fresh {
-		if err := s.backend.SetProperties(ctx, dataset, map[string]string{LineageProperty: lineage}); err != nil {
+		if err := s.backend.SetProperties(ctx, dataset, map[string]string{LineageProperty: lineage, OwnerProperty: s.installation}); err != nil {
 			return Metadata{}, err
 		}
 		current, err := s.backend.InspectState(ctx, dataset, recursive)
 		if err != nil {
 			return Metadata{}, err
 		}
-		actual, err := storedLineage(current, dataset)
+		actual, err := RootAuthority(current, dataset, s.installation)
 		if err != nil || actual != lineage || !reflect.DeepEqual(datasetObjects(state), datasetObjects(current)) || len(current.ResumeTokens) > 0 {
 			return Metadata{}, fmt.Errorf("scope changed during lineage initialization")
 		}
@@ -258,10 +303,13 @@ func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive 
 
 // Prune returns the initial preview and, when apply is true, re-plans before
 // each exact deletion. Previously completed deletions are not rolled back on error.
-func (s *Service) Prune(ctx context.Context, dataset string, grid policy.Grid, apply bool) ([]Decision, error) {
+func (s *Service) Prune(ctx context.Context, dataset string, effective policy.Effective, apply bool) ([]Decision, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := zfs.ValidateDataset(dataset); err != nil {
+		return nil, err
+	}
+	if err := ActiveRoot(effective, dataset); err != nil {
 		return nil, err
 	}
 	state, err := s.backend.InspectState(ctx, dataset, false)
@@ -271,11 +319,11 @@ func (s *Service) Prune(ctx context.Context, dataset string, grid policy.Grid, a
 	if err := scopeReady(state, dataset); err != nil {
 		return nil, err
 	}
-	lineage, err := storedLineage(state, dataset)
+	lineage, err := RootAuthority(state, dataset, s.installation)
 	if err != nil {
 		return nil, err
 	}
-	plan, err := PlanPrune(dataset, lineage, grid, snapshotsIn(state, dataset))
+	plan, err := PlanPrune(dataset, lineage, effective.Grid, snapshotsIn(state, dataset))
 	if err != nil || !apply {
 		return plan, err
 	}
@@ -293,11 +341,11 @@ func (s *Service) Prune(ctx context.Context, dataset string, grid policy.Grid, a
 		if !reflect.DeepEqual(datasetObjects(state), datasetObjects(current)) {
 			return plan, fmt.Errorf("dataset identity changed before pruning")
 		}
-		actual, err := storedLineage(current, dataset)
+		actual, err := RootAuthority(current, dataset, s.installation)
 		if err != nil || actual != lineage {
 			return plan, fmt.Errorf("lineage changed before pruning")
 		}
-		decisions, err := PlanPrune(dataset, lineage, grid, snapshotsIn(current, dataset))
+		decisions, err := PlanPrune(dataset, lineage, effective.Grid, snapshotsIn(current, dataset))
 		if err != nil {
 			return plan, err
 		}

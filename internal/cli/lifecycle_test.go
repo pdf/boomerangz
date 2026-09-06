@@ -6,9 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/lifecycle"
+	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
@@ -16,6 +19,40 @@ type cleanupExecutor struct {
 	zfs.Executor
 	properties []zfs.Property
 	writes     int
+}
+
+type adoptionExecutor struct {
+	zfs.Executor
+	properties []zfs.Property
+}
+
+func (e *adoptionExecutor) ListDatasets(context.Context) ([]zfs.Dataset, error) {
+	return []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem, EncryptionRoot: "-"}, {Name: "tank", Type: zfs.Filesystem, EncryptionRoot: "-"}}, nil
+}
+func (e *adoptionExecutor) GetActivationProperties(context.Context) ([]zfs.Property, error) {
+	return slices.DeleteFunc(slices.Clone(e.properties), func(row zfs.Property) bool { return row.Name != policy.Namespace+"enabled" }), nil
+}
+func (e *adoptionExecutor) GetStoredProperties(_ context.Context, datasets []string) ([]zfs.Property, error) {
+	selected := make(map[string]bool)
+	for _, dataset := range datasets {
+		selected[dataset] = true
+	}
+	return slices.DeleteFunc(slices.Clone(e.properties), func(row zfs.Property) bool { return !selected[row.Dataset] }), nil
+}
+func (e *adoptionExecutor) InspectState(_ context.Context, dataset string, _ bool) (zfs.State, error) {
+	return zfs.State{Objects: []zfs.Object{{Name: dataset, Type: "filesystem", GUID: 1}}, Properties: slices.Clone(e.properties)}, nil
+}
+func (e *adoptionExecutor) InspectDatasetIdentity(_ context.Context, dataset string) (zfs.DatasetIdentity, error) {
+	return zfs.DatasetIdentity{Name: dataset, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: 30}, nil
+}
+func (e *adoptionExecutor) SetProperties(_ context.Context, object string, values map[string]string) error {
+	for key, value := range values {
+		e.properties = slices.DeleteFunc(e.properties, func(row zfs.Property) bool {
+			return row.Dataset == object && row.Name == key && row.Source == zfs.SourceLocal
+		})
+		e.properties = append(e.properties, zfs.Property{Dataset: object, Name: key, Value: value, Source: zfs.SourceLocal})
+	}
+	return nil
 }
 
 func (e *cleanupExecutor) ListDatasets(context.Context) ([]zfs.Dataset, error) {
@@ -54,6 +91,7 @@ func TestCleanupCLIPreviewAndApply(t *testing.T) {
 	t.Parallel()
 	cfg := config.Defaults()
 	cfg.Paths.SocketPath = filepath.Join(t.TempDir(), "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(t.TempDir(), "identity")
 	e := &cleanupExecutor{properties: []zfs.Property{{Dataset: "tank/data", Name: "org.boomerangz:enabled", Value: "off", Source: zfs.SourceLocal}}}
 	var out bytes.Buffer
 	if err := runCleanup(t.Context(), &out, cfg, e, []string{"tank/data"}, false, false, false, false); err != nil {
@@ -71,6 +109,35 @@ func TestCleanupCLIPreviewAndApply(t *testing.T) {
 	}
 	if e.writes != 1 {
 		t.Fatal("apply did not execute preview")
+	}
+}
+
+func TestAdoptionReviewsLocalTargetWithoutSecondFlag(t *testing.T) {
+	t.Parallel()
+	const lineage = "11111111-1111-4111-8111-111111111111"
+	const oldOwner = "22222222-2222-4222-8222-222222222222"
+	executor := &adoptionExecutor{properties: []zfs.Property{
+		{Dataset: "tank", Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal},
+		{Dataset: "tank", Name: policy.Namespace + "local", Value: "backup/data", Source: zfs.SourceLocal},
+		{Dataset: "tank", Name: lifecycle.LineageProperty, Value: lineage, Source: zfs.SourceLocal},
+		{Dataset: "tank", Name: lifecycle.OwnerProperty, Value: oldOwner, Source: zfs.SourceLocal},
+	}}
+	cfg := config.Defaults()
+	cfg.Paths.IdentityDir = filepath.Join(t.TempDir(), "identity")
+	cfg.Paths.SocketPath = filepath.Join(t.TempDir(), "control.sock")
+	var preview bytes.Buffer
+	if err := runAdopt(t.Context(), &preview, cfg, executor, "tank", false); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(preview.Bytes(), []byte(`"status": "unbound"`)) {
+		t.Fatalf("target review missing: %s", preview.String())
+	}
+	var applied bytes.Buffer
+	if err := runAdopt(t.Context(), &applied, cfg, executor, "tank", true); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(applied.Bytes(), []byte(`"applied": true`)) {
+		t.Fatalf("adoption not applied: %s", applied.String())
 	}
 }
 

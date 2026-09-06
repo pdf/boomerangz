@@ -36,7 +36,7 @@ func (r *stateRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 
 func TestInspectStateScopeAndHiddenMetadata(t *testing.T) {
 	t.Parallel()
-	r := &stateRunner{inventory: "tank/data\tfilesystem\t1\t123\ntank/data@snap\tsnapshot\t2\t123\ntank/data#cursor\tbookmark\t2\t123\ntank/data/child\tfilesystem\t3\t123\n"}
+	r := &stateRunner{inventory: "tank/data\tfilesystem\t1\t123\t6\ntank/data@snap\tsnapshot\t2\t123\t6\ntank/data#cursor\tbookmark\t2\t123\t6\ntank/data/child\tfilesystem\t3\t123\t6\n"}
 	d := &Direct{runner: r}
 	state, err := d.InspectState(t.Context(), "tank/data", false)
 	if err != nil {
@@ -59,7 +59,7 @@ func TestInspectStateScopeAndHiddenMetadata(t *testing.T) {
 
 func TestInspectStateRejectsInvalidInventory(t *testing.T) {
 	t.Parallel()
-	for _, row := range []string{"tank/data\tsnapshot\t1\t123\n", "tank/data@snap\tfilesystem\t1\t123\n", "other\tfilesystem\t1\t123\n", "tank/data\tfilesystem\t0\t123\n", "tank/data\tfilesystem\t1\t-1\n", "tank/data@snap\tsnapshot\t2\t123\n"} {
+	for _, row := range []string{"tank/data\tsnapshot\t1\t123\t6\n", "tank/data@snap\tfilesystem\t1\t123\t6\n", "other\tfilesystem\t1\t123\t6\n", "tank/data\tfilesystem\t0\t123\t6\n", "tank/data\tfilesystem\t1\t-1\t6\n", "tank/data@snap\tsnapshot\t2\t123\t6\n"} {
 		d := &Direct{runner: &stateRunner{inventory: row}}
 		if _, err := d.InspectState(t.Context(), "tank/data", false); err == nil {
 			t.Errorf("accepted %q", row)

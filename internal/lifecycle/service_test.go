@@ -40,6 +40,7 @@ func (b *memoryBackend) InspectState(ctx context.Context, _ string, _ bool) (zfs
 func (b *memoryBackend) SetProperties(_ context.Context, object string, values map[string]string) error {
 	b.writes = append(b.writes, "set "+object)
 	for key, value := range values {
+		b.state.Properties = slices.DeleteFunc(b.state.Properties, func(p zfs.Property) bool { return p.Dataset == object && p.Name == key && p.Source == zfs.SourceLocal })
 		b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: object, Name: key, Value: value, Source: zfs.SourceLocal})
 	}
 	return nil
@@ -133,6 +134,18 @@ func backendWithSnapshots(t *testing.T) *memoryBackend {
 	return b
 }
 
+func activeTestPolicy(dataset string) policy.Effective {
+	row := zfs.Property{Dataset: dataset, Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal}
+	return policy.Resolve(zfs.Dataset{Name: dataset, Type: zfs.Filesystem, EncryptionRoot: "-"}, nil, []zfs.Property{row}, nil)
+}
+
+func addTestAuthority(b *memoryBackend) {
+	b.state.Properties = append(b.state.Properties,
+		zfs.Property{Dataset: "tank/data", Name: LineageProperty, Value: testLineage, Source: zfs.SourceLocal},
+		zfs.Property{Dataset: "tank/data", Name: OwnerProperty, Value: testInstallation, Source: zfs.SourceLocal},
+	)
+}
+
 func TestServiceCreatesAndVerifiesSnapshots(t *testing.T) {
 	t.Parallel()
 	for _, recursive := range []bool{false, true} {
@@ -140,11 +153,11 @@ func TestServiceCreatesAndVerifiesSnapshots(t *testing.T) {
 		if recursive {
 			b.state.Objects = append(b.state.Objects, zfs.Object{Name: "tank/data/child", Type: "volume", GUID: 2})
 		}
-		s, err := NewService(b)
+		s, err := NewService(b, testInstallation)
 		if err != nil {
 			t.Fatal(err)
 		}
-		metadata, err := s.CreateSnapshot(t.Context(), "tank/data", recursive, time.Now())
+		metadata, err := s.CreateSnapshot(t.Context(), "tank/data", recursive, time.Now(), activeTestPolicy("tank/data"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -163,23 +176,25 @@ func TestServiceCreatesAndVerifiesSnapshots(t *testing.T) {
 func TestServiceAdoptionAndPruning(t *testing.T) {
 	t.Parallel()
 	b := backendWithSnapshots(t)
-	s, _ := NewService(b)
-	if _, err := s.CreateSnapshot(t.Context(), "tank/data", false, time.Now()); err == nil || len(b.writes) != 0 {
+	s, _ := NewService(b, testInstallation)
+	if _, err := s.CreateSnapshot(t.Context(), "tank/data", false, time.Now(), activeTestPolicy("tank/data")); err == nil || len(b.writes) != 0 {
 		t.Fatal("silently replaced lost lineage")
 	}
-	lineage, err := s.AdoptDataset(t.Context(), "tank/data")
+	lineage, err := s.AdoptDataset(t.Context(), "tank/data", activeTestPolicy("tank/data"))
 	if err != nil || lineage != testLineage {
 		t.Fatalf("adopt: %s %v", lineage, err)
 	}
-	if _, err := s.AdoptDataset(t.Context(), "tank/data"); err == nil {
+	if _, err := s.AdoptDataset(t.Context(), "tank/data", activeTestPolicy("tank/data")); err == nil {
 		t.Fatal("overwrote lineage")
 	}
 	grid, _ := policy.ParseGrid("1x5m")
-	preview, err := s.Prune(t.Context(), "tank/data", grid, false)
+	effective := activeTestPolicy("tank/data")
+	effective.Grid = grid
+	preview, err := s.Prune(t.Context(), "tank/data", effective, false)
 	if err != nil || len(preview) != 3 || len(b.writes) != 1 {
 		t.Fatalf("preview: %v %v", preview, err)
 	}
-	if _, err := s.Prune(t.Context(), "tank/data", grid, true); err != nil {
+	if _, err := s.Prune(t.Context(), "tank/data", effective, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(b.writes) != 3 {
@@ -192,7 +207,7 @@ func TestServiceRefusesChangedOrResumableState(t *testing.T) {
 	for _, change := range []string{"guid", "hold", "resume", "lineage"} {
 		t.Run(change, func(t *testing.T) {
 			b := backendWithSnapshots(t)
-			b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: LineageProperty, Value: testLineage, Source: zfs.SourceLocal})
+			addTestAuthority(b)
 			b.beforeRead = func(b *memoryBackend) {
 				if b.reads != 2 {
 					return
@@ -215,9 +230,11 @@ func TestServiceRefusesChangedOrResumableState(t *testing.T) {
 					b.state.Properties[len(b.state.Properties)-1].Value = "invalid"
 				}
 			}
-			s, _ := NewService(b)
+			s, _ := NewService(b, testInstallation)
 			grid, _ := policy.ParseGrid("1x5m")
-			if _, err := s.Prune(t.Context(), "tank/data", grid, true); err == nil || len(b.writes) != 0 {
+			effective := activeTestPolicy("tank/data")
+			effective.Grid = grid
+			if _, err := s.Prune(t.Context(), "tank/data", effective, true); err == nil || len(b.writes) != 0 {
 				t.Fatalf("mutation after %s: %v %v", change, b.writes, err)
 			}
 		})
@@ -228,13 +245,13 @@ func TestServiceRejectsHiddenLineageAndCancelledContext(t *testing.T) {
 	t.Parallel()
 	b := backendWithSnapshots(t)
 	b.state.Received = map[string]map[string]string{"tank/data": {LineageProperty: testLineage}}
-	s, _ := NewService(b)
-	if _, err := s.AdoptDataset(t.Context(), "tank/data"); err == nil {
+	s, _ := NewService(b, testInstallation)
+	if _, err := s.AdoptDataset(t.Context(), "tank/data", activeTestPolicy("tank/data")); err == nil {
 		t.Fatal("adopted over hidden lineage")
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := s.CreateSnapshot(ctx, "tank/data", false, time.Now()); err == nil || len(b.writes) != 0 {
+	if _, err := s.CreateSnapshot(ctx, "tank/data", false, time.Now(), activeTestPolicy("tank/data")); err == nil || len(b.writes) != 0 {
 		t.Fatal("mutated cancelled scope")
 	}
 }

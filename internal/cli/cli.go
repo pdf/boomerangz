@@ -64,7 +64,7 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 	listCmd := datasetCmd.Command("list", "List sparse inventory and active policies as JSON.")
 	inspectCmd := datasetCmd.Command("inspect", "Inspect effective policy and stored properties as JSON.")
 	inspectName := inspectCmd.Arg("dataset", "Exact ZFS dataset name.").Required().String()
-	adoptCmd := datasetCmd.Command("adopt", "Preview restoring a missing lineage from owned snapshots.")
+	adoptCmd := datasetCmd.Command("adopt", "Preview transfer of an existing lineage to this installation.")
 	adoptName := adoptCmd.Arg("dataset", "Exact ZFS dataset name.").Required().String()
 	adoptApply := adoptCmd.Flag("apply", "Apply the adoption after revalidation.").Bool()
 	cleanupCmd := datasetCmd.Command("clean", "Preview explicit local decommissioning; preserves snapshots by default.")
@@ -74,14 +74,25 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 	cleanupDestroy := cleanupCmd.Flag("destroy-owned-snapshots", "Also delete fully proven owned snapshots without dependencies.").Bool()
 	cleanupApply := cleanupCmd.Flag("apply", "Apply cleanup after revalidation.").Bool()
 
+	identityCmd := app.Command("identity", "Inspect and recover installation identity.")
+	identityPath := identityCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
+	identityDropIns := identityCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
+	recoverCmd := identityCmd.Command("recover", "Preview recovery from local source-root owner markers.")
+	recoverOwner := recoverCmd.Flag("owner", "Explicit owner UUID when more than one candidate exists.").String()
+	recoverApply := recoverCmd.Flag("apply", "Apply the identity replacement after revalidation.").Bool()
+
 	command, err := app.Parse(args)
 	if err != nil {
 		return err
 	}
 
 	switch command {
-	case adoptCmd.FullCommand(), cleanupCmd.FullCommand():
-		loaded, err := config.Load(*datasetPath, *datasetDropIns)
+	case adoptCmd.FullCommand(), cleanupCmd.FullCommand(), recoverCmd.FullCommand():
+		configPath, configDir := *datasetPath, *datasetDropIns
+		if command == recoverCmd.FullCommand() {
+			configPath, configDir = *identityPath, *identityDropIns
+		}
+		loaded, err := config.Load(configPath, configDir)
 		if err != nil {
 			return err
 		}
@@ -94,6 +105,9 @@ func runWithReader(ctx context.Context, args []string, stdout, _ io.Writer, buil
 		executor, ok := reader.(zfs.Executor)
 		if !ok {
 			return fmt.Errorf("lifecycle executor unavailable")
+		}
+		if command == recoverCmd.FullCommand() {
+			return runIdentityRecover(ctx, stdout, loaded.Config, reader, executor, *recoverOwner, *recoverApply)
 		}
 		if command == adoptCmd.FullCommand() {
 			return runAdopt(ctx, stdout, loaded.Config, executor, *adoptName, *adoptApply)

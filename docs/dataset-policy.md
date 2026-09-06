@@ -80,8 +80,10 @@ creation timestamp, and ZFS GUID must agree.
 | Full name | Default | Values | Purpose |
 | --- | --- | --- | --- |
 | `org.boomerangz:state:lineage` | Unset until managed | UUID | UUID identifying a managed dataset lineage and associating snapshots with it. |
+| `org.boomerangz:state:owner` | Unset until managed | Installation UUID | Explicitly local source-root owner. It must match `<identity_dir>/installation-id` before automatic mutation; received and inherited values are provenance only. |
 | `org.boomerangz:state:snapshot` | Unset until managed | UUID | UUID identifying an individual managed snapshot. |
 | `org.boomerangz:state:created` | Unset until managed | RFC3339Nano UTC timestamp | Snapshot creation timestamp in UTC, matching the managed snapshot name. |
+| `org.boomerangz:state:target:<target-id>` | Unset until first transfer | Versioned JSON identity | Persistent source-root binding for canonical transport, receive mapping, destination pool GUID, and existing destination or ancestor GUID. Every local job revalidates it; name, GUID, or mapping changes require explicit rebind/reseed. |
 | `org.boomerangz:state:reference:<target-id>:<snapshot-uuid>` | Unset until managed | JSON recovery proof | Local JSON recovery proof binding a non-secret canonical target identity, snapshot metadata and source GUID to a target hold and versioned bookmark. `target-id` is the SHA-256 hex digest of the target identity. Written before taking a hold; retained until both hold and bookmark are released. Never configure manually or populate with credentials. |
 
 The remainder of `org.boomerangz:state:*` is reserved for internal state, not a

@@ -58,21 +58,24 @@ func TestGuestLifecycle(t *testing.T) {
 	root := pool + "/data/lifecycle-" + time.Now().UTC().Format("150405000")
 	command("zfs", "create", "-u", root)
 	command("zfs", "create", "-u", root+"/child")
+	command("zfs", "set", policy.Namespace+"enabled=on", root)
 	// Fixtures are intentionally retained for guarded pool teardown after testing.
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(direct)
+	const installation = "abcdefab-cdef-4abc-8def-abcdefabcdef"
+	service, err := NewService(direct, installation)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	first, err := service.CreateSnapshot(t.Context(), root, true, now.Add(-2*time.Hour))
+	effective := activeTestPolicy(root)
+	first, err := service.CreateSnapshot(t.Context(), root, true, now.Add(-2*time.Hour), effective)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := service.CreateSnapshot(t.Context(), root, false, now)
+	second, err := service.CreateSnapshot(t.Context(), root, false, now, effective)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +106,8 @@ func TestGuestLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	grid, _ := policy.ParseGrid("1x5m")
-	preview, err := service.Prune(t.Context(), root, grid, true)
+	effective.Grid = grid
+	preview, err := service.Prune(t.Context(), root, effective, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,13 +119,13 @@ func TestGuestLifecycle(t *testing.T) {
 	if err := direct.Release(t.Context(), "foreign-test-hold", old); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Prune(t.Context(), root, grid, true); err != nil {
+	if _, err := service.Prune(t.Context(), root, effective, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := direct.InheritProperty(t.Context(), root, LineageProperty); err != nil {
 		t.Fatal(err)
 	}
-	adopted, err := service.AdoptDataset(t.Context(), root)
+	adopted, err := service.AdoptDataset(t.Context(), root, effective)
 	if err != nil || adopted != second.Lineage {
 		t.Fatalf("adopt=%s err=%v", adopted, err)
 	}
@@ -159,8 +163,9 @@ func TestGuestLifecycle(t *testing.T) {
 	if binary := os.Getenv("BOOMERANGZ_LIFECYCLE_GUEST_CLI"); binary != "" {
 		cliRoot := root + "/cli"
 		command("zfs", "create", "-u", cliRoot)
+		command("zfs", "set", policy.Namespace+"enabled=on", cliRoot)
 		command("zfs", "snapshot", cliRoot+"@foreign")
-		if _, err := service.CreateSnapshot(t.Context(), cliRoot, false, time.Now()); err != nil {
+		if _, err := service.CreateSnapshot(t.Context(), cliRoot, false, time.Now(), activeTestPolicy(cliRoot)); err != nil {
 			t.Fatal(err)
 		}
 		if err := direct.InheritProperty(t.Context(), cliRoot, LineageProperty); err != nil {

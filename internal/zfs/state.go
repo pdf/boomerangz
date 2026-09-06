@@ -18,14 +18,14 @@ func (d *Direct) InspectState(ctx context.Context, dataset string, recursive boo
 	if !recursive {
 		args = append(args, "-d", "1")
 	}
-	args = append(args, "-t", "filesystem,volume,snapshot,bookmark", "-o", "name,type,guid,creation", dataset)
+	args = append(args, "-t", "filesystem,volume,snapshot,bookmark", "-o", "name,type,guid,creation,createtxg", dataset)
 	output, err := d.runner.Run(ctx, args...)
 	if err != nil {
 		return State{}, err
 	}
 	state := State{Received: make(map[string]map[string]string), ResumeTokens: make(map[string]string), Clones: make(map[string][]string), Holds: make(map[string][]string)}
 	seen := make(map[string]bool)
-	err = parseTable(output, 4, func(fields []string) error {
+	err = parseTable(output, 5, func(fields []string) error {
 		base := strings.FieldsFunc(fields[0], func(r rune) bool { return r == '@' || r == '#' })
 		if len(base) == 0 || (base[0] != dataset && !strings.HasPrefix(base[0], dataset+"/")) {
 			return fmt.Errorf("object outside query scope: %q", fields[0])
@@ -54,7 +54,11 @@ func (d *Direct) InspectState(ctx context.Context, dataset string, recursive boo
 		if (fields[1] == "snapshot") != strings.Contains(fields[0], "@") || (fields[1] == "bookmark") != strings.Contains(fields[0], "#") {
 			return fmt.Errorf("object name and type disagree: %q", fields[0])
 		}
-		state.Objects = append(state.Objects, Object{Name: fields[0], Type: fields[1], GUID: guid, Creation: created})
+		txg, err := strconv.ParseUint(fields[4], 10, 64)
+		if err != nil || txg == 0 {
+			return fmt.Errorf("invalid creation transaction for %s", fields[0])
+		}
+		state.Objects = append(state.Objects, Object{Name: fields[0], Type: fields[1], GUID: guid, Creation: created, CreateTXG: txg})
 		return nil
 	})
 	if err != nil {

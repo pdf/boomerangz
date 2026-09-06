@@ -61,7 +61,7 @@ provided by the administrator, never supplied by a package.
 | Field | Default | Purpose |
 | --- | --- | --- |
 | `credentials_dir` | `/etc/boomerangz/credentials.d` | Location for imported client credential bundles and dedicated SSH credentials. |
-| `identity_dir` | `/var/lib/boomerangz/identity` | Persistent server identity and token-verifier storage; preserve across restarts. |
+| `identity_dir` | `/var/lib/boomerangz/identity` | Persistent installation ID, server identity, and token-verifier storage; preserve across restarts and never clone to another active installation. |
 | `socket_path` | `/run/boomerangz/boomerangz.sock` | Default local control socket used to communicate with the daemon. |
 
 ## Remotes

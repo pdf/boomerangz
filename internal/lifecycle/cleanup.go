@@ -145,22 +145,25 @@ func (s *Service) cleanupPlan(ctx context.Context, dataset string, options Clean
 			} else if err := safety.CheckTarget(ctx, r.Target); err != nil {
 				plan.Blockers = append(plan.Blockers, fmt.Sprintf("target %s: %v", r.Target, err))
 			}
-			if slices.Contains(state.Holds[r.snapshot(name)], r.hold()) {
-				owned, metadata, err := findOwned(state, name, r.snapshot(name), lineage)
-				if err != nil || owned.GUID != r.GUID || metadata != r.Metadata {
-					plan.Blockers = append(plan.Blockers, "held snapshot ownership changed: "+r.snapshot(name))
-				} else {
-					provedHolds[r.snapshot(name)+"\x00"+r.hold()] = true
-					plan.Actions = append(plan.Actions, CleanupAction{Operation: "release", Object: r.snapshot(name), Property: r.hold(), GUID: r.GUID})
-				}
-			}
-			for _, o := range state.Objects {
-				if o.Name == r.bookmark(name) {
-					if o.Type != "bookmark" || o.GUID != r.GUID {
-						plan.Blockers = append(plan.Blockers, "bookmark ownership changed: "+o.Name)
+			for _, source := range r.sources() {
+				snapshot := r.sourceSnapshot(source)
+				if slices.Contains(state.Holds[snapshot], r.hold()) {
+					owned, metadata, err := findOwned(state, source.Dataset, snapshot, lineage)
+					if err != nil || owned.GUID != source.GUID || metadata != source.Metadata {
+						plan.Blockers = append(plan.Blockers, "held snapshot ownership changed: "+snapshot)
 					} else {
-						provedBookmarks[o.Name] = true
-						plan.Actions = append(plan.Actions, CleanupAction{Operation: "destroy-bookmark", Object: o.Name, GUID: o.GUID})
+						provedHolds[snapshot+"\x00"+r.hold()] = true
+						plan.Actions = append(plan.Actions, CleanupAction{Operation: "release", Object: snapshot, Property: r.hold(), GUID: source.GUID})
+					}
+				}
+				for _, o := range state.Objects {
+					if o.Name == r.sourceBookmark(source) {
+						if o.Type != "bookmark" || o.GUID != source.GUID {
+							plan.Blockers = append(plan.Blockers, "bookmark ownership changed: "+o.Name)
+						} else {
+							provedBookmarks[o.Name] = true
+							plan.Actions = append(plan.Actions, CleanupAction{Operation: "destroy-bookmark", Object: o.Name, GUID: o.GUID})
+						}
 					}
 				}
 			}

@@ -5,16 +5,19 @@ transfers, and live daemon status are not yet available.
 
 ## Ownership and snapshots
 
-First management creates a cryptographically random lineage UUID on the dataset
-or replication root. Snapshot creation atomically attaches lineage, snapshot UUID,
+Each installation has a random UUID in `<identity_dir>/installation-id`. First
+management creates a cryptographically random lineage UUID and writes both that
+lineage and the installation owner locally on the dataset or replication root.
+Snapshot creation atomically attaches lineage, snapshot UUID,
 and UTC creation timestamp with `zfs snapshot -o`. A recursive operation uses the
-same metadata across the snapshot set. Inventory and ownership are verified after
-creation; conflicting descendant lineages require explicit resolution.
+same metadata across the snapshot set. Descendants are governed by the replication
+root; inherited or received owner/lineage values are provenance, not authority.
 
-Ownership requires matching name, explicitly stored metadata, lineage and a
-nonzero ZFS GUID. A familiar name alone is insufficient. Missing dataset lineage
-with existing internal metadata requires adoption or explicit cleanup, rather
-than silently creating a new lineage.
+Mutation additionally requires locally configured activation, an explicitly local
+root lineage, and an explicitly local owner matching the installation ID. A valid
+different owner is dormant: snapshot, prune, transfer and recovery-state mutation
+are refused. Snapshot ownership requires matching name, explicitly stored metadata,
+lineage and a nonzero ZFS GUID. A familiar name alone is insufficient.
 
 The grid is anchored at the youngest owned snapshot. Each adjacent window keeps
 its oldest snapshot; foreign snapshots do not fill windows. Holds, clones and
@@ -29,16 +32,37 @@ boomerangz dataset adopt pool/data
 boomerangz dataset adopt pool/data --apply
 ```
 
-The first command previews the unique lineage recoverable from proven snapshots.
-`--apply` restores it locally after revalidation. Existing, conflicting or hidden
-received dataset lineage is never overwritten. Multiple candidate lineages or
-resume state block adoption. Adoption is exact-dataset only.
+The first command previews transfer of an existing consistent lineage to this
+installation. `--apply` is the explicit confirmation in non-interactive use and
+changes both missing lineage recovery state and the owner only after revalidation.
+Received lineage is provenance and hidden conflicting values are never overwritten.
+Multiple candidate lineages or resume state block adoption. Adoption is
+exact-dataset only. Every preview shows the effective policy and target set. Local
+targets include their mapped dataset, stored binding, current pool/dataset GUID
+identity, and verification status; unavailable or mismatched local targets block
+apply. Remote targets remain unverified and suspended until the remote phase can
+independently revalidate them.
+
+If the installation identity directory is lost while the original pools remain,
+the separate preview-first recovery command inventories activated roots:
+
+```sh
+boomerangz identity recover
+boomerangz identity recover --owner <installation-uuid> --apply
+```
+
+Automatic selection requires exactly one valid owner. Recovery verifies local
+root lineage and snapshot/reference evidence, refuses when the current fresh ID
+already owns any lineage or a lifecycle operation is active, and atomically
+replaces only the expected identity file.
 
 ## Holds and bookmarks
 
-Target-specific holds protect snapshots needed for recovery. Versioned bookmarks
-record replication checkpoints. Old references remain until their dependencies
-are resolved; interrupted operations retain recovery metadata for retry.
+Target-specific holds protect snapshots needed for recovery. A recursive snapshot
+set uses one root reference proof containing every protected source member, avoiding
+colliding properties for the shared snapshot UUID. Versioned bookmarks record
+replication checkpoints. Old references remain until their dependencies are
+resolved; interrupted operations retain recovery metadata for retry.
 
 Cleanup verifies reference records, snapshot metadata, and GUIDs before releasing
 holds or deleting bookmarks. Unknown boomerangz-looking references block cleanup;

@@ -6,14 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/discovery"
+	"github.com/pdf/boomerangz/internal/identity"
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	"github.com/pdf/boomerangz/internal/policy"
+	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
@@ -69,6 +76,10 @@ func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 	if err := safety.Quiescent(ctx, []string{dataset}); err != nil {
 		return err
 	}
+	installation, err := identity.LoadOrCreate(cfg.Paths.IdentityDir)
+	if err != nil {
+		return err
+	}
 	state, err := executor.InspectState(ctx, dataset, false)
 	if err != nil {
 		return err
@@ -77,21 +88,104 @@ func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 	if err != nil {
 		return err
 	}
-	if apply {
-		service, err := lifecycle.NewService(executor)
-		if err != nil {
-			return err
-		}
-		lineage, err = service.AdoptDataset(ctx, dataset)
-		if err != nil {
-			return err
-		}
+	oldOwner, err := localMarker(state.Properties, dataset, lifecycle.OwnerProperty)
+	if err != nil {
+		return err
 	}
-	return json.NewEncoder(out).Encode(struct {
-		Dataset string `json:"dataset"`
-		Lineage string `json:"lineage"`
-		Applied bool   `json:"applied"`
-	}{dataset, lineage, apply})
+	if oldOwner != "" && !identity.Valid(oldOwner) {
+		return fmt.Errorf("existing local owner is invalid")
+	}
+	var remoteNames []string
+	for name := range cfg.Remotes {
+		remoteNames = append(remoteNames, name)
+	}
+	scanner, err := discovery.New(executor, discovery.Options{Remotes: remoteNames})
+	if err != nil {
+		return err
+	}
+	generation, err := scanner.Scan(ctx, []string{dataset})
+	if err != nil {
+		return err
+	}
+	entry, exists := generation.Inspect(dataset)
+	if !exists || !entry.Inspected {
+		return fmt.Errorf("dataset policy inspection is incomplete")
+	}
+	effective := entry.Policy
+	if err := lifecycle.ActiveRoot(effective, dataset); err != nil {
+		return err
+	}
+	inspectLocal := func() ([]transfer.LocalTargetInspection, []string) {
+		var inspections []transfer.LocalTargetInspection
+		var blockers []string
+		for _, target := range effective.Local {
+			inspection, inspectErr := transfer.InspectLocalTarget(ctx, executor, transfer.Request{Source: dataset, DestinationRoot: target, Policy: effective}, state)
+			inspections = append(inspections, inspection)
+			if inspectErr != nil {
+				blockers = append(blockers, fmt.Sprintf("local target %s: %v", target, inspectErr))
+			}
+		}
+		return inspections, blockers
+	}
+	localTargets, blockers := inspectLocal()
+	type remoteTarget struct {
+		ConfiguredName    string `json:"configured_name"`
+		Transport         string `json:"transport"`
+		CanonicalEndpoint string `json:"canonical_endpoint"`
+		DestinationRoot   string `json:"destination_root"`
+		Status            string `json:"status"`
+	}
+	var remoteTargets []remoteTarget
+	for _, name := range effective.Remote {
+		remote := cfg.Remotes[name]
+		port := remote.Port
+		if port == 0 {
+			port = 22
+		}
+		endpoint := net.JoinHostPort(remote.Host, strconv.Itoa(port))
+		if remote.User != "" {
+			endpoint = remote.User + "@" + endpoint
+		}
+		remoteTargets = append(remoteTargets, remoteTarget{ConfiguredName: name, Transport: remote.Transport, CanonicalEndpoint: "ssh://" + endpoint, DestinationRoot: remote.Root, Status: "unverified-suspended"})
+	}
+	type adoptionResult struct {
+		Dataset       string                           `json:"dataset"`
+		Lineage       string                           `json:"lineage"`
+		OldOwner      string                           `json:"old_owner,omitempty"`
+		NewOwner      string                           `json:"new_owner"`
+		Policy        policy.Effective                 `json:"policy"`
+		LocalTargets  []transfer.LocalTargetInspection `json:"local_targets,omitempty"`
+		RemoteTargets []remoteTarget                   `json:"remote_targets,omitempty"`
+		Blockers      []string                         `json:"blockers,omitempty"`
+		Warning       string                           `json:"warning"`
+		Applied       bool                             `json:"applied"`
+	}
+	result := adoptionResult{Dataset: dataset, Lineage: lineage, OldOwner: oldOwner, NewOwner: installation, Policy: effective, LocalTargets: localTargets, RemoteTargets: remoteTargets, Blockers: blockers, Warning: "transferred policy may name absent, unrelated, or inappropriate destinations on this host"}
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	if len(blockers) > 0 {
+		if !apply {
+			return encoder.Encode(result)
+		}
+		return errors.Join(fmt.Errorf("adoption blocked; no owner change applied"), encoder.Encode(result))
+	}
+	if apply {
+		revalidated, revalidationBlockers := inspectLocal()
+		if len(revalidationBlockers) > 0 || !reflect.DeepEqual(localTargets, revalidated) {
+			result.Blockers = append(result.Blockers, "target identity changed during adoption; retry preview")
+			return errors.Join(fmt.Errorf("adoption blocked; no owner change applied"), encoder.Encode(result))
+		}
+		service, err := lifecycle.NewService(executor, installation)
+		if err != nil {
+			return err
+		}
+		_, err = service.AdoptDataset(ctx, dataset, effective)
+		if err != nil {
+			return err
+		}
+		result.Applied = true
+	}
+	return encoder.Encode(result)
 }
 
 func cleanupScopes(ctx context.Context, executor zfs.Executor, names []string, recursive, all bool) ([]string, bool, error) {
@@ -147,7 +241,7 @@ func runCleanup(ctx context.Context, out io.Writer, cfg config.Config, executor 
 		}
 		defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
 	}
-	service, err := lifecycle.NewService(executor)
+	service, err := lifecycle.NewCleanupService(executor)
 	if err != nil {
 		return err
 	}
