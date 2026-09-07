@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/pdf/boomerangz/internal/config"
@@ -157,19 +156,19 @@ func runDaemonClean(ctx context.Context, out io.Writer, cfg config.Config, names
 	return true, encodeErr
 }
 
-func selectTokenListener(cfg config.Config, name string) (string, config.ListenerConfig, error) {
+func selectPairingListener(cfg config.Config, name string) (string, config.ListenerConfig, error) {
 	if name != "" {
 		listener, exists := cfg.Listeners[name]
 		if !exists {
 			return "", config.ListenerConfig{}, fmt.Errorf("listener %s was not found", name)
 		}
-		if listener.Network != "tcp" || !strings.Contains(listener.AuthMode, "token") {
-			return "", config.ListenerConfig{}, fmt.Errorf("listener %s does not use TCP token authentication", name)
+		if listener.Network != "tcp" {
+			return "", config.ListenerConfig{}, fmt.Errorf("listener %s is not a TCP listener", name)
 		}
 		return name, listener, nil
 	}
 	for candidate, listener := range cfg.Listeners {
-		if listener.Network == "tcp" && strings.Contains(listener.AuthMode, "token") {
+		if listener.Network == "tcp" {
 			if name != "" {
 				return "", config.ListenerConfig{}, fmt.Errorf("multiple token listeners exist; select one with --listener")
 			}
@@ -177,18 +176,15 @@ func selectTokenListener(cfg config.Config, name string) (string, config.Listene
 		}
 	}
 	if name == "" {
-		return "", config.ListenerConfig{}, fmt.Errorf("no TCP token listener is configured")
+		return "", config.ListenerConfig{}, fmt.Errorf("no TCP listener is configured")
 	}
 	return name, cfg.Listeners[name], nil
 }
 
-func runTokenCreate(out io.Writer, cfg config.Config, listenerName, endpoint, caFile, serverName string, systemCA bool, clientCert, clientKey string, scopes []string, expiry time.Duration) error {
-	_, listener, err := selectTokenListener(cfg, listenerName)
+func runPairingCreate(out io.Writer, cfg config.Config, listenerName, clientCert, clientKey string, scopes []string, expiry time.Duration) error {
+	name, listener, err := selectPairingListener(cfg, listenerName)
 	if err != nil {
 		return err
-	}
-	if endpoint == "" {
-		endpoint = listener.Address
 	}
 	var expires *time.Time
 	if expiry < 0 {
@@ -202,10 +198,7 @@ func runTokenCreate(out io.Writer, cfg config.Config, listenerName, endpoint, ca
 	if err != nil {
 		return err
 	}
-	if listener.AuthMode == "mtls+token" && (clientCert == "" || clientKey == "") {
-		return fmt.Errorf("mTLS plus token pairing requires --client-cert and --client-key")
-	}
-	bundle, err := control.CreatePairingBundle(store, endpoint, listener.TLSCert, caFile, serverName, systemCA, clientCert, clientKey, scopes, expires)
+	bundle, err := control.CreateListenerPairing(store, cfg.Paths.IdentityDir, name, listener, clientCert, clientKey, scopes, expires)
 	if err != nil {
 		return err
 	}
@@ -214,7 +207,7 @@ func runTokenCreate(out io.Writer, cfg config.Config, listenerName, endpoint, ca
 	return encoder.Encode(bundle)
 }
 
-func runTokenImport(out io.Writer, cfg config.Config, name, path string) error {
+func runPairingImport(out io.Writer, cfg config.Config, name, path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err

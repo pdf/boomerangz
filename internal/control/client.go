@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pdf/boomerangz/internal/config"
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -38,6 +39,7 @@ type PairingBundle struct {
 	Scopes     []string `json:"scopes"`
 	ClientCert string   `json:"client_certificate_pem,omitempty"`
 	ClientKey  string   `json:"client_private_key_pem,omitempty"`
+	ClientID   string   `json:"client_id,omitempty"`
 }
 
 func certificateDetails(path string) (*x509.Certificate, error) {
@@ -123,6 +125,97 @@ func CreatePairingBundle(store *TokenStore, endpoint, certFile, caFile, serverNa
 	return bundle, nil
 }
 
+// CreateListenerPairing derives stable connection and trust metadata from one
+// configured listener and adds only the client-specific authentication material.
+func CreateListenerPairing(store *TokenStore, identityDir, listenerName string, listener config.ListenerConfig, clientCertFile, clientKeyFile string, scopes []string, expires *time.Time) (PairingBundle, error) {
+	endpoint := listener.AdvertisedAddress
+	if endpoint == "" {
+		endpoint = listener.Address
+	}
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil || host == "" || host == "0.0.0.0" || host == "::" {
+		return PairingBundle{}, fmt.Errorf("listener advertised_address must be a client-visible host:port")
+	}
+	certFile := listener.TLSCert
+	caFile := listener.PairingCA
+	if certFile == "" {
+		managed, err := ensureManagedServerIdentity(identityDir, listenerName, endpoint)
+		if err != nil {
+			return PairingBundle{}, err
+		}
+		certFile, caFile = managed.cert, managed.ca
+	}
+	certificate, err := certificateDetails(certFile)
+	if err != nil {
+		return PairingBundle{}, err
+	}
+	if err := certificate.VerifyHostname(host); err != nil {
+		return PairingBundle{}, fmt.Errorf("server certificate does not cover %s: %w", host, err)
+	}
+	bundle := PairingBundle{Version: 1, Endpoint: endpoint, ServerName: host}
+	if caFile == "" {
+		bundle.TrustMode = "system"
+	} else {
+		caPEM, err := os.ReadFile(caFile)
+		if err != nil {
+			return PairingBundle{}, err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return PairingBundle{}, fmt.Errorf("pairing_ca contains no certificates")
+		}
+		bundle.TrustMode, bundle.CAPEM = "ca", string(caPEM)
+	}
+	if listener.PairingPinCertificate {
+		digest := sha256.Sum256(certificate.RawSubjectPublicKeyInfo)
+		bundle.SPKIPin = base64.RawStdEncoding.EncodeToString(digest[:])
+	}
+	if strings.Contains(listener.AuthMode, "token") {
+		if store == nil {
+			return PairingBundle{}, fmt.Errorf("token store is required")
+		}
+		record, secret, err := store.Create(scopes, expires)
+		if err != nil {
+			return PairingBundle{}, err
+		}
+		bundle.TokenID, bundle.Secret, bundle.Scopes = record.ID, secret, record.Scopes
+	}
+	if listener.AuthMode == "mtls" || listener.AuthMode == "mtls+token" {
+		if listener.ClientCA == "" {
+			if clientCertFile != "" || clientKeyFile != "" {
+				return PairingBundle{}, fmt.Errorf("client certificate files cannot be combined with managed client PKI")
+			}
+			bundle.ClientID, err = randomHex(16)
+			if err == nil {
+				var cert, key []byte
+				cert, key, err = issueManagedClientIdentity(identityDir, "boomerangz-"+bundle.ClientID)
+				bundle.ClientCert, bundle.ClientKey = string(cert), string(key)
+			}
+		} else {
+			if clientCertFile == "" || clientKeyFile == "" {
+				return PairingBundle{}, fmt.Errorf("external mTLS requires client certificate and key")
+			}
+			cert, certErr := os.ReadFile(clientCertFile)
+			key, keyErr := os.ReadFile(clientKeyFile)
+			err = errors.Join(certErr, keyErr)
+			bundle.ClientCert, bundle.ClientKey = string(cert), string(key)
+		}
+		if err != nil {
+			if bundle.TokenID != "" {
+				_ = store.Revoke(bundle.TokenID)
+			}
+			return PairingBundle{}, err
+		}
+		if _, err := tls.X509KeyPair([]byte(bundle.ClientCert), []byte(bundle.ClientKey)); err != nil {
+			if bundle.TokenID != "" {
+				_ = store.Revoke(bundle.TokenID)
+			}
+			return PairingBundle{}, err
+		}
+	}
+	return bundle, nil
+}
+
 // ImportPairingBundle validates and stores a client bundle with restrictive permissions.
 func ImportPairingBundle(credentialsDir, name string, data []byte) (string, error) {
 	if name == "" || strings.ContainsAny(name, "/\\\x00\r\n") {
@@ -137,13 +230,23 @@ func ImportPairingBundle(credentialsDir, name string, data []byte) (string, erro
 	if _, err := clientTLSConfig(bundle); err != nil {
 		return "", err
 	}
-	identifier, identifierErr := hex.DecodeString(bundle.TokenID)
-	secret, secretErr := hex.DecodeString(bundle.Secret)
-	if bundle.Version != 1 || identifierErr != nil || len(identifier) != 16 || secretErr != nil || len(secret) != 32 || len(bundle.Scopes) == 0 {
+	if bundle.Version != 1 {
 		return "", fmt.Errorf("pairing bundle is incomplete")
 	}
-	if _, err := normalizeScopes(bundle.Scopes); err != nil {
-		return "", err
+	hasToken := bundle.TokenID != "" || bundle.Secret != "" || len(bundle.Scopes) != 0
+	hasClient := bundle.ClientCert != "" || bundle.ClientKey != ""
+	if !hasToken && !hasClient {
+		return "", fmt.Errorf("pairing bundle contains no client authentication")
+	}
+	if hasToken {
+		identifier, identifierErr := hex.DecodeString(bundle.TokenID)
+		secret, secretErr := hex.DecodeString(bundle.Secret)
+		if identifierErr != nil || len(identifier) != 16 || secretErr != nil || len(secret) != 32 || len(bundle.Scopes) == 0 {
+			return "", fmt.Errorf("pairing bundle token is incomplete")
+		}
+		if _, err := normalizeScopes(bundle.Scopes); err != nil {
+			return "", err
+		}
 	}
 	if err := os.MkdirAll(credentialsDir, 0o700); err != nil {
 		return "", err
@@ -211,15 +314,16 @@ func clientTLSConfig(bundle PairingBundle) (*tls.Config, error) {
 		}
 		certificates = []tls.Certificate{certificate}
 	}
+	var result *tls.Config
 	switch bundle.TrustMode {
 	case "system":
-		return &tls.Config{MinVersion: tls.VersionTLS13, ServerName: bundle.ServerName, Certificates: certificates}, nil
+		result = &tls.Config{MinVersion: tls.VersionTLS13, ServerName: bundle.ServerName, Certificates: certificates}
 	case "ca":
 		roots := x509.NewCertPool()
 		if !roots.AppendCertsFromPEM([]byte(bundle.CAPEM)) {
 			return nil, fmt.Errorf("pairing bundle has no CA certificates")
 		}
-		return &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, ServerName: bundle.ServerName, Certificates: certificates}, nil
+		result = &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, ServerName: bundle.ServerName, Certificates: certificates}
 	case "pin":
 		expected, err := base64.RawStdEncoding.DecodeString(bundle.SPKIPin)
 		if err != nil || len(expected) != sha256.Size {
@@ -252,6 +356,23 @@ func clientTLSConfig(bundle PairingBundle) (*tls.Config, error) {
 	default:
 		return nil, fmt.Errorf("pairing bundle trust mode must be system, ca, or pin")
 	}
+	if bundle.SPKIPin != "" {
+		expected, err := base64.RawStdEncoding.DecodeString(bundle.SPKIPin)
+		if err != nil || len(expected) != sha256.Size {
+			return nil, fmt.Errorf("pairing bundle has invalid public-key pin")
+		}
+		result.VerifyConnection = func(state tls.ConnectionState) error {
+			if len(state.PeerCertificates) == 0 {
+				return fmt.Errorf("server supplied no certificate")
+			}
+			digest := sha256.Sum256(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
+			if subtle.ConstantTimeCompare(expected, digest[:]) != 1 {
+				return fmt.Errorf("server public-key pin mismatch")
+			}
+			return nil
+		}
+	}
+	return result, nil
 }
 
 type tokenCredentials struct{ id, secret string }
@@ -305,7 +426,11 @@ func DialPairingConnection(bundle PairingBundle) (*grpc.ClientConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	connection, err := grpc.NewClient(bundle.Endpoint, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), grpc.WithPerRPCCredentials(tokenCredentials{id: bundle.TokenID, secret: bundle.Secret}))
+	options := []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))}
+	if bundle.TokenID != "" || bundle.Secret != "" {
+		options = append(options, grpc.WithPerRPCCredentials(tokenCredentials{id: bundle.TokenID, secret: bundle.Secret}))
+	}
+	connection, err := grpc.NewClient(bundle.Endpoint, options...)
 	if err != nil {
 		return nil, err
 	}

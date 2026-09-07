@@ -50,40 +50,43 @@ authentication. For example:
 [listeners.remote_control]
 network = "tcp"
 address = "192.0.2.10:7443"
+advertised_address = "backup.example.net:7443"
 auth_mode = "token"
 tls_cert = "/etc/boomerangz/server.crt"
 tls_key = "/etc/boomerangz/server.key"
 ```
 
-Bind to a management interface or firewall-restricted address. A wildcard bind
-is allowed for the listener, but token pairing then requires `--endpoint` with
-the client-visible host and port. The daemon reloads the certificate and key
+Bind to a management interface or firewall-restricted address. `address` is the
+local bind address; `advertised_address` is the client-visible address placed in
+pairing bundles and is required when Boomerangz manages the server certificate.
+The daemon reloads an external certificate and key
 together on new TLS handshakes. If a renewal is temporarily incomplete, it logs
 the failure and retains the last usable pair; clients still enforce certificate
 validity.
+
+When `tls_cert` and `tls_key` are both omitted, Boomerangz creates a protected
+private CA and renewable server certificate under `paths.identity_dir`. The
+certificate covers the hostname in `advertised_address`. Existing pairings keep
+working across leaf-certificate renewal because the managed CA is retained.
 
 Create one token per client and transfer the resulting JSON bundle through a
 trusted channel. The token secret appears only in this output:
 
 ```sh
-boomerangz auth token create \
+boomerangz auth pairing create \
   --listener remote_control \
-  --endpoint backup.example.net:7443 \
-  --server-name backup.example.net \
   --scope status >laptop-pairing.json
 ```
 
-Without a trust flag, the bundle pins the certificate's public key and verifies
-its name and validity period. Use `--ca /path/to/ca.pem` to embed an explicit CA
-chain, or `--system-ca` for a publicly trusted certificate. CA trust permits
-normal certificate/key renewal without re-pairing while the name and chain
-remain valid. System roots are never silently substituted for the selected
-trust mode.
+Externally managed certificates use the client's system roots when `pairing_ca`
+is omitted. Set `pairing_ca` on the listener to embed an explicit private CA.
+`pairing_pin_certificate = true` additionally pins the certificate public key;
+CA-chain, hostname, validity, and usage verification still apply.
 
 On the client, import and use the bundle:
 
 ```sh
-boomerangz auth token import backup laptop-pairing.json
+boomerangz auth pairing import backup laptop-pairing.json
 boomerangz status --credential backup
 ```
 
@@ -96,13 +99,15 @@ boomerangz auth token list
 boomerangz auth token revoke TOKEN_ID
 ```
 
-Available scopes are `status`, `trigger`, and `admin`. `status` permits status
+Available scopes are `status`, `trigger`, `replicate`, `prune`, and `admin`. `status` permits status
 snapshots, watches, and dataset listing; `trigger` permits snapshot triggers and
-reconciliation hints; `admin` includes all methods, including clean.
+reconciliation hints; `replicate` permits scoped destination inspection,
+reconciliation, and receive operations; `prune` is reserved for scoped remote
+pruning; `admin` includes all methods, including clean.
 
-For `mtls`, set `client_ca` to the CA that issues accepted client certificates.
-For `mtls+token`, also supply `--client-cert` and `--client-key` when creating a
-pairing bundle; those credentials are embedded in the protected bundle. Pure
-mTLS clients can use any gRPC client configured with the accepted certificate,
-private key, server trust, and the versioned API in
-`proto/boomerangz/control/v1/control.proto`.
+For `mtls` or `mtls+token`, setting `client_ca` selects an externally managed
+client CA; supply that client's `--client-cert` and `--client-key` when creating
+its pairing. If `client_ca` is omitted, Boomerangz manages a client CA and issues
+a distinct client certificate automatically. Pure mTLS pairings contain no
+token. `mtls+token` pairings contain both credentials and the server requires
+both.

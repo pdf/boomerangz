@@ -78,23 +78,20 @@ func runWithReader(ctx context.Context, args []string, stdout, stderr io.Writer,
 	triggerCredential := triggerCmd.Flag("credential", "Imported token bundle name or absolute path.").String()
 	triggerDatasets := triggerCmd.Arg("datasets", "Active scheduling roots; empty selects all.").Strings()
 
-	authCmd := app.Command("auth", "Manage scoped control API tokens.")
+	authCmd := app.Command("auth", "Manage authenticated API pairings and tokens.")
 	authPath := authCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
 	authDropIns := authCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
-	tokenCmd := authCmd.Command("token", "Create, import, inspect, or revoke tokens.")
-	tokenCreateCmd := tokenCmd.Command("create", "Create a one-time pairing bundle.")
-	tokenCreateListener := tokenCreateCmd.Flag("listener", "Configured TCP token listener name.").String()
-	tokenCreateEndpoint := tokenCreateCmd.Flag("endpoint", "Client-visible host:port; defaults to listener address.").String()
-	tokenCreateCA := tokenCreateCmd.Flag("ca", "CA certificate bundle to embed instead of pinning the server key.").ExistingFile()
-	tokenCreateSystemCA := tokenCreateCmd.Flag("system-ca", "Use the client's system CA roots.").Bool()
-	tokenCreateServerName := tokenCreateCmd.Flag("server-name", "Expected TLS server name.").String()
-	tokenCreateClientCert := tokenCreateCmd.Flag("client-cert", "Client certificate to embed for mTLS plus token mode.").ExistingFile()
-	tokenCreateClientKey := tokenCreateCmd.Flag("client-key", "Client private key to embed for mTLS plus token mode.").ExistingFile()
-	tokenCreateScopes := tokenCreateCmd.Flag("scope", "Authorized scope; repeat for multiple scopes.").Default("status").Strings()
-	tokenCreateExpiry := tokenCreateCmd.Flag("expires-in", "Token lifetime; zero means no expiry.").Default("0s").Duration()
-	tokenImportCmd := tokenCmd.Command("import", "Import a pairing bundle for client use.")
-	tokenImportName := tokenImportCmd.Arg("name", "Local credential name.").Required().String()
-	tokenImportPath := tokenImportCmd.Arg("bundle", "Pairing bundle JSON file.").Required().ExistingFile()
+	pairingCmd := authCmd.Command("pairing", "Create or import authenticated client pairings.")
+	pairingCreateCmd := pairingCmd.Command("create", "Create a one-time pairing bundle.")
+	pairingCreateListener := pairingCreateCmd.Flag("listener", "Configured TCP listener name.").String()
+	pairingCreateClientCert := pairingCreateCmd.Flag("client-cert", "External mTLS client certificate.").ExistingFile()
+	pairingCreateClientKey := pairingCreateCmd.Flag("client-key", "External mTLS client private key.").ExistingFile()
+	pairingCreateScopes := pairingCreateCmd.Flag("scope", "Authorized token scope; repeat for multiple scopes.").Default("status").Strings()
+	pairingCreateExpiry := pairingCreateCmd.Flag("expires-in", "Token lifetime; zero means no expiry.").Default("0s").Duration()
+	pairingImportCmd := pairingCmd.Command("import", "Import a pairing bundle for client use.")
+	pairingImportName := pairingImportCmd.Arg("name", "Local credential name.").Required().String()
+	pairingImportPath := pairingImportCmd.Arg("bundle", "Pairing bundle JSON file.").Required().ExistingFile()
+	tokenCmd := authCmd.Command("token", "Inspect or revoke server-side tokens.")
 	tokenListCmd := tokenCmd.Command("list", "List token identifiers, scopes, and expiry.")
 	tokenRevokeCmd := tokenCmd.Command("revoke", "Revoke one token identifier.")
 	tokenRevokeID := tokenRevokeCmd.Arg("id", "Token identifier.").Required().String()
@@ -186,16 +183,16 @@ func runWithReader(ctx context.Context, args []string, stdout, stderr io.Writer,
 			return err
 		}
 		return runTrigger(ctx, stdout, loaded.Config, *triggerCredential, *triggerDatasets)
-	case tokenCreateCmd.FullCommand(), tokenImportCmd.FullCommand(), tokenListCmd.FullCommand(), tokenRevokeCmd.FullCommand():
+	case pairingCreateCmd.FullCommand(), pairingImportCmd.FullCommand(), tokenListCmd.FullCommand(), tokenRevokeCmd.FullCommand():
 		loaded, err := config.Load(*authPath, *authDropIns)
 		if err != nil {
 			return err
 		}
 		switch command {
-		case tokenCreateCmd.FullCommand():
-			return runTokenCreate(stdout, loaded.Config, *tokenCreateListener, *tokenCreateEndpoint, *tokenCreateCA, *tokenCreateServerName, *tokenCreateSystemCA, *tokenCreateClientCert, *tokenCreateClientKey, *tokenCreateScopes, *tokenCreateExpiry)
-		case tokenImportCmd.FullCommand():
-			return runTokenImport(stdout, loaded.Config, *tokenImportName, *tokenImportPath)
+		case pairingCreateCmd.FullCommand():
+			return runPairingCreate(stdout, loaded.Config, *pairingCreateListener, *pairingCreateClientCert, *pairingCreateClientKey, *pairingCreateScopes, *pairingCreateExpiry)
+		case pairingImportCmd.FullCommand():
+			return runPairingImport(stdout, loaded.Config, *pairingImportName, *pairingImportPath)
 		case tokenListCmd.FullCommand():
 			return runTokenList(stdout, loaded.Config)
 		default:

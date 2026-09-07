@@ -236,3 +236,20 @@ func ensureManagedClientCA(identityDir string) (certPath string, err error) {
 	_, _, path, err := ensureCA(dir, "Boomerangz managed client CA")
 	return path, err
 }
+
+func issueManagedClientIdentity(identityDir, name string) (certificate, key []byte, err error) {
+	lock, err := managedLock(identityDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = lock.Close() }()
+	dir := filepath.Join(identityDir, "pki", "clients")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, nil, err
+	}
+	ca, caKey, _, err := ensureCA(dir, "Boomerangz managed client CA")
+	if err != nil {
+		return nil, nil, err
+	}
+	return issueLeaf(ca, caKey, name, true)
+}

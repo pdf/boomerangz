@@ -11,9 +11,11 @@ import (
 	"encoding/pem"
 	"log/slog"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -447,5 +449,44 @@ func TestManagedServerAndClientPKI(t *testing.T) {
 		if filepath.Ext(path) == ".key" && info.Mode().Perm()&0o077 != 0 {
 			t.Fatalf("managed private key %s mode=%o", path, info.Mode().Perm())
 		}
+	}
+}
+
+func TestManagedMTLSPairingNeedsNoTokenOrClientFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	listenerConfig := config.ListenerConfig{Network: "tcp", Address: "127.0.0.1:0", AdvertisedAddress: "localhost:7443", AuthMode: "mtls"}
+	cfg.Listeners["managed"] = listenerConfig
+	server, err := StartServer(cfg, &fakeRuntime{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	for _, listener := range server.listeners {
+		if address, ok := listener.Addr().(*net.TCPAddr); ok {
+			listenerConfig.AdvertisedAddress = "localhost:" + strconv.Itoa(address.Port)
+		}
+	}
+	store, err := NewTokenStore(cfg.Paths.IdentityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CreateListenerPairing(store, cfg.Paths.IdentityDir, "managed", listenerConfig, "", "", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.TokenID != "" || bundle.Secret != "" || bundle.ClientCert == "" || bundle.ClientKey == "" || bundle.ClientID == "" {
+		t.Fatalf("unexpected managed mTLS pairing: %+v", bundle)
+	}
+	connection, err := DialPairingConnection(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connection.Close() }()
+	if _, err := controlrpc.NewStatusServiceClient(connection).GetStatus(t.Context(), &controlrpc.GetStatusRequest{}); err != nil {
+		t.Fatal(err)
 	}
 }

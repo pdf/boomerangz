@@ -70,12 +70,13 @@ provided by the administrator, never supplied by a package.
 
 Each optional `[remotes.NAME]` table defines a user-selected destination referenced
 by `org.boomerangz:remote`. Names start with a letter or digit and otherwise
-contain letters, digits, dots, underscores, and hyphens. SSH is the only currently
-accepted transport type; there is no default remote.
+contain letters, digits, dots, underscores, and hyphens. There is no default
+remote.
 
 | Field | Default | Purpose and constraints |
 | --- | --- | --- |
-| `transport` | Required | Connection protocol; currently must be `"ssh"`. |
+| `transport` | Required | `"ssh"` or authenticated `"native"` gRPC. |
+| `credential` | Empty | For native transport, required imported pairing name or absolute bundle path. Not valid for SSH. |
 | `endpoint` | `"auto"` | `"direct"` uses remote ZFS tooling without requiring boomerangz; `"ssh-shell"` requires the constrained remote boomerangz service; `"auto"` prefers SSH shell and falls back to direct mode only when the service is unavailable. |
 | `host` | Required | User-selected SSH server hostname or address. |
 | `port` | `0` | SSH server port, from 0 to 65535; zero leaves the SSH default in effect. |
@@ -102,6 +103,16 @@ Arbitrary SSH options, passwords, and shell fragments are intentionally absent
 from the schema. See [SSH destinations](remote-ssh.md) for account delegation,
 host-key, direct-mode, and restricted SSH-shell setup.
 
+Native transport takes its endpoint and TLS credentials from an imported
+pairing bundle:
+
+```toml
+[remotes.my_native_backup]
+transport = "native"
+credential = "my_native_backup"
+root = "tank/backups"
+```
+
 ## Listeners
 
 Each optional `[listeners.NAME]` table describes a control endpoint. Names follow
@@ -111,10 +122,14 @@ the same syntax as remote names. TCP is opt-in and never unauthenticated.
 | --- | --- | --- |
 | `network` | Required | `"unix"` for local socket access, or `"tcp"` for network access. |
 | `address` | Required | Unix socket absolute path, or TCP bind address (`host:port`). Bind only to intended interfaces. |
+| `advertised_address` | Empty | Client-visible `host:port` placed in pairing bundles. Required for managed server TLS and normally needed for wildcard binds or NAT. |
 | `auth_mode` | Empty | Required for TCP: `"token"` authorizes scoped tokens, `"mtls"` authenticates client certificates, or `"mtls+token"` requires both. Unused for Unix sockets, which rely on filesystem permissions and peer credentials. |
-| `tls_cert` | Empty | Server certificate-chain file, required for TCP. May be externally managed, including ACME-issued certificates. |
-| `tls_key` | Empty | Matching server private-key file, required for TCP; protect access to this file. |
-| `client_ca` | Empty | CA bundle used to authenticate client certificates; required for `mtls` and `mtls+token`. |
+| `tls_cert` | Empty | External server certificate-chain file. If it and `tls_key` are omitted, Boomerangz manages the server identity. |
+| `tls_key` | Empty | External matching server private key. It must be supplied together with `tls_cert`. |
+| `client_ca` | Empty | External CA used to authenticate client certificates. If omitted for mTLS, Boomerangz manages the client CA. |
+| `pairing_ca` | Empty | Explicit CA embedded for clients to verify an externally managed server certificate; absence uses system roots. Managed server TLS supplies its managed CA automatically. |
+| `pairing_pin_certificate` | `false` | Additionally pin the server certificate's public key in generated pairings. |
+| `replication_roots` | Empty | Destination ZFS subtrees exposed through authenticated native replication. Empty keeps the listener control-only. TCP only. |
 
 See [Status and remote control](control-api.md) for listener hardening, token
 pairing, trust modes, certificate renewal, and client setup.
