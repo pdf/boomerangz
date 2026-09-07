@@ -414,8 +414,10 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 		}
 		completed := r.now()
 		r.scheduler.Complete(schedule.Dataset, completed)
+		if !r.enqueueTransfers(schedule.Dataset, schedule.Policy, schedule.Dataset+"@"+metadata.Name()) {
+			return Outcome{State: "failed", Reason: "new snapshot could not be protected for every transfer target"}
+		}
 		r.enqueuePrune(schedule.Dataset, schedule.Policy)
-		r.enqueueTransfers(schedule.Dataset, schedule.Policy, schedule.Dataset+"@"+metadata.Name())
 		return Outcome{State: "succeeded"}
 	}
 	if added, submitErr := r.management.Submit(job); submitErr != nil || !added {
@@ -495,33 +497,95 @@ func (r *Runtime) latestPending(dataset, snapshot string) (transfer.PendingSnaps
 	return transfer.PendingSnapshot{}, fmt.Errorf("created snapshot is absent from source inventory")
 }
 
-func (r *Runtime) enqueueTransfers(dataset string, effective policy.Effective, snapshot string) {
-	for _, target := range effective.Local {
-		r.enqueueLocal(dataset, target, effective, snapshot)
+func (r *Runtime) protectAndCoalesce(dataset, snapshot, target string, recursive bool) error {
+	pending, err := r.latestPending(dataset, snapshot)
+	if err != nil {
+		return err
 	}
-	for _, name := range effective.Remote {
-		r.enqueueRemote(dataset, name, effective, snapshot)
+	service, err := r.service()
+	if err != nil {
+		return err
 	}
+	snapshots := []string{snapshot}
+	if recursive {
+		state, inspectErr := r.backend.InspectState(context.Background(), dataset, false)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		_, component, found := strings.Cut(snapshot, "@")
+		if !found {
+			return fmt.Errorf("pending recursive snapshot has no component")
+		}
+		for _, object := range state.Objects {
+			if object.Type == "snapshot" && strings.HasPrefix(object.Name, dataset+"/") && strings.HasSuffix(object.Name, "@"+component) {
+				snapshots = append(snapshots, object.Name)
+			}
+		}
+	}
+	if _, err := service.ProtectSet(context.Background(), dataset, snapshots, target); err != nil {
+		return err
+	}
+	coalesced, err := r.pending.Coalesce(dataset, target, pending)
+	if err != nil {
+		return err
+	}
+	if coalesced.ReleaseSuperseded {
+		if err := r.releaseSupersededPending(dataset, target, coalesced.Superseded.Name); err != nil {
+			r.logger.Warn("retain superseded pending recovery hold", "dataset", dataset, "target", target, "snapshot", coalesced.Superseded.Name, "error", err)
+		}
+	}
+	return nil
 }
 
-func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effective, snapshot string) {
+func (r *Runtime) releaseSupersededPending(dataset, target, snapshot string) error {
+	state, err := r.backend.InspectState(context.Background(), dataset, true)
+	if err != nil {
+		return err
+	}
+	lineage, err := lifecycle.RootAuthority(state, dataset, r.installation)
+	if err != nil {
+		return err
+	}
+	references, err := lifecycle.References(state, dataset, lineage)
+	if err != nil {
+		return err
+	}
+	for _, reference := range references {
+		if reference.Target == target && reference.SnapshotName(dataset) == snapshot {
+			service, serviceErr := r.service()
+			if serviceErr != nil {
+				return serviceErr
+			}
+			return service.ReleaseReference(context.Background(), dataset, reference)
+		}
+	}
+	return fmt.Errorf("superseded pending recovery reference is missing")
+}
+
+func (r *Runtime) enqueueTransfers(dataset string, effective policy.Effective, snapshot string) bool {
+	protected := true
+	for _, target := range effective.Local {
+		protected = r.enqueueLocal(dataset, target, effective, snapshot) && protected
+	}
+	for _, name := range effective.Remote {
+		protected = r.enqueueRemote(dataset, name, effective, snapshot) && protected
+	}
+	return protected
+}
+
+func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effective, snapshot string) bool {
 	canonical := "local:" + target
 	jobID := "local:" + dataset + ":" + target
 	if snapshot != "" {
-		pending, pendingErr := r.latestPending(dataset, snapshot)
-		if pendingErr != nil {
-			r.logger.Error("inventory new snapshot", "dataset", dataset, "error", pendingErr)
-			return
-		}
-		if _, offerErr := r.pending.Offer(dataset, canonical, pending); offerErr != nil {
-			r.logger.Error("coalesce local snapshot", "dataset", dataset, "target", target, "error", offerErr)
-			return
+		if pendingErr := r.protectAndCoalesce(dataset, snapshot, canonical, effective.Send.Replicate); pendingErr != nil {
+			r.logger.Error("protect local pending snapshot", "dataset", dataset, "target", target, "error", pendingErr)
+			return false
 		}
 		r.markDirty(jobID)
 	}
 	ticket, err := r.gate.Queue(context.Background(), dataset, lifecycle.Transfer)
 	if err != nil {
-		return
+		return snapshot == ""
 	}
 	job := Job{ID: jobID, Group: dataset, Scope: dataset, LockKey: canonical, StartState: "sending", Drop: ticket.Finish}
 	job.Run = func(context.Context) Outcome {
@@ -535,7 +599,11 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 			return Outcome{State: "failed", Reason: engineErr.Error()}
 		}
 		requestSnapshot := ""
-		pending, hasPending := r.pending.Peek(dataset, canonical)
+		pending, hasPending := r.pending.Begin(dataset, canonical)
+		completed := false
+		if hasPending {
+			defer func() { r.pending.End(dataset, canonical, pending, completed) }()
+		}
 		if hasPending {
 			requestSnapshot = pending.Name
 		}
@@ -548,9 +616,7 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 		if !result.Verified {
 			return Outcome{State: "failed", Reason: "transfer was not verified"}
 		}
-		if hasPending && result.Plan.Snapshot == pending.Name {
-			r.pending.Complete(dataset, canonical, pending)
-		}
+		completed = hasPending && result.Plan.Snapshot == pending.Name
 		r.enqueueDestinationPrune(dataset, effective, canonical)
 		return Outcome{State: "succeeded"}
 	}
@@ -562,6 +628,7 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 	if added, submitErr := r.local.Submit(job); submitErr != nil || !added {
 		ticket.Finish()
 	}
+	return true
 }
 
 func roadKey(dataset, remote string) string { return dataset + "\x00" + remote }
@@ -591,27 +658,22 @@ func (r *Runtime) road(dataset, remote string, effective policy.Effective) (road
 	return state, nil
 }
 
-func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effective, snapshot string) {
+func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effective, snapshot string) bool {
 	road, err := r.road(dataset, remote, effective)
 	if err != nil {
 		r.logger.Error("prepare remote recovery", "dataset", dataset, "remote", remote, "error", err)
-		return
+		return false
 	}
 	if snapshot != "" {
-		pending, pendingErr := r.latestPending(dataset, snapshot)
-		if pendingErr != nil {
-			r.logger.Error("inventory new snapshot", "dataset", dataset, "error", pendingErr)
-			return
-		}
-		if _, offerErr := road.coordinator.Offer(pending); offerErr != nil {
-			r.logger.Error("coalesce remote snapshot", "dataset", dataset, "remote", remote, "error", offerErr)
-			return
+		if pendingErr := r.protectAndCoalesce(dataset, snapshot, road.request.CanonicalTarget, effective.Send.Replicate); pendingErr != nil {
+			r.logger.Error("protect remote pending snapshot", "dataset", dataset, "remote", remote, "error", pendingErr)
+			return false
 		}
 		r.markDirty("remote:" + dataset + ":" + remote)
 	}
 	ticket, err := r.gate.Queue(context.Background(), dataset, lifecycle.Transfer)
 	if err != nil {
-		return
+		return snapshot == ""
 	}
 	jobID := "remote:" + dataset + ":" + remote
 	job := Job{ID: jobID, Group: dataset, Scope: dataset, LockKey: road.request.CanonicalTarget, StartState: "probing", Drop: ticket.Finish}
@@ -643,6 +705,7 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 	if added, submitErr := r.remote.Submit(job); submitErr != nil || !added {
 		ticket.Finish()
 	}
+	return true
 }
 
 func (r *Runtime) markDirty(key string) {

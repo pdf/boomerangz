@@ -34,6 +34,20 @@ type Result struct {
 	ResumeDatasets []string     `json:"resume_datasets,omitempty"`
 }
 
+// DestinationUnavailableError reports that a remote destination has no
+// currently visible anchor. The pool may be temporarily unimported, so remote
+// recovery must retry rather than permanently block the target.
+type DestinationUnavailableError struct {
+	Root string
+}
+
+func (e *DestinationUnavailableError) Error() string {
+	return fmt.Sprintf("remote destination %s has no existing ancestor", e.Root)
+}
+
+// Temporary permits bounded roadwarrior retry while the remote pool is absent.
+func (*DestinationUnavailableError) Temporary() bool { return true }
+
 // Local serializes administrative jobs through this instance. Callers must also
 // coordinate other processes and retain a stable effective policy generation.
 type Local struct {
@@ -146,6 +160,9 @@ func (l *Local) load(ctx context.Context, request Request) (View, error) {
 			}
 		}
 		if ancestor == "" {
+			if !l.sameHost {
+				return view, &DestinationUnavailableError{Root: request.DestinationRoot}
+			}
 			return view, fmt.Errorf("destination has no existing ancestor")
 		}
 		view.DestinationIdentity, err = l.target.InspectDatasetIdentity(ctx, ancestor)
@@ -383,7 +400,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 		return result, err
 	}
 	for _, prior := range old {
-		if prior.Target == targetID && !reflect.DeepEqual(prior, ref) {
+		if prior.Target == targetID && prior.Metadata.Created.Before(ref.Metadata.Created) {
 			if err := l.lifecycle.ReleaseReference(ctx, request.Source, prior); err != nil {
 				return result, err
 			}

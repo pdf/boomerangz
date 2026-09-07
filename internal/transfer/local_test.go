@@ -260,6 +260,25 @@ func TestRemoteApplyKeepsSourceAndDestinationExecutorsSeparate(t *testing.T) {
 	}
 }
 
+func TestRemoteMissingDestinationAnchorIsRetryable(t *testing.T) {
+	t.Parallel()
+	source, request := newLocalBackend(t)
+	destination := &localBackend{}
+	request.Transport = "ssh"
+	request.RemoteName = "home"
+	request.CanonicalTarget = "ssh://replicator@backup.example.net:22/backup/data"
+	request.Policy.Remote = []string{"home"}
+	engine, err := NewRemote(source, destination, remoteTestStream{source: source, destination: destination}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Preview(t.Context(), request)
+	var temporary interface{ Temporary() bool }
+	if !errors.As(err, &temporary) || !temporary.Temporary() {
+		t.Fatalf("missing remote destination anchor was not retryable: %v", err)
+	}
+}
+
 func newLocalBackend(t *testing.T) (*localBackend, Request) {
 	t.Helper()
 	request, view := testFixture(t)
@@ -325,5 +344,38 @@ func TestApplyPromotesBindingAfterGUIDVerification(t *testing.T) {
 	}
 	if len(backend.source.Holds[result.Plan.Snapshot]) != 0 {
 		t.Fatal("verified transfer retained endpoint hold")
+	}
+}
+
+func TestApplyRetainsNewerPendingRecoveryReference(t *testing.T) {
+	t.Parallel()
+	backend, request := newLocalBackend(t)
+	request.Snapshot = backend.source.Objects[1].Name
+	service, err := lifecycle.NewService(backend, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := "local:" + request.DestinationRoot
+	newer, err := service.Protect(t.Context(), request.Source, backend.source.Objects[2].Name, canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Apply(t.Context(), request, nil)
+	if err != nil || !result.Verified {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	state, err := backend.InspectState(t.Context(), request.Source, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	references, err := lifecycle.References(state, request.Source, fixtureLineage)
+	if err != nil || !slices.ContainsFunc(references, func(reference lifecycle.Reference) bool {
+		return reference.Target == newer.Target && reference.SnapshotName(request.Source) == newer.SnapshotName(request.Source)
+	}) {
+		t.Fatalf("newer pending reference was released: refs=%+v err=%v", references, err)
 	}
 }

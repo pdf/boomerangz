@@ -4,6 +4,12 @@ No development-host test may execute `zfs` or `zpool`. Unit tests inject a fake
 runner beneath the direct executor. Real operations run only inside disposable
 libvirt/QEMU guests.
 
+Real-ZFS tests remain next to the packages they exercise, but every such file
+uses the `integration` build tag. Ordinary `go test ./...` runs therefore do not
+compile or execute guest-only test code. Build a package's guest test binary
+explicitly with `go test -tags=integration -c ./internal/<package>` and run that
+binary only inside a guarded disposable guest with the documented environment.
+
 The first integration spike must run in a CachyOS guest with two virtual scratch
 disks and must record the guest's kernel, `zfs-utils`, and ZFS module versions.
 It will test an unprivileged account delegated only the candidate permissions
@@ -90,12 +96,12 @@ bootstrap or matrix paths.
 
 ## Lifecycle integration
 
-`internal/lifecycle/guest_test.go` is opt-in and skips ordinary host test runs.
-Build it on the host with `go test -c ./internal/lifecycle`, copy the binary into
-the disposable guest, and run there with `BOOMERANGZ_LIFECYCLE_GUEST_RUN` matching
-the guarded run marker. It verifies source disk serial and actual pool vdevs
-before creating uniquely named fixtures beneath the source pool's `data` subtree.
-The guest account additionally needs delegated `create` for these fixture datasets.
+`internal/lifecycle/guest_test.go` is integration-only. Build it on the host with
+`go test -tags=integration -c ./internal/lifecycle`, copy the binary into the
+disposable guest, and run there with `BOOMERANGZ_LIFECYCLE_GUEST_RUN` matching the
+guarded run marker. It verifies source disk serial and actual pool vdevs before
+creating uniquely named fixtures beneath the source pool's `data` subtree. The
+guest account additionally needs delegated `create` for these fixture datasets.
 Fixtures remain until the guarded bootstrap tears down the test pools.
 
 To include command-line adoption and clean, also copy the built boomerangz CLI
@@ -129,6 +135,35 @@ The 2026-09-06 Phase 5 remote run used the transient
 stream. The run also confirmed that destination delegation needs `userprop` for
 lineage and ownership reconciliation; the guarded bootstrap now grants it, in
 line with the documented SSH destination baseline.
+
+The completed 2026-09-07 Phase 8 matrix used Linux
+`6.18.42-1-cachyos-lts`, `zfs-utils 2.4.3-2`, and ZFS module `2.4.3-1`.
+OpenZFS 2.4.3 is therefore the minimum verified version for the initial CachyOS
+support baseline; other operating-system and OpenZFS combinations remain
+unverified until their own disposable-guest matrix passes. The production
+delegation baseline remains:
+
+```text
+source: bookmark,destroy,hold,mount,release,send,snapshot,userprop
+destination: compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop
+```
+
+The guest bootstrap additionally grants source `create` and destination
+`snapshot` only so tests can construct and isolate their own fixtures. Those
+permissions are not implied production requirements. No Phase 8 result required
+a privileged helper or Linux capability.
+
+A two-guest fault run exported the destination pool for longer than one natural
+one-minute source cadence. The daemon retained a target-specific ZFS hold,
+coalesced to newer scheduled snapshots without allowing source pruning to remove
+the selected generation, treated the missing remote anchor as retryable, and
+completed through gRPC over `ssh-shell` after pool import. The configured leaf
+did not exist before reconnection; bootstrap created it and the received snapshot
+GUID matched the newest source generation. The completed recovery hold was then
+released. Direct SSH remains covered by the single-guest transfer matrix; the
+nested two-guest `passt` port-forward topology is unsuitable for its sequence of
+short independent SSH connections and is not used as evidence about production
+direct-SSH behavior.
 
 `guest-property-layers.sh` separately demonstrated that receive exclusions and
 plain inheritance retain hidden received values, including snapshot user-property

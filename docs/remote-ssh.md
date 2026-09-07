@@ -18,6 +18,11 @@ inspection occurs when replication work is due, during a retry, or when an
 operator explicitly requests reconciliation; ordinary local policy scans do not
 connect to every destination.
 
+The configured leaf dataset may be absent before its first replication, provided
+an existing ancestor has the required delegation. If the destination pool is
+temporarily unavailable or unimported, the daemon retains the protected source
+snapshot and retries with bounded backoff.
+
 ## Destination account
 
 Create a dedicated account that has no administrative group memberships and no

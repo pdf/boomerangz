@@ -32,6 +32,34 @@ func TestPendingSetCoalescesNewest(t *testing.T) {
 	}
 }
 
+func TestPendingSetTracksQueuedAndInFlightSnapshots(t *testing.T) {
+	t.Parallel()
+	var pending PendingSet
+	target := "ssh://backup.example.net:22/tank/backups"
+	older := PendingSnapshot{Name: "tank/data@older", CreateTXG: 10}
+	newer := PendingSnapshot{Name: "tank/data@newer", CreateTXG: 20}
+	if changed, err := pending.Offer("tank/data", target, older); err != nil || !changed {
+		t.Fatalf("offer older changed=%t err=%v", changed, err)
+	}
+	active, exists := pending.Begin("tank/data", target)
+	if !exists || active != older {
+		t.Fatalf("active=%+v exists=%t", active, exists)
+	}
+	result, err := pending.Coalesce("tank/data", target, newer)
+	if err != nil || !result.Changed || result.Superseded != older || result.ReleaseSuperseded {
+		t.Fatalf("coalesce while active result=%+v err=%v", result, err)
+	}
+	pending.End("tank/data", target, older, true)
+	if got, exists := pending.Peek("tank/data", target); !exists || got != newer {
+		t.Fatalf("pending after old completion=%+v exists=%t", got, exists)
+	}
+	newest := PendingSnapshot{Name: "tank/data@newest", CreateTXG: 30}
+	result, err = pending.Coalesce("tank/data", target, newest)
+	if err != nil || !result.Changed || result.Superseded != newer || !result.ReleaseSuperseded {
+		t.Fatalf("coalesce inactive item result=%+v err=%v", result, err)
+	}
+}
+
 func TestRetryPolicyIsBoundedAndJittered(t *testing.T) {
 	t.Parallel()
 	policy := DefaultRetryPolicy()

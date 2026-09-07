@@ -18,10 +18,19 @@ type PendingSnapshot struct {
 	CreateTXG uint64 `json:"create_txg"`
 }
 
+// CoalesceResult reports whether a newer item replaced queued work and whether
+// the displaced snapshot is not currently selected by an in-flight attempt.
+type CoalesceResult struct {
+	Changed           bool
+	Superseded        PendingSnapshot
+	ReleaseSuperseded bool
+}
+
 // PendingSet coalesces disconnected work independently per source-target pair.
 type PendingSet struct {
-	mu   sync.Mutex
-	jobs map[string]PendingSnapshot
+	mu     sync.Mutex
+	jobs   map[string]PendingSnapshot
+	active map[string]PendingSnapshot
 }
 
 func pendingKey(source, target string) (string, error) {
@@ -36,12 +45,19 @@ func pendingKey(source, target string) (string, error) {
 
 // Offer retains only the newest eligible snapshot for a pair.
 func (p *PendingSet) Offer(source, target string, snapshot PendingSnapshot) (bool, error) {
+	result, err := p.Coalesce(source, target, snapshot)
+	return result.Changed, err
+}
+
+// Coalesce retains the newest eligible snapshot and identifies an older
+// non-active item whose durable recovery reference can be released.
+func (p *PendingSet) Coalesce(source, target string, snapshot PendingSnapshot) (CoalesceResult, error) {
 	key, err := pendingKey(source, target)
 	if err != nil {
-		return false, err
+		return CoalesceResult{}, err
 	}
 	if snapshot.CreateTXG == 0 || !strings.HasPrefix(snapshot.Name, source+"@") {
-		return false, fmt.Errorf("pending snapshot must be on the source with a creation transaction")
+		return CoalesceResult{}, fmt.Errorf("pending snapshot must be on the source with a creation transaction")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -50,10 +66,52 @@ func (p *PendingSet) Offer(source, target string, snapshot PendingSnapshot) (boo
 	}
 	current, exists := p.jobs[key]
 	if exists && current.CreateTXG >= snapshot.CreateTXG {
-		return false, nil
+		return CoalesceResult{}, nil
 	}
 	p.jobs[key] = snapshot
-	return true, nil
+	result := CoalesceResult{Changed: true}
+	if exists {
+		result.Superseded = current
+		result.ReleaseSuperseded = p.active[key] != current
+	}
+	return result, nil
+}
+
+// Begin reserves the current coalesced snapshot for an attempt. A newer Offer
+// may replace the queued item while this exact snapshot remains protected.
+func (p *PendingSet) Begin(source, target string) (PendingSnapshot, bool) {
+	key, err := pendingKey(source, target)
+	if err != nil {
+		return PendingSnapshot{}, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	snapshot, exists := p.jobs[key]
+	if !exists {
+		return PendingSnapshot{}, false
+	}
+	if p.active == nil {
+		p.active = make(map[string]PendingSnapshot)
+	}
+	p.active[key] = snapshot
+	return snapshot, true
+}
+
+// End releases an attempt reservation and removes the queued item only when
+// that exact snapshot completed; a newer coalesced item remains pending.
+func (p *PendingSet) End(source, target string, snapshot PendingSnapshot, complete bool) {
+	key, err := pendingKey(source, target)
+	if err != nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.active[key] == snapshot {
+		delete(p.active, key)
+	}
+	if complete && p.jobs[key] == snapshot {
+		delete(p.jobs, key)
+	}
 }
 
 // Peek returns detached pending work without removing it.
@@ -185,7 +243,11 @@ func (r *Roadwarrior) Reconcile(ctx context.Context, report func(zfs.Progress)) 
 		return RecoveryOutcome{Status: "waiting-retry", NotBefore: r.notBefore}, nil
 	}
 	request := r.request
-	pending, hasPending := r.pending.Peek(request.Source, canonicalTarget(request))
+	pending, hasPending := r.pending.Begin(request.Source, canonicalTarget(request))
+	completed := false
+	if hasPending {
+		defer func() { r.pending.End(request.Source, canonicalTarget(request), pending, completed) }()
+	}
 	if hasPending {
 		request.Snapshot = pending.Name
 	}
@@ -210,9 +272,7 @@ func (r *Roadwarrior) Reconcile(ctx context.Context, report func(zfs.Progress)) 
 		}
 		r.failures, r.notBefore = 0, time.Time{}
 		if result.Plan.Mode != "resume" {
-			if hasPending && result.Verified && result.Plan.Snapshot == pending.Name {
-				r.pending.Complete(request.Source, canonicalTarget(request), pending)
-			}
+			completed = hasPending && result.Verified && result.Plan.Snapshot == pending.Name
 			outcome.Status = "succeeded"
 			return outcome, nil
 		}

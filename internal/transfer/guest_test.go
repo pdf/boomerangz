@@ -1,6 +1,12 @@
+//go:build integration
+
 package transfer
 
 import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -12,6 +18,65 @@ import (
 	"github.com/pdf/boomerangz/internal/testutil/zfstest"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
+
+const interruptedReceiveArgsEnv = "BOOMERANGZ_INTERRUPTED_RECEIVE_ARGS"
+
+type interruptedReceiveStream struct{}
+
+func (interruptedReceiveStream) Run(ctx context.Context, send zfs.SendOptions, receive zfs.ReceiveOptions, estimate zfs.Estimate, report func(zfs.Progress)) (zfs.Progress, error) {
+	return zfs.RunPipeline(ctx, send, receive, estimate, report,
+		func(ctx context.Context, args []string) *exec.Cmd {
+			return exec.CommandContext(ctx, "zfs", args...)
+		},
+		func(ctx context.Context, args []string) *exec.Cmd {
+			encoded, err := json.Marshal(args)
+			if err != nil {
+				panic(err)
+			}
+			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestGuestInterruptedReceiveHelper$")
+			command.Env = append(os.Environ(), interruptedReceiveArgsEnv+"="+base64.RawStdEncoding.EncodeToString(encoded))
+			return command
+		},
+	)
+}
+
+// TestGuestInterruptedReceiveHelper is a subprocess boundary used by the
+// disposable-guest fault test. It is inert in ordinary test runs.
+func TestGuestInterruptedReceiveHelper(t *testing.T) {
+	encoded := os.Getenv(interruptedReceiveArgsEnv)
+	if encoded == "" {
+		t.Skip("helper process only")
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var args []string
+	if err := json.Unmarshal(raw, &args); err != nil {
+		t.Fatal(err)
+	}
+	receiver := exec.CommandContext(t.Context(), "zfs", args...)
+	input, err := receiver.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver.Stdout = os.Stdout
+	receiver.Stderr = os.Stderr
+	if err := receiver.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.CopyN(input, os.Stdin, 4*1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	if err := input.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiver.Wait(); err == nil {
+		t.Fatal("truncated receive unexpectedly succeeded")
+	}
+	// The helper must fail so RunPipeline treats this as an interrupted receive.
+	os.Exit(1)
+}
 
 func TestGuestLocalTransfer(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_TRANSFER_GUEST_RUN")
@@ -172,4 +237,93 @@ func TestGuestLocalTransfer(t *testing.T) {
 			t.Fatal("accepted foreign latest recursive destination snapshot")
 		}
 	}
+}
+
+func TestGuestInterruptedTransferRecovery(t *testing.T) {
+	runID := os.Getenv("BOOMERANGZ_TRANSFER_GUEST_RUN")
+	if runID == "" {
+		t.Skip("disposable guest only")
+	}
+	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, "/dev/vdb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationPool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, "/dev/vdc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := func(args ...string) string {
+		t.Helper()
+		out, commandErr := exec.CommandContext(t.Context(), "zfs", args...).CombinedOutput()
+		if commandErr != nil {
+			t.Fatalf("guest zfs %s: %v: %s", args[0], commandErr, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	suffix := time.Now().UTC().Format("150405000")
+	source := sourcePool + "/data/payload"
+	destination := destinationPool + "/data/interrupted-" + suffix
+	command("set", policy.Namespace+"enabled=on", policy.Namespace+"local="+destination, source)
+	direct, err := zfs.NewDirect("zfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const installation = "abcdefab-cdef-4abc-8def-abcdefabcdef"
+	snapshots, err := lifecycle.NewService(direct, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := direct.GetStoredProperties(t.Context(), []string{source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, nil)
+	metadata, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), effective)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{Source: source, DestinationRoot: destination, Snapshot: source + "@" + metadata.Name(), Policy: effective}
+	interrupted, err := NewLocal(direct, interruptedReceiveStream{}, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := interrupted.Apply(t.Context(), request, nil)
+	if err == nil || len(result.ResumeDatasets) != 1 {
+		t.Fatalf("interrupted result=%+v err=%v", result, err)
+	}
+	state, err := direct.InspectState(t.Context(), source, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Holds) == 0 {
+		t.Fatal("interrupted transfer did not retain source recovery holds")
+	}
+
+	stream, err := zfs.NewLocalStream("zfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewLocal(direct, stream, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := restarted.Apply(t.Context(), request, nil)
+	if err != nil || !recovered.Verified || recovered.Plan.Mode != "resume" {
+		t.Fatalf("recovered result=%+v err=%v", recovered, err)
+	}
+	destinationState, err := direct.InspectState(t.Context(), destination, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(destinationState.ResumeTokens) != 0 {
+		t.Fatalf("successful recovery retained resume token: %v", destinationState.ResumeTokens)
+	}
+	sourceState, err := direct.InspectState(t.Context(), source, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sourceState.Holds) != 0 {
+		t.Fatalf("successful recovery retained source holds: %v", sourceState.Holds)
+	}
+	t.Logf("interrupted receive resumed from durable state on %s", destination)
 }
