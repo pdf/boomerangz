@@ -26,7 +26,9 @@ The program will be written for Go 1.26.x. The module path will be
 The architecture should avoid unnecessary operating-system assumptions and aim
 to support OpenZFS wherever Go and the required ZFS operations are available.
 Initial packaging and integration support will be Linux-only, with Arch Linux
-first.
+first. Other ZFS implementations are not targets; expanding platform support
+means adding operating systems supported by OpenZFS and proving the required
+behaviour against OpenZFS on each one.
 
 An operating system is not considered supported until its real ZFS integration
 suite passes. CachyOS is the preferred initial integration guest because it
@@ -1034,6 +1036,54 @@ go tool buf generate
 Generated gRPC API files are committed. CI regenerates them and fails if the
 working tree changes.
 
+The ordinary checks above run on every supported development host without real
+ZFS access. A separate GitHub Actions workflow owns the supported-platform
+integration matrix, but the workflow is not assumed to be capable of running
+the current local VM harness unchanged. Phase 10 begins with a runner
+feasibility spike covering KVM availability, unprivileged session libvirt,
+networking, storage, runtime, and safe lifecycle cleanup.
+
+CI integration and end-to-end jobs must use only standard GitHub-hosted runners
+available without charge to public repositories. Self-hosted and paid larger
+runners are not supported fallbacks. The feasibility spike determines whether
+those runners can use KVM reliably; if they cannot, adapt the launch path to
+software-only QEMU and retain it only if the complete matrix meets the standard
+runner's runtime and reliability limits. Failure of both approaches blocks CI
+matrix completion rather than silently moving it to paid or privately operated
+infrastructure.
+
+The CI adaptation must automate acquisition or reproducible construction of a
+versioned, checksum-verified, read-only guest base image; remove assumptions
+about developer-local paths and libvirt storage pools; provision unique
+per-job overlays, scratch disks, networking, and dedicated test SSH keys; and
+always collect diagnostics before guarded teardown. It may use direct QEMU
+instead of libvirt, reduce guest and sparse-disk sizing, and shard single-guest
+and two-guest scenarios as necessary to fit the documented standard-runner and
+free cache/artifact limits.
+
+If satisfying those constraints requires a substantially different harness,
+the CI-compatible implementation becomes the canonical harness and the local
+integration workflow follows it. Do not retain a separate local architecture
+or force developer-machine assumptions into GitHub Actions merely to preserve
+the current implementation. A replacement local workflow is acceptable only
+when it provides equivalent or stronger isolation from the host: real ZFS
+commands and destructive storage operations remain confined to disposable
+guests, per-run storage and networking cannot overlap unrelated resources, and
+cleanup remains guarded by positive guest, pool, and virtual-disk identity
+checks. Local-only conveniences may wrap the canonical harness but must not
+define a different test path. CI jobs use only ephemeral credentials and
+writable state created for that job.
+
+The initial matrix contains only the Arch-family target exercised with CachyOS
+and OpenZFS. Its dimensions and reusable workflow interface must allow later
+entries for other Linux distributions and other operating systems supported by
+OpenZFS without treating non-OpenZFS ZFS implementations as compatible targets.
+Integration jobs run the integration-tagged real-ZFS tests and installed-system
+end-to-end scenarios appropriate to each entry, publish version and diagnostic
+evidence, and become required checks for every platform advertised as
+supported. Release and packaging jobs consume only artifacts from a passing
+supported-platform matrix.
+
 ### 13.1 Test strategy
 
 Unit tests cover policy resolution, command construction, scheduling, pruning,
@@ -1129,10 +1179,23 @@ and refusal to clean ambiguous or resume-dependent state.
 9. **Native transport**: carry the shared remote endpoint operations over
    authenticated gRPC, then prototype and benchmark stream replication after
    SSH-based replication is stable.
-10. **Packaging and release**: after all feature phases are complete, produce
-    the initial Arch packages and release artifacts, then validate install,
-    upgrade, protected configuration, service-account, and systemd behavior in
-    the disposable guest matrix.
+10. **CI integration and end-to-end matrix**: prove and adapt the VM test path
+    to run entirely on standard GitHub-hosted infrastructure available free to
+    public repositories; self-hosted and paid runners are out of scope. Use KVM
+    if the feasibility spike proves it reliable, otherwise validate a suitably
+    reduced software-QEMU path. When material adaptation is required, make the
+    isolated CI-compatible harness the local harness as well rather than
+    maintaining divergent execution paths. Automate the versioned guest-image
+    lifecycle and run the guarded integration and installed-system end-to-end
+    suites under GitHub Actions. Begin with the Arch-family/CachyOS OpenZFS
+    target, publish diagnostic and version evidence, and make the matrix
+    extensible to other Linux distributions and other OpenZFS-supported
+    operating systems. A platform is not supported until its matrix entry
+    passes; non-OpenZFS ZFS implementations remain out of scope.
+11. **Packaging and release**: after all feature and CI-validation phases are
+    complete, produce the initial Arch packages and release artifacts, then
+    validate install, upgrade, protected configuration, service-account, and
+    systemd behavior in the disposable guest matrix.
 
 ## 15. Pre-implementation decisions and validation
 
@@ -1158,14 +1221,15 @@ The following remain deliberate checkpoints rather than implicit assumptions:
   peer authentication, capability handling, and systemd sandbox before making
   it part of the recommended deployment.
 
-Packaging is intentionally deferred until after native transport so package
-contents and dependencies reflect the complete initial release. Version
-`v0.1.0` uses the MIT license and provides two Arch PKGBUILDs: `boomerangz`
-builds with CGO disabled from a deterministic source archive published as a
-GitHub Release artifact, while `boomerangz-bin` installs CI-built release
-binaries. Race-test jobs may enable CGO; shipped binaries and normal package
-builds do not require it. Release recipes must contain real artifact checksums,
-never `SKIP` for downloaded archives.
+Packaging is intentionally deferred until after native transport and the CI
+integration/E2E matrix so package contents and dependencies reflect the
+complete initial release and release artifacts are gated by the supported
+OpenZFS target. Version `v0.1.0` uses the MIT license and provides two Arch
+PKGBUILDs: `boomerangz` builds with CGO disabled from a deterministic source
+archive published as a GitHub Release artifact, while `boomerangz-bin` installs
+CI-built release binaries. Race-test jobs may enable CGO; shipped binaries and
+normal package builds do not require it. Release recipes must contain real
+artifact checksums, never `SKIP` for downloaded archives.
 
 ## 16. References
 

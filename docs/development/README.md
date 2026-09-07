@@ -12,6 +12,7 @@ production system.
 - [Phase 6 hand-off](phase-6-handoff.md)
 - [Phase 7 hand-off](phase-7-handoff.md)
 - [Phase 8 hand-off](phase-8-handoff.md)
+- [Phase 11 packaging notes](phase-11-packaging-notes.md)
 
 ## Protobuf APIs
 

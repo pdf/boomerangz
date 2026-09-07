@@ -93,6 +93,6 @@ Phase 7 Unix and TCP control paths under service-account permissions and network
 failure without changing the approved authentication, lifecycle, or target
 authority design unless the user confirms such a change.
 
-Packaging was subsequently deferred until after native transport. The confirmed
-release decisions and preserved draft are recorded in
-`phase-10-packaging-notes.md`.
+Packaging was subsequently deferred until after native transport and automated
+CI integration/E2E coverage. The confirmed release decisions and preserved
+draft are recorded in `phase-11-packaging-notes.md`.

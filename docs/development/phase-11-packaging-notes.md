@@ -1,8 +1,8 @@
-# Phase 10 packaging notes
+# Phase 11 packaging notes
 
-Packaging is deferred until the feature and native-transport phases are
-complete. The current draft is preserved on branch
-`feat/phase-10-packaging` at commit `cff963d` and is not part of `main`.
+Packaging is deferred until the feature, native-transport, and CI
+integration/E2E phases are complete. The current draft is preserved on the
+branch `feat/phase-11-packaging` at commit `cff963d` and is not part of `main`.
 
 Confirmed release decisions:
 
@@ -18,8 +18,9 @@ Confirmed release decisions:
   and rendered PKGBUILDs containing the real archive checksums;
 - downloaded release archives must never use `SKIP` integrity checks.
 
-Before Phase 10 is completed, rebase the draft onto the finished implementation,
-refresh installed documentation and completions, validate both PKGBUILDs from
-the published artifacts, and exercise clean install, protected-config upgrade,
-service-account, tmpfiles, sysusers, and systemd behavior in a fresh disposable
-guest.
+Before Phase 11 is completed, rebase the draft onto the finished
+implementation, refresh installed documentation and completions, validate both
+PKGBUILDs from the published artifacts, and exercise clean install,
+protected-config upgrade, service-account, tmpfiles, sysusers, and systemd
+behavior in a fresh disposable guest after the supported-platform CI matrix
+passes.
