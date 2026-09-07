@@ -1123,12 +1123,16 @@ and refusal to clean ambiguous or resume-dependent state.
    and systemd integration.
 7. **Control plane and UI**: implement gRPC over Unix sockets, status/watch,
    terminal progress, token pairing, and optional secured TCP listeners.
-8. **Hardening and packaging**: run destructive integration and fault tests,
-   document delegated permissions, implement and harden the Linux helper if
-   the integration matrix requires it, and produce the initial Arch package.
+8. **Hardening**: run destructive integration and fault tests, document
+   delegated permissions, and implement and harden the Linux helper only if the
+   integration matrix requires it.
 9. **Native transport**: carry the shared remote endpoint operations over
    authenticated gRPC, then prototype and benchmark stream replication after
    SSH-based replication is stable.
+10. **Packaging and release**: after all feature phases are complete, produce
+    the initial Arch packages and release artifacts, then validate install,
+    upgrade, protected configuration, service-account, and systemd behavior in
+    the disposable guest matrix.
 
 ## 15. Pre-implementation decisions and validation
 
@@ -1153,6 +1157,15 @@ The following remain deliberate checkpoints rather than implicit assumptions:
 - if a Linux helper is required, threat-model and test its dataset validation,
   peer authentication, capability handling, and systemd sandbox before making
   it part of the recommended deployment.
+
+Packaging is intentionally deferred until after native transport so package
+contents and dependencies reflect the complete initial release. Version
+`v0.1.0` uses the MIT license and provides two Arch PKGBUILDs: `boomerangz`
+builds with CGO disabled from a deterministic source archive published as a
+GitHub Release artifact, while `boomerangz-bin` installs CI-built release
+binaries. Race-test jobs may enable CGO; shipped binaries and normal package
+builds do not require it. Release recipes must contain real artifact checksums,
+never `SKIP` for downloaded archives.
 
 ## 16. References
 

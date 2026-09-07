@@ -87,8 +87,12 @@ Generated protobuf files are committed and regeneration leaves no drift.
 
 ## Phase 8 entry point
 
-Phase 8 should execute the planned hardening, packaging, privilege, upgrade,
-fault-injection, and destructive disposable-VM matrix. It should validate the
+Phase 8 should execute the planned hardening, privilege, fault-injection, and
+destructive disposable-VM matrix. It should validate the
 Phase 7 Unix and TCP control paths under service-account permissions and network
 failure without changing the approved authentication, lifecycle, or target
 authority design unless the user confirms such a change.
+
+Packaging was subsequently deferred until after native transport. The confirmed
+release decisions and preserved draft are recorded in
+`phase-10-packaging-notes.md`.

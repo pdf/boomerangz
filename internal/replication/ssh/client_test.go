@@ -38,6 +38,8 @@ func TestSSHHelperProcess(_ *testing.T) {
 		_, _ = io.Copy(os.Stdout, bytes.NewBuffer(bytes.Repeat([]byte{1}, 256*1024)))
 	case "receive":
 		_, _ = io.Copy(io.Discard, os.Stdin)
+	case "blocked":
+		time.Sleep(time.Minute)
 	case "shell":
 		service, err := remoterpc.NewServerWithReceiver(shellTestBackend{}, "tank/backups", func(ctx context.Context, _ []string) *exec.Cmd {
 			return helperCommand(ctx, "receive")
@@ -161,6 +163,22 @@ func TestSSHStream(t *testing.T) {
 	}
 }
 
+func TestSSHStreamCancellation(t *testing.T) {
+	t.Parallel()
+	client, err := newClient(Config{Host: "backup.example.net", Root: "tank/backups"}, func(ctx context.Context, _ []string) *exec.Cmd {
+		return helperCommand(ctx, "blocked")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := &Stream{client: client, sender: func(ctx context.Context, _ []string) *exec.Cmd { return helperCommand(ctx, "blocked") }}
+	ctx, cancel := context.WithCancel(t.Context())
+	result, err := stream.Run(ctx, zfs.SendOptions{Source: "tank/data", Snapshot: "tank/data@end"}, zfs.ReceiveOptions{Root: "tank/backups", Discard: zfs.ReceiveExact}, zfs.Estimate{}, func(zfs.Progress) { cancel() })
+	if err == nil || result.Completed || IsUnavailable(err) {
+		t.Fatalf("cancelled SSH stream result=%+v err=%v", result, err)
+	}
+}
+
 func TestSSHShellGRPCSessionAndStream(t *testing.T) {
 	t.Parallel()
 	client, err := newClient(Config{Host: "backup.example.net", Root: "tank/backups"}, func(ctx context.Context, _ []string) *exec.Cmd {
@@ -197,6 +215,29 @@ func TestSSHShellGRPCSessionAndStream(t *testing.T) {
 	}
 	if err := shell.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSSHShellStreamCancellation(t *testing.T) {
+	t.Parallel()
+	client, err := newClient(Config{Host: "backup.example.net", Root: "tank/backups"}, func(ctx context.Context, _ []string) *exec.Cmd {
+		return helperCommand(ctx, "shell")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	shell, err := NewShell(ctx, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = shell.Close() }()
+	runCtx, stop := context.WithCancel(ctx)
+	stream := &ShellStream{shell: shell, sender: func(ctx context.Context, _ []string) *exec.Cmd { return helperCommand(ctx, "blocked") }}
+	result, err := stream.Run(runCtx, zfs.SendOptions{Source: "tank/data", Snapshot: "tank/data@end"}, zfs.ReceiveOptions{Root: "tank/backups", Discard: zfs.ReceiveExact}, zfs.Estimate{}, func(zfs.Progress) { stop() })
+	if err == nil || result.Completed {
+		t.Fatalf("cancelled SSH-shell stream result=%+v err=%v", result, err)
 	}
 }
 

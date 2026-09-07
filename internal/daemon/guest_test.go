@@ -34,7 +34,8 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 			t.Fatalf("guest zfs %s: %v: %s", args[0], commandErr, output)
 		}
 	}
-	source := sourcePool + "/data/payload"
+	source := sourcePool + "/data/daemon-" + time.Now().UTC().Format("150405000")
+	command("create", "-u", source)
 	command("set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x1m", source)
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {

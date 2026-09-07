@@ -12,6 +12,8 @@ readonly run_id=$1
 readonly source_disk=$(readlink -f -- "$2")
 readonly destination_disk=$(readlink -f -- "$3")
 readonly marker_path=/run/boomerangz-vmtest/guest-marker
+readonly version_path=/run/boomerangz-vmtest/bootstrap-version
+readonly bootstrap_version=2
 readonly source_pool=boomerangz-test-$run_id-src
 readonly destination_pool=boomerangz-test-$run_id-dst
 readonly source=$source_pool/data
@@ -47,6 +49,7 @@ verify_pool_disk() {
 
 [[ $run_id =~ ^[a-z0-9][a-z0-9-]{5,47}$ ]] || fail "invalid run ID"
 [[ -f $marker_path && $(<"$marker_path") == "$run_id" ]] || fail "guest marker mismatch"
+[[ -f $version_path && $(<"$version_path") == "$bootstrap_version" ]] || fail "guest bootstrap version mismatch"
 verify_pool_disk "$source_pool" "$source_disk" "$(disk_serial src)"
 verify_pool_disk "$destination_pool" "$destination_disk" "$(disk_serial dst)"
 

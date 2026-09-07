@@ -18,12 +18,11 @@ func TestGuestLifecycle(t *testing.T) {
 	if runID == "" {
 		t.Skip("disposable guest only")
 	}
-	pool := "boomerangz-test-" + runID + "-src"
-	marker := "/run/boomerangz-vmtest/guest-marker"
-	// Check the marker before executing even read-only ZFS commands.
-	if err := zfstest.VerifyGuestGuard(marker, runID, pool, []zfstest.Vdev{{Path: "/dev/vdb", Serial: zfstest.DiskSerial(runID, zfstest.SourceDisk)}}); err != nil {
+	pool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, "/dev/vdb")
+	if err != nil {
 		t.Fatal(err)
 	}
+	marker := "/run/boomerangz-vmtest/guest-marker"
 	command := func(name string, args ...string) string {
 		t.Helper()
 		out, err := exec.CommandContext(t.Context(), name, args...).CombinedOutput()

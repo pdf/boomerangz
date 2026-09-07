@@ -14,8 +14,9 @@ sends, resumable receives with `-u`, and receive property changes.
 Before any destructive guest command, the in-guest harness must verify all of:
 
 1. `/run/boomerangz-vmtest/guest-marker` contains the current run UUID.
-2. The pool name starts with `boomerangz-test-` followed by that UUID.
-3. Every vdev resolves to a virtio disk whose deterministic serial matches the
+2. `/run/boomerangz-vmtest/bootstrap-version` matches the checked-in harness.
+3. The pool name starts with `boomerangz-test-` followed by that UUID.
+4. Every vdev resolves to a virtio disk whose deterministic serial matches the
    source or destination serial derived from that UUID. Serials use a short
    hash because virtio exposes at most 20 bytes.
 

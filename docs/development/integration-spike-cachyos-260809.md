@@ -20,8 +20,8 @@ zfs-utils 2.4.3-2
 zfs_module=2.4.3-1
 ```
 
-The reusable read-only base is stored in the default libvirt pool as
-`boomerangz-cachyos-260809-base.qcow2`. Per-run overlays and scratch images use
+The current reusable read-only base is stored in the default libvirt pool as
+`boomerangz-cachyos-260809-base-v2.qcow2`. Per-run overlays and scratch images use
 the `boomerangz-runs` directory in that pool, avoiding tmpfs-backed storage.
 
 ## Delegation result
@@ -71,6 +71,13 @@ tested version matrix and must be repeated for every supported OpenZFS release.
 The guest pools were destroyed through the same serial- and vdev-guarded
 bootstrap after the matrix. No development-host `zfs` or `zpool` command was
 run.
+
+The v2 base was derived through a clean maintenance overlay on 2026-09-07. Its
+installed guarded bootstrap matches the repository version that grants
+destination `userprop` plus the fixture-only source `create` and destination
+`snapshot` permissions. Guest tests also require bootstrap version 2 before
+running ZFS commands, so an older base fails before reaching the permission
+matrix.
 
 Sources for the image and bootstrap interface:
 

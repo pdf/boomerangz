@@ -3,6 +3,8 @@
 set -euo pipefail
 
 readonly marker_path=/run/boomerangz-vmtest/guest-marker
+readonly version_path=/run/boomerangz-vmtest/bootstrap-version
+readonly bootstrap_version=2
 readonly pool_prefix=boomerangz-test-
 readonly test_user=boomerangz
 
@@ -61,7 +63,9 @@ setup() {
 
 	install -d -m 0755 "$(dirname "$marker_path")"
 	printf '%s\n' "$run_id" >"$marker_path"
+	printf '%s\n' "$bootstrap_version" >"$version_path"
 	chmod 0644 "$marker_path"
+	chmod 0644 "$version_path"
 	verify_marker "$run_id"
 
 	local source_device destination_device source_pool destination_pool
@@ -90,8 +94,11 @@ setup() {
 	[[ -e $payload_device ]] || fail "zvol device was not created: $payload_device"
 	dd if=/dev/urandom of="$payload_device" bs=1M count=32 status=none
 	zfs create -o mountpoint=none "$destination_pool/data"
-	zfs allow -u "$test_user" snapshot,destroy,bookmark,hold,mount,release,send,userprop "$source_pool/data"
-	zfs allow -u "$test_user" compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop "$destination_pool/data"
+	# create on the source and snapshot on the destination are fixture-only
+	# permissions used by the integration suites. They are not deployment
+	# requirements. userprop on both sides is required by boomerangz metadata.
+	zfs allow -u "$test_user" bookmark,create,destroy,hold,mount,release,send,snapshot,userprop "$source_pool/data"
+	zfs allow -u "$test_user" compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
 
 	printf 'source_pool=%s\ndestination_pool=%s\n' "$source_pool" "$destination_pool"
 }
@@ -133,6 +140,7 @@ cleanup() {
 	blockdev --rereadpt "$destination_device"
 	udevadm settle
 	rm -f -- "$marker_path"
+	rm -f -- "$version_path"
 }
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || fail "must run as root"
