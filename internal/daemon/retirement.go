@@ -9,7 +9,6 @@ import (
 
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
-	replicationssh "github.com/pdf/boomerangz/internal/replication/ssh"
 	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
@@ -32,12 +31,12 @@ func (r *Runtime) retirementEndpoint(ctx context.Context, source string, effecti
 			continue
 		}
 		setting := r.config.Remotes[name]
-		endpoint, err := replicationssh.OpenEndpoint(ctx, client, "zfs", setting.Endpoint)
+		endpoint, err := client.Open(ctx)
 		if err != nil {
 			return retirementEndpoint{}, err
 		}
-		request := transfer.Request{Source: source, DestinationRoot: setting.Root, Policy: effective, Transport: "ssh", RemoteName: name, CanonicalTarget: canonical}
-		return retirementEndpoint{executor: endpoint.Executor, request: request, close: endpoint.Close}, nil
+		request := transfer.Request{Source: source, DestinationRoot: setting.Root, Policy: effective, Transport: client.Transport(), RemoteName: name, CanonicalTarget: canonical}
+		return retirementEndpoint{executor: endpoint.executor, request: request, close: endpoint.close}, nil
 	}
 	return retirementEndpoint{}, fmt.Errorf("recorded target is not configured")
 }

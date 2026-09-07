@@ -208,7 +208,10 @@ func TestSSHShellGRPCSessionAndStream(t *testing.T) {
 	if _, err := shell.Executor().InspectDatasetIdentity(ctx, "other/private"); err == nil {
 		t.Fatal("SSH shell exposed an identity outside its configured root")
 	}
-	stream := &ShellStream{shell: shell, sender: func(ctx context.Context, _ []string) *exec.Cmd { return helperCommand(ctx, "send") }}
+	stream, err := remoterpc.NewStreamWithSender(shell.remote, func(ctx context.Context, _ []string) *exec.Cmd { return helperCommand(ctx, "send") }, "SSH-shell")
+	if err != nil {
+		t.Fatal(err)
+	}
 	progress, err := stream.Run(ctx, zfs.SendOptions{Source: "tank/data", Snapshot: "tank/data@end"}, zfs.ReceiveOptions{Root: "tank/backups", Discard: zfs.ReceiveExact}, zfs.Estimate{}, nil)
 	if err != nil || !progress.Completed || progress.Bytes != 256*1024 {
 		t.Fatalf("progress=%+v err=%v", progress, err)
@@ -234,7 +237,10 @@ func TestSSHShellStreamCancellation(t *testing.T) {
 	}
 	defer func() { _ = shell.Close() }()
 	runCtx, stop := context.WithCancel(ctx)
-	stream := &ShellStream{shell: shell, sender: func(ctx context.Context, _ []string) *exec.Cmd { return helperCommand(ctx, "blocked") }}
+	stream, err := remoterpc.NewStreamWithSender(shell.remote, func(ctx context.Context, _ []string) *exec.Cmd { return helperCommand(ctx, "blocked") }, "SSH-shell")
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := stream.Run(runCtx, zfs.SendOptions{Source: "tank/data", Snapshot: "tank/data@end"}, zfs.ReceiveOptions{Root: "tank/backups", Discard: zfs.ReceiveExact}, zfs.Estimate{}, func(zfs.Progress) { stop() })
 	if err == nil || result.Completed {
 		t.Fatalf("cancelled SSH-shell stream result=%+v err=%v", result, err)

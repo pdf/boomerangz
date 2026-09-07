@@ -20,8 +20,10 @@ import (
 
 	"github.com/pdf/boomerangz/internal/config"
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
-	"github.com/pdf/boomerangz/internal/daemon"
+	"github.com/pdf/boomerangz/internal/daemonstate"
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	remoterpc "github.com/pdf/boomerangz/internal/replication/rpc"
+	"github.com/pdf/boomerangz/internal/zfs"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -33,10 +35,19 @@ type fakeRuntime struct {
 	triggered []string
 }
 
-func (f *fakeRuntime) ControlStatus() daemon.ControlSnapshot {
+type remoteTestBackend struct{ zfs.Executor }
+
+func (remoteTestBackend) ListDatasets(context.Context) ([]zfs.Dataset, error) {
+	return []zfs.Dataset{{Name: "tank", Type: zfs.Filesystem}, {Name: "tank/backups", Type: zfs.Filesystem}, {Name: "other/private", Type: zfs.Filesystem}}, nil
+}
+func (remoteTestBackend) InspectDatasetIdentity(_ context.Context, dataset string) (zfs.DatasetIdentity, error) {
+	return zfs.DatasetIdentity{Name: dataset, Type: zfs.Filesystem, GUID: 10, Pool: "tank", PoolGUID: 11}, nil
+}
+
+func (f *fakeRuntime) ControlStatus() daemonstate.ControlSnapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return daemon.ControlSnapshot{Revision: f.revision, Observed: time.Unix(10, 0), Generation: 7, Datasets: []daemon.DatasetStatus{{Name: "tank/data", Active: true}}, Queues: map[string]daemon.QueueSnapshot{"management": {Capacity: 8}}}
+	return daemonstate.ControlSnapshot{Revision: f.revision, Observed: time.Unix(10, 0), Generation: 7, Datasets: []daemonstate.DatasetStatus{{Name: "tank/data", Active: true}}, Queues: map[string]daemonstate.QueueSnapshot{"management": {Capacity: 8}}}
 }
 func (f *fakeRuntime) WaitStatus(ctx context.Context, after uint64) error {
 	f.mu.Lock()
@@ -282,6 +293,68 @@ func TestTokenStoreNeverListsVerifier(t *testing.T) {
 	}
 }
 
+func TestReplicationScopesAreDistinctFromControlScopes(t *testing.T) {
+	t.Parallel()
+	for method, want := range map[string]string{
+		"/boomerangz.replication.v1.RemoteService/Capabilities":           "replicate",
+		"/boomerangz.replication.v1.RemoteService/ListDatasets":           "replicate",
+		"/boomerangz.replication.v1.RemoteService/InspectDatasetIdentity": "replicate",
+		"/boomerangz.replication.v1.RemoteService/Receive":                "replicate",
+		"/boomerangz.replication.v1.RemoteService/Prune":                  "prune",
+		"/boomerangz.control.v1.StatusService/ListDatasets":               "status",
+	} {
+		if got := methodScope(method); got != want {
+			t.Errorf("methodScope(%q)=%q, want %q", method, got, want)
+		}
+	}
+	if _, err := normalizeScopes([]string{"replicate", "prune"}); err != nil {
+		t.Fatalf("replication scopes rejected: %v", err)
+	}
+}
+
+func TestTCPReplicationRequiresReplicateScope(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	certificate, key := writeCertificate(t, dir)
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	cfg.Listeners["replication"] = config.ListenerConfig{Network: "tcp", Address: "127.0.0.1:0", AuthMode: "token", TLSCert: certificate, TLSKey: key, ReplicationRoots: []string{"tank/backups"}}
+	server, err := StartServerWithReplication(cfg, &fakeRuntime{}, remoteTestBackend{}, "/bin/true", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	var endpoint string
+	for _, listener := range server.listeners {
+		if listener.Addr().Network() == "tcp" {
+			endpoint = listener.Addr().String()
+		}
+	}
+	store, err := NewTokenStore(cfg.Paths.IdentityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		scope string
+		code  codes.Code
+	}{{scope: "status", code: codes.PermissionDenied}, {scope: "replicate", code: codes.OK}} {
+		bundle, err := CreatePairingBundle(store, endpoint, certificate, "", "localhost", false, "", "", []string{test.scope}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connection, err := DialPairingConnection(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, callErr := remoterpc.NewRemoteServiceClient(connection).Capabilities(t.Context(), &remoterpc.CapabilitiesRequest{})
+		_ = connection.Close()
+		if status.Code(callErr) != test.code {
+			t.Fatalf("scope %s replication code=%s err=%v", test.scope, status.Code(callErr), callErr)
+		}
+	}
+}
+
 func TestCertificateReloadRetainsLastCompletePair(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -340,4 +413,39 @@ func TestMTLSAndTokenListenerRequiresBothCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = client.Connection.Close()
+}
+
+func TestManagedServerAndClientPKI(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	cfg.Listeners["managed"] = config.ListenerConfig{Network: "tcp", Address: "127.0.0.1:0", AdvertisedAddress: "localhost:7443", AuthMode: "mtls"}
+	server, err := StartServer(cfg, &fakeRuntime{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(cfg.Paths.IdentityDir, "pki", "listeners", "managed", "ca.crt"),
+		filepath.Join(cfg.Paths.IdentityDir, "pki", "listeners", "managed", "ca.key"),
+		filepath.Join(cfg.Paths.IdentityDir, "pki", "listeners", "managed", "server.crt"),
+		filepath.Join(cfg.Paths.IdentityDir, "pki", "listeners", "managed", "server.key"),
+		filepath.Join(cfg.Paths.IdentityDir, "pki", "clients", "ca.crt"),
+		filepath.Join(cfg.Paths.IdentityDir, "pki", "clients", "ca.key"),
+	} {
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatalf("managed PKI file %s: %v", path, statErr)
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("managed PKI file %s is not regular", path)
+		}
+		if filepath.Ext(path) == ".key" && info.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("managed private key %s mode=%o", path, info.Mode().Perm())
+		}
+	}
 }

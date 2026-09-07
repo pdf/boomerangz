@@ -151,16 +151,30 @@ func TestWorkerSchemaMigration(t *testing.T) {
 	}
 }
 
-func TestMTLSListenerRequiresClientCA(t *testing.T) {
+func TestMTLSListenerAllowsManagedOrExternalClientCA(t *testing.T) {
 	t.Parallel()
 	cfg := Defaults()
 	cfg.Listeners["remote"] = ListenerConfig{Network: "tcp", Address: "127.0.0.1:8443", AuthMode: "mtls", TLSCert: "/cert", TLSKey: "/key"}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "client_ca") {
-		t.Fatalf("validation error=%v", err)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("managed client CA rejected: %v", err)
 	}
 	cfg.Listeners["remote"] = ListenerConfig{Network: "tcp", Address: "127.0.0.1:8443", AuthMode: "mtls", TLSCert: "/cert", TLSKey: "/key", ClientCA: "/ca"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNativeRemoteAndManagedTLSValidation(t *testing.T) {
+	t.Parallel()
+	cfg := Defaults()
+	cfg.Remotes["home"] = RemoteConfig{Transport: "native", Credential: "home", Root: "tank/backups"}
+	cfg.Listeners["replication"] = ListenerConfig{Network: "tcp", Address: "0.0.0.0:8443", AdvertisedAddress: "backup.example.net:8443", AuthMode: "token", ReplicationRoots: []string{"tank/backups"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Listeners["replication"] = ListenerConfig{Network: "tcp", Address: "0.0.0.0:8443", AuthMode: "token"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "advertised_address") {
+		t.Fatalf("managed TLS without advertised address error=%v", err)
 	}
 }
 

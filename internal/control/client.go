@@ -286,11 +286,7 @@ func DialLocal(ctx context.Context, socket string) (*Client, error) {
 
 // DialBundle connects with the exact TLS trust and token in a pairing bundle.
 func DialBundle(ctx context.Context, bundle PairingBundle) (*Client, error) {
-	tlsConfig, err := clientTLSConfig(bundle)
-	if err != nil {
-		return nil, err
-	}
-	connection, err := grpc.NewClient(bundle.Endpoint, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), grpc.WithPerRPCCredentials(tokenCredentials{id: bundle.TokenID, secret: bundle.Secret}))
+	connection, err := DialPairingConnection(bundle)
 	if err != nil {
 		return nil, err
 	}
@@ -300,4 +296,18 @@ func DialBundle(ctx context.Context, bundle PairingBundle) (*Client, error) {
 		return nil, err
 	}
 	return client, nil
+}
+
+// DialPairingConnection creates an authenticated connection without assuming
+// which services or scopes the pairing grants.
+func DialPairingConnection(bundle PairingBundle) (*grpc.ClientConn, error) {
+	tlsConfig, err := clientTLSConfig(bundle)
+	if err != nil {
+		return nil, err
+	}
+	connection, err := grpc.NewClient(bundle.Endpoint, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), grpc.WithPerRPCCredentials(tokenCredentials{id: bundle.TokenID, secret: bundle.Secret}))
+	if err != nil {
+		return nil, err
+	}
+	return connection, nil
 }

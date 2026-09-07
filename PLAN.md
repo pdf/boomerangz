@@ -818,8 +818,24 @@ ControlService.Trigger
 ControlService.Reconcile
 ```
 
-A future native transport exposes the same protobuf probe, receive,
+The native transport exposes the same protobuf probe, receive,
 resume-token, verification, reconciliation, and prune services as SSH shell.
+
+Native clients name an imported pairing credential and destination root. The
+pairing bundle remains the sole source of the network endpoint, server trust,
+and client authorization:
+
+```toml
+[remotes.home]
+transport = "native"
+credential = "home"
+root = "tank/backups"
+```
+
+Named listeners remain generic control API listeners. A TCP listener exposes
+the replication service only when it has one or more explicit destination
+scopes in `replication_roots`; the same authenticated listener may continue to
+serve control operations. A listener without those roots is control-only.
 
 ### 9.1 Listener security
 
@@ -846,7 +862,20 @@ The server may generate its identity or load externally managed certificate and
 key files, including certificates renewed by Let's Encrypt/ACME tooling. Reload
 the pair atomically after renewal; report failed reloads and retain the previous
 identity without bypassing expiry validation. Built-in ACME issuance is not
-required. Define trust and reload configuration in the TCP phase.
+required. When both `tls_cert` and `tls_key` are omitted, boomerangz manages a
+private server CA and renewable server certificate under its protected identity
+directory, using the client-visible `advertised_address`. Supplying only one of
+the two files is invalid.
+
+Pairing uses the client's system roots when `pairing_ca` is absent and embeds
+the explicit CA when it is present. `pairing_pin_certificate = true` adds
+certificate pinning based on the server certificate's public key; it does not
+replace CA-chain, hostname, validity, or usage verification.
+
+For `mtls` and `mtls+token`, `client_ca` selects an externally managed client
+CA. When it is omitted, boomerangz manages a client CA and issues a distinct,
+individually revocable client certificate during pairing. Externally supplied
+server and client PKI remains supported.
 
 Creating a token emits a one-time pairing bundle containing:
 
@@ -866,6 +895,13 @@ explicit trust update or re-pairing.
 Issue one token per client by default so clients can have separate scopes and be
 revoked independently. A shared token remains possible. Suggested scopes are
 `status`, `trigger`, `replicate`, `prune`, and `admin`.
+
+The CLI represents this as a general `auth pairing create` and `auth pairing
+import` workflow rather than requiring users to repeat listener endpoint and
+trust configuration for every token. Token inspection and revocation remain
+under `auth token`. Pairing creation takes its endpoint, server name, and trust
+material from the selected listener; only client-specific external mTLS
+certificate material remains an input when managed client PKI is not used.
 
 The server stores only token identifiers, verifiers, scopes, and optional expiry
 metadata. Tokens are never placed in URLs or logs. Multiple valid tokens permit

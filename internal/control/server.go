@@ -18,6 +18,8 @@ import (
 
 	"github.com/pdf/boomerangz/internal/config"
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
+	remoterpc "github.com/pdf/boomerangz/internal/replication/rpc"
+	"github.com/pdf/boomerangz/internal/zfs"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -139,7 +141,21 @@ func (r *certificateReloader) get(*tls.ClientHelloInfo) (*tls.Certificate, error
 	return r.certificate, nil
 }
 
-func tlsServerConfig(name string, listener config.ListenerConfig, logger *slog.Logger) (*tls.Config, error) {
+func tlsServerConfig(name string, listener config.ListenerConfig, identityDir string, logger *slog.Logger) (*tls.Config, error) {
+	if listener.TLSCert == "" {
+		managed, err := ensureManagedServerIdentity(identityDir, name, listener.AdvertisedAddress)
+		if err != nil {
+			return nil, err
+		}
+		listener.TLSCert, listener.TLSKey = managed.cert, managed.key
+	}
+	if (listener.AuthMode == "mtls" || listener.AuthMode == "mtls+token") && listener.ClientCA == "" {
+		managedCA, err := ensureManagedClientCA(identityDir)
+		if err != nil {
+			return nil, err
+		}
+		listener.ClientCA = managedCA
+	}
 	reloader := &certificateReloader{certFile: listener.TLSCert, keyFile: listener.TLSKey, logger: logger, listener: name}
 	if _, err := reloader.get(nil); err != nil {
 		return nil, err
@@ -161,6 +177,12 @@ func tlsServerConfig(name string, listener config.ListenerConfig, logger *slog.L
 }
 
 func methodScope(method string) string {
+	if strings.Contains(method, ".replication.v1.RemoteService/") {
+		if strings.HasSuffix(method, "/Prune") {
+			return "prune"
+		}
+		return "replicate"
+	}
 	if strings.HasSuffix(method, "/GetStatus") || strings.HasSuffix(method, "/WatchStatus") || strings.HasSuffix(method, "/ListDatasets") {
 		return "status"
 	}
@@ -182,7 +204,7 @@ func authorize(ctx context.Context, store *TokenStore, method string) error {
 	return nil
 }
 
-func grpcServer(service *service, tokenAuth bool, store *TokenStore, tlsConfig *tls.Config) *grpc.Server {
+func grpcServer(service *service, remote remoterpc.RemoteServiceServer, tokenAuth bool, store *TokenStore, tlsConfig *tls.Config) *grpc.Server {
 	var options []grpc.ServerOption
 	if tlsConfig != nil {
 		options = append(options, grpc.Creds(credentials.NewTLS(tlsConfig)))
@@ -206,11 +228,24 @@ func grpcServer(service *service, tokenAuth bool, store *TokenStore, tlsConfig *
 	server := grpc.NewServer(options...)
 	controlrpc.RegisterStatusServiceServer(server, service)
 	controlrpc.RegisterControlServiceServer(server, service)
+	if remote != nil {
+		remoterpc.RegisterRemoteServiceServer(server, remote)
+	}
 	return server
 }
 
 // StartServer binds the default Unix socket plus configured named listeners.
 func StartServer(cfg config.Config, backend runtime, logger *slog.Logger) (*Server, error) {
+	return startServer(cfg, backend, nil, "", logger)
+}
+
+// StartServerWithReplication additionally exposes scoped replication services
+// on TCP listeners that configure replication roots.
+func StartServerWithReplication(cfg config.Config, backend runtime, replication zfs.Executor, zfsPath string, logger *slog.Logger) (*Server, error) {
+	return startServer(cfg, backend, replication, zfsPath, logger)
+}
+
+func startServer(cfg config.Config, backend runtime, replication zfs.Executor, zfsPath string, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -249,7 +284,7 @@ func StartServer(cfg config.Config, backend runtime, logger *slog.Logger) (*Serv
 				}
 			}
 		case "tcp":
-			tlsConfig, err = tlsServerConfig(name, definition, logger)
+			tlsConfig, err = tlsServerConfig(name, definition, cfg.Paths.IdentityDir, logger)
 			if err == nil {
 				listener, err = (&net.ListenConfig{}).Listen(context.Background(), "tcp", definition.Address)
 			}
@@ -260,7 +295,21 @@ func StartServer(cfg config.Config, backend runtime, logger *slog.Logger) (*Serv
 			_ = result.Close()
 			return nil, fmt.Errorf("listener %s: %w", name, err)
 		}
-		server := grpcServer(&service{runtime: backend}, definition.Network == "tcp" && strings.Contains(definition.AuthMode, "token"), store, tlsConfig)
+		var remote remoterpc.RemoteServiceServer
+		if len(definition.ReplicationRoots) != 0 {
+			if replication == nil {
+				_ = listener.Close()
+				_ = result.Close()
+				return nil, fmt.Errorf("listener %s: replication backend is required", name)
+			}
+			remote, err = remoterpc.NewServerForRoots(replication, definition.ReplicationRoots, zfsPath)
+			if err != nil {
+				_ = listener.Close()
+				_ = result.Close()
+				return nil, fmt.Errorf("listener %s: %w", name, err)
+			}
+		}
+		server := grpcServer(&service{runtime: backend}, remote, definition.Network == "tcp" && strings.Contains(definition.AuthMode, "token"), store, tlsConfig)
 		result.listeners = append(result.listeners, listener)
 		result.servers = append(result.servers, server)
 		result.wait.Add(1)

@@ -6,14 +6,14 @@ import (
 	"time"
 
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
-	"github.com/pdf/boomerangz/internal/daemon"
+	"github.com/pdf/boomerangz/internal/daemonstate"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 type runtime interface {
-	ControlStatus() daemon.ControlSnapshot
+	ControlStatus() daemonstate.ControlSnapshot
 	WaitStatus(context.Context, uint64) error
 	Trigger([]string) ([]string, error)
 	Reconcile()
@@ -26,7 +26,7 @@ type service struct {
 	runtime runtime
 }
 
-func toSnapshot(snapshot daemon.ControlSnapshot) *controlrpc.StatusSnapshot {
+func toSnapshot(snapshot daemonstate.ControlSnapshot) *controlrpc.StatusSnapshot {
 	result := &controlrpc.StatusSnapshot{Revision: snapshot.Revision, ObservedUnixNano: snapshot.Observed.UnixNano(), Generation: snapshot.Generation}
 	for _, dataset := range snapshot.Datasets {
 		item := &controlrpc.DatasetStatus{Name: dataset.Name, Active: dataset.Active, Recursive: dataset.Recursive}

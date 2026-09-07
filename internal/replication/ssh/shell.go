@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net"
 	"os/exec"
-	"slices"
 	"sync"
 	"time"
 
@@ -62,8 +60,7 @@ func (c *processConn) SetWriteDeadline(time.Time) error { return nil }
 type Shell struct {
 	client      *Client
 	connection  *grpc.ClientConn
-	remote      remoterpc.RemoteServiceClient
-	executor    *shellExecutor
+	remote      *remoterpc.Client
 	process     *exec.Cmd
 	processConn *processConn
 	diagnostics *boundedOutput
@@ -120,14 +117,17 @@ func NewShell(ctx context.Context, client *Client) (*Shell, error) {
 		_ = command.Wait()
 		return nil, err
 	}
-	shell := &Shell{client: client, connection: connection, remote: remoterpc.NewRemoteServiceClient(connection), process: command, processConn: pipe, diagnostics: diagnostics, done: make(chan error, 1)}
-	shell.executor = &shellExecutor{shell: shell}
+	rpcClient, err := remoterpc.NewClient(remoterpc.NewRemoteServiceClient(connection), normalizeRPCError)
+	if err != nil {
+		_ = connection.Close()
+		_ = pipe.Close()
+		_ = command.Wait()
+		return nil, err
+	}
+	shell := &Shell{client: client, connection: connection, remote: rpcClient, process: command, processConn: pipe, diagnostics: diagnostics, done: make(chan error, 1)}
 	go func() { shell.done <- command.Wait() }()
-	capabilities, err := shell.remote.Capabilities(ctx, &remoterpc.CapabilitiesRequest{})
-	if err != nil || capabilities.GetProtocolVersion() != remoterpc.ProtocolVersion {
-		if err == nil {
-			err = fmt.Errorf("unsupported protocol version %d", capabilities.GetProtocolVersion())
-		}
+	err = shell.remote.Negotiate(ctx)
+	if err != nil {
 		_ = shell.connection.Close()
 		_ = shell.processConn.Close()
 		var processErr error
@@ -172,107 +172,11 @@ func (s *Shell) Close() error {
 }
 
 // Executor exposes destination operations through the shared service.
-func (s *Shell) Executor() zfs.Executor { return s.executor }
+func (s *Shell) Executor() zfs.Executor { return s.remote.Executor() }
 
 // NewStream returns a gRPC receive stream over this same SSH session.
-func (s *Shell) NewStream(zfsPath string) (*ShellStream, error) {
-	if zfsPath == "" {
-		return nil, fmt.Errorf("local ZFS executable is required")
-	}
-	return &ShellStream{shell: s, sender: func(ctx context.Context, args []string) *exec.Cmd {
-		return exec.CommandContext(ctx, zfsPath, args...)
-	}}, nil
-}
-
-type shellExecutor struct{ shell *Shell }
-
-func (e *shellExecutor) ListDatasets(ctx context.Context) ([]zfs.Dataset, error) {
-	response, err := e.shell.remote.ListDatasets(ctx, &remoterpc.ListDatasetsRequest{})
-	if err != nil {
-		return nil, normalizeRPCError(err)
-	}
-	result := make([]zfs.Dataset, 0, len(response.GetDatasets()))
-	for _, dataset := range response.GetDatasets() {
-		result = append(result, zfs.Dataset{Name: dataset.GetName(), Type: zfs.DatasetType(dataset.GetType()), EncryptionRoot: dataset.GetEncryptionRoot()})
-	}
-	return result, nil
-}
-
-func (e *shellExecutor) InspectDatasetIdentity(ctx context.Context, dataset string) (zfs.DatasetIdentity, error) {
-	response, err := e.shell.remote.InspectDatasetIdentity(ctx, &remoterpc.InspectDatasetIdentityRequest{Dataset: dataset})
-	if err != nil {
-		return zfs.DatasetIdentity{}, normalizeRPCError(err)
-	}
-	return zfs.DatasetIdentity{Name: response.GetName(), Type: zfs.DatasetType(response.GetType()), GUID: response.GetGuid(), Pool: response.GetPool(), PoolGUID: response.GetPoolGuid()}, nil
-}
-
-func (e *shellExecutor) InspectState(ctx context.Context, dataset string, recursive bool) (zfs.State, error) {
-	response, err := e.shell.remote.InspectState(ctx, &remoterpc.InspectStateRequest{Dataset: dataset, Recursive: recursive})
-	if err != nil {
-		return zfs.State{}, normalizeRPCError(err)
-	}
-	return decodeState(response), nil
-}
-
-func (e *shellExecutor) SetProperties(ctx context.Context, dataset string, properties map[string]string) error {
-	_, err := e.shell.remote.SetProperties(ctx, &remoterpc.SetPropertiesRequest{Dataset: dataset, Properties: maps.Clone(properties)})
-	return normalizeRPCError(err)
-}
-
-func (e *shellExecutor) InheritProperty(ctx context.Context, dataset, property string) error {
-	_, err := e.shell.remote.InheritProperty(ctx, &remoterpc.InheritPropertyRequest{Dataset: dataset, Property: property})
-	return normalizeRPCError(err)
-}
-
-func (e *shellExecutor) GetActivationProperties(context.Context) ([]zfs.Property, error) {
-	return nil, fmt.Errorf("source activation queries are unavailable through SSH shell")
-}
-func (e *shellExecutor) GetStoredProperties(context.Context, []string) ([]zfs.Property, error) {
-	return nil, fmt.Errorf("source property queries are unavailable through SSH shell")
-}
-func (e *shellExecutor) Snapshot(context.Context, string, string, bool, map[string]string) error {
-	return fmt.Errorf("source snapshot mutations are unavailable through SSH shell")
-}
-func (e *shellExecutor) DestroySnapshot(context.Context, string) error {
-	return fmt.Errorf("source snapshot mutations are unavailable through SSH shell")
-}
-func (e *shellExecutor) Bookmark(context.Context, string, string) error {
-	return fmt.Errorf("source bookmark mutations are unavailable through SSH shell")
-}
-func (e *shellExecutor) DestroyBookmark(context.Context, string) error {
-	return fmt.Errorf("source bookmark mutations are unavailable through SSH shell")
-}
-func (e *shellExecutor) Hold(context.Context, string, string) error {
-	return fmt.Errorf("source hold mutations are unavailable through SSH shell")
-}
-func (e *shellExecutor) Release(context.Context, string, string) error {
-	return fmt.Errorf("source hold mutations are unavailable through SSH shell")
-}
-
-func decodeState(response *remoterpc.InspectStateResponse) zfs.State {
-	state := zfs.State{Received: make(map[string]map[string]string), ResumeTokens: make(map[string]string), Clones: make(map[string][]string), Holds: make(map[string][]string)}
-	for _, object := range response.GetObjects() {
-		state.Objects = append(state.Objects, zfs.Object{Name: object.GetName(), Type: object.GetType(), GUID: object.GetGuid(), Creation: object.GetCreation(), CreateTXG: object.GetCreateTxg()})
-	}
-	for _, property := range response.GetProperties() {
-		state.Properties = append(state.Properties, zfs.Property{Dataset: property.GetDataset(), Name: property.GetName(), Value: property.GetValue(), Source: zfs.PropertySource(property.GetSource())})
-	}
-	for _, property := range response.GetReceived() {
-		if state.Received[property.GetDataset()] == nil {
-			state.Received[property.GetDataset()] = make(map[string]string)
-		}
-		state.Received[property.GetDataset()][property.GetName()] = property.GetValue()
-	}
-	for _, value := range response.GetResumeTokens() {
-		state.ResumeTokens[value.GetName()] = value.GetValue()
-	}
-	for _, value := range response.GetClones() {
-		state.Clones[value.GetName()] = slices.Clone(value.GetValues())
-	}
-	for _, value := range response.GetHolds() {
-		state.Holds[value.GetName()] = slices.Clone(value.GetValues())
-	}
-	return state
+func (s *Shell) NewStream(zfsPath string) (*remoterpc.Stream, error) {
+	return remoterpc.NewStream(s.remote, zfsPath, "SSH-shell")
 }
 
 func normalizeRPCError(err error) error {

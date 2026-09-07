@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+
+	"github.com/pdf/boomerangz/internal/daemonstate"
 )
 
 // Outcome is the stable result of one worker attempt.
@@ -28,12 +30,8 @@ type Job struct {
 	Drop       func()
 }
 
-// QueueSnapshot is an observable bounded-queue view.
-type QueueSnapshot struct {
-	Capacity int      `json:"capacity"`
-	Pending  int      `json:"pending"`
-	IDs      []string `json:"ids,omitempty"`
-}
+// QueueSnapshot is retained as the daemon package's public queue view.
+type QueueSnapshot = daemonstate.QueueSnapshot
 
 // FairQueue is a bounded, deduplicating round-robin queue. Each group gets one
 // dequeue opportunity before another job from a busy group can run.

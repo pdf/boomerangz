@@ -314,7 +314,7 @@ func runClean(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 	if err != nil {
 		return err
 	}
-	targets, err := daemon.NewTargetChecker(executor, cfg.Remotes)
+	targets, err := daemon.NewTargetChecker(executor, cfg.Remotes, cfg.Paths.CredentialsDir)
 	if err != nil {
 		return err
 	}

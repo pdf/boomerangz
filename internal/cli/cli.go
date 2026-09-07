@@ -159,7 +159,7 @@ func runWithReader(ctx context.Context, args []string, stdout, stderr io.Writer,
 		if err != nil {
 			return err
 		}
-		controlServer, err := control.StartServer(loaded.Config, runtime, logger)
+		controlServer, err := control.StartServerWithReplication(loaded.Config, runtime, source, "zfs", logger)
 		if err != nil {
 			return err
 		}

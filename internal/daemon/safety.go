@@ -8,7 +8,6 @@ import (
 
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/lifecycle"
-	replicationssh "github.com/pdf/boomerangz/internal/replication/ssh"
 	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
@@ -22,26 +21,26 @@ type Safety struct {
 // TargetChecker performs read-only just-in-time checks against configured targets.
 type TargetChecker struct {
 	local    zfs.Executor
-	remotes  map[string]*replicationssh.Client
+	remotes  map[string]remoteClient
 	settings map[string]config.RemoteConfig
 }
 
-func newSafety(gate *lifecycle.Gate, local zfs.Executor, remotes map[string]*replicationssh.Client, settings map[string]config.RemoteConfig) *Safety {
+func newSafety(gate *lifecycle.Gate, local zfs.Executor, remotes map[string]remoteClient, settings map[string]config.RemoteConfig) *Safety {
 	return &Safety{gate: gate, targets: &TargetChecker{local: local, remotes: remotes, settings: settings}}
 }
 
 // NewTargetChecker builds the same target verifier for standalone administration.
-func NewTargetChecker(local zfs.Executor, settings map[string]config.RemoteConfig) (*TargetChecker, error) {
+func NewTargetChecker(local zfs.Executor, settings map[string]config.RemoteConfig, credentialsDir ...string) (*TargetChecker, error) {
 	if local == nil {
 		return nil, fmt.Errorf("local target executor is required")
 	}
-	clients := make(map[string]*replicationssh.Client, len(settings))
-	for name, setting := range settings {
-		client, err := replicationssh.New("ssh", replicationssh.Config{Host: setting.Host, Port: setting.Port, User: setting.User, Root: setting.Root, IdentityFile: setting.IdentityFile, ShellPath: setting.SSHShellPath, ConnectTimeout: setting.ConnectTimeout.Duration})
-		if err != nil {
-			return nil, fmt.Errorf("remote %s: %w", name, err)
-		}
-		clients[name] = client
+	directory := config.DefaultCredentialsDir
+	if len(credentialsDir) != 0 {
+		directory = credentialsDir[0]
+	}
+	clients, err := buildRemoteClients(settings, directory)
+	if err != nil {
+		return nil, err
 	}
 	return &TargetChecker{local: local, remotes: clients, settings: settings}, nil
 }
@@ -104,16 +103,16 @@ func (s *TargetChecker) CheckTarget(ctx context.Context, source, target string) 
 			continue
 		}
 		setting := s.settings[name]
-		endpoint, err := replicationssh.OpenEndpoint(ctx, client, "zfs", setting.Endpoint)
+		endpoint, err := client.Open(ctx)
 		if err != nil {
 			return err
 		}
-		binding, bindingErr := transfer.VerifyTargetBinding(ctx, endpoint.Executor, sourceState, source, target, setting.Root)
+		binding, bindingErr := transfer.VerifyTargetBinding(ctx, endpoint.executor, sourceState, source, target, setting.Root)
 		checkErr := bindingErr
 		if bindingErr == nil {
-			checkErr = checkResumeState(ctx, endpoint.Executor, binding.MappedDataset)
+			checkErr = checkResumeState(ctx, endpoint.executor, binding.MappedDataset)
 		}
-		if closeErr := endpoint.Close(); closeErr != nil {
+		if closeErr := endpoint.close(); closeErr != nil {
 			return errors.Join(checkErr, fmt.Errorf("target close: %w", closeErr))
 		}
 		return checkErr

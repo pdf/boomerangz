@@ -31,17 +31,23 @@ var operations = []string{"capabilities", "probe", "receive", "resume", "verify"
 // destination subtree.
 type Server struct {
 	UnimplementedRemoteServiceServer
-	backend     zfs.Executor
-	allowedRoot string
-	receive     zfs.CommandFactory
+	backend      zfs.Executor
+	allowedRoots []string
+	receive      zfs.CommandFactory
 }
 
 // NewServer constructs a scoped remote endpoint using an explicit ZFS binary.
 func NewServer(backend zfs.Executor, allowedRoot, zfsPath string) (*Server, error) {
+	return NewServerForRoots(backend, []string{allowedRoot}, zfsPath)
+}
+
+// NewServerForRoots constructs one endpoint bounded to the configured
+// destination subtrees.
+func NewServerForRoots(backend zfs.Executor, allowedRoots []string, zfsPath string) (*Server, error) {
 	if zfsPath == "" {
 		return nil, fmt.Errorf("remote ZFS executor and executable are required")
 	}
-	return NewServerWithReceiver(backend, allowedRoot, func(ctx context.Context, args []string) *exec.Cmd {
+	return NewServerForRootsWithReceiver(backend, allowedRoots, func(ctx context.Context, args []string) *exec.Cmd {
 		return exec.CommandContext(ctx, zfsPath, args...)
 	})
 }
@@ -49,21 +55,35 @@ func NewServer(backend zfs.Executor, allowedRoot, zfsPath string) (*Server, erro
 // NewServerWithReceiver injects the receive process boundary for tests and
 // privileged implementations while preserving validated receive arguments.
 func NewServerWithReceiver(backend zfs.Executor, allowedRoot string, receive zfs.CommandFactory) (*Server, error) {
+	return NewServerForRootsWithReceiver(backend, []string{allowedRoot}, receive)
+}
+
+// NewServerForRootsWithReceiver injects the receive process boundary while
+// allowing one authenticated listener to serve several explicit roots.
+func NewServerForRootsWithReceiver(backend zfs.Executor, allowedRoots []string, receive zfs.CommandFactory) (*Server, error) {
 	if backend == nil || receive == nil {
 		return nil, fmt.Errorf("remote ZFS executor and receive command are required")
 	}
-	if err := zfs.ValidateDataset(allowedRoot); err != nil {
-		return nil, fmt.Errorf("allowed destination root: %w", err)
+	if len(allowedRoots) == 0 {
+		return nil, fmt.Errorf("at least one allowed destination root is required")
 	}
-	return &Server{backend: backend, allowedRoot: allowedRoot, receive: receive}, nil
+	roots := slices.Clone(allowedRoots)
+	slices.Sort(roots)
+	roots = slices.Compact(roots)
+	for _, root := range roots {
+		if err := zfs.ValidateDataset(root); err != nil {
+			return nil, fmt.Errorf("allowed destination root: %w", err)
+		}
+	}
+	return &Server{backend: backend, allowedRoots: roots, receive: receive}, nil
 }
 
 func (s *Server) related(dataset string) bool {
-	return scope.Related(s.allowedRoot, dataset)
+	return slices.ContainsFunc(s.allowedRoots, func(root string) bool { return scope.Related(root, dataset) })
 }
 
 func (s *Server) inside(dataset string) bool {
-	return scope.Inside(s.allowedRoot, dataset)
+	return slices.ContainsFunc(s.allowedRoots, func(root string) bool { return scope.Inside(root, dataset) })
 }
 
 // Capabilities negotiates protocol and operation support.

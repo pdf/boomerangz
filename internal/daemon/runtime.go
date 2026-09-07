@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/daemonstate"
 	"github.com/pdf/boomerangz/internal/discovery"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
-	replicationssh "github.com/pdf/boomerangz/internal/replication/ssh"
 	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
@@ -29,22 +29,21 @@ type backend interface {
 
 type remoteApplier struct {
 	source       backend
-	client       *replicationssh.Client
-	setting      config.RemoteConfig
+	client       remoteClient
 	installation string
 }
 
 func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, report func(zfs.Progress)) (transfer.Result, error) {
-	endpoint, err := replicationssh.OpenEndpoint(ctx, a.client, "zfs", a.setting.Endpoint)
+	endpoint, err := a.client.Open(ctx)
 	if err != nil {
 		return transfer.Result{}, err
 	}
-	engine, err := transfer.NewRemote(a.source, endpoint.Executor, endpoint.Stream, a.installation)
+	engine, err := transfer.NewRemote(a.source, endpoint.executor, endpoint.stream, a.installation)
 	if err != nil {
-		return transfer.Result{}, errors.Join(err, endpoint.Close())
+		return transfer.Result{}, errors.Join(err, endpoint.close())
 	}
 	result, applyErr := engine.Apply(ctx, request, report)
-	return result, errors.Join(applyErr, endpoint.Close())
+	return result, errors.Join(applyErr, endpoint.close())
 }
 
 type roadState struct {
@@ -66,7 +65,7 @@ type Runtime struct {
 	remote       *Pool
 	localStream  transfer.Stream
 	pending      *transfer.PendingSet
-	remotes      map[string]*replicationssh.Client
+	remotes      map[string]remoteClient
 	safety       *Safety
 	locks        *keyLocks
 	status       *StatusStore
@@ -106,18 +105,12 @@ func New(cfg config.Config, source backend, installation string, logger *slog.Lo
 		return nil, err
 	}
 	remoteNames := make([]string, 0, len(cfg.Remotes))
-	clients := make(map[string]*replicationssh.Client, len(cfg.Remotes))
-	for name, setting := range cfg.Remotes {
-		client, clientErr := replicationssh.New("ssh", replicationssh.Config{
-			Host: setting.Host, Port: setting.Port, User: setting.User, Root: setting.Root,
-			IdentityFile: setting.IdentityFile, ShellPath: setting.SSHShellPath,
-			ConnectTimeout: setting.ConnectTimeout.Duration,
-		})
-		if clientErr != nil {
-			return nil, fmt.Errorf("remote %s: %w", name, clientErr)
-		}
+	clients, err := buildRemoteClients(cfg.Remotes, cfg.Paths.CredentialsDir)
+	if err != nil {
+		return nil, err
+	}
+	for name := range cfg.Remotes {
 		remoteNames = append(remoteNames, name)
-		clients[name] = client
 	}
 	slices.Sort(remoteNames)
 	scanner, err := discovery.New(source, discovery.Options{Remotes: remoteNames})
@@ -648,8 +641,8 @@ func (r *Runtime) road(dataset, remote string, effective policy.Effective) (road
 		return roadState{}, fmt.Errorf("remote %s is not configured", remote)
 	}
 	client := r.remotes[remote]
-	request := transfer.Request{Source: dataset, DestinationRoot: setting.Root, Policy: effective.Clone(), Transport: "ssh", RemoteName: remote, CanonicalTarget: client.CanonicalTarget()}
-	coordinator, err := transfer.NewRoadwarrior(remoteApplier{source: r.backend, client: client, setting: setting, installation: r.installation}, request, r.pending, transfer.DefaultRetryPolicy(), r.now, rand.Float64)
+	request := transfer.Request{Source: dataset, DestinationRoot: setting.Root, Policy: effective.Clone(), Transport: client.Transport(), RemoteName: remote, CanonicalTarget: client.CanonicalTarget()}
+	coordinator, err := transfer.NewRoadwarrior(remoteApplier{source: r.backend, client: client, installation: r.installation}, request, r.pending, transfer.DefaultRetryPolicy(), r.now, rand.Float64)
 	if err != nil {
 		return roadState{}, err
 	}
@@ -881,23 +874,8 @@ func (r *Runtime) Trigger(datasets []string) ([]string, error) {
 	return accepted, nil
 }
 
-// DatasetStatus is the detached daemon view used by the control API.
-type DatasetStatus struct {
-	Name         string
-	Active       bool
-	Recursive    bool
-	NextSnapshot time.Time
-}
-
-// ControlSnapshot is one coherent-enough operational view. ZFS is not queried.
-type ControlSnapshot struct {
-	Revision   uint64
-	Observed   time.Time
-	Generation uint64
-	Datasets   []DatasetStatus
-	Queues     map[string]QueueSnapshot
-	Jobs       []Event
-}
+type DatasetStatus = daemonstate.DatasetStatus
+type ControlSnapshot = daemonstate.ControlSnapshot
 
 // ControlStatus builds a cheap in-memory status snapshot.
 func (r *Runtime) ControlStatus() ControlSnapshot {

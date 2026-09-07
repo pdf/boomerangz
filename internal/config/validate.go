@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -41,14 +42,29 @@ func (c Config) Validate() error {
 		if !namePattern.MatchString(name) {
 			problems = append(problems, fmt.Errorf("remote %q has an invalid name", name))
 		}
-		if remote.Transport != "ssh" {
-			problems = append(problems, fmt.Errorf("remote %q: transport must be ssh", name))
+		switch remote.Transport {
+		case "ssh":
+			if remote.Endpoint != "" && remote.Endpoint != "auto" && remote.Endpoint != "direct" && remote.Endpoint != "ssh-shell" {
+				problems = append(problems, fmt.Errorf("remote %q: endpoint must be auto, direct, or ssh-shell", name))
+			}
+			if remote.Host == "" {
+				problems = append(problems, fmt.Errorf("remote %q: host is required for SSH", name))
+			}
+			if remote.Credential != "" {
+				problems = append(problems, fmt.Errorf("remote %q: credential is only valid for native transport", name))
+			}
+		case "native":
+			if remote.Credential == "" || (!namePattern.MatchString(remote.Credential) && !filepath.IsAbs(remote.Credential)) {
+				problems = append(problems, fmt.Errorf("remote %q: credential must be an imported name or absolute path", name))
+			}
+			if remote.Endpoint != "" || remote.Host != "" || remote.Port != 0 || remote.User != "" || remote.IdentityFile != "" || remote.SSHShellPath != "" {
+				problems = append(problems, fmt.Errorf("remote %q: SSH connection fields are not valid for native transport", name))
+			}
+		default:
+			problems = append(problems, fmt.Errorf("remote %q: transport must be ssh or native", name))
 		}
-		if remote.Endpoint != "" && remote.Endpoint != "auto" && remote.Endpoint != "direct" && remote.Endpoint != "ssh-shell" {
-			problems = append(problems, fmt.Errorf("remote %q: endpoint must be auto, direct, or ssh-shell", name))
-		}
-		if remote.Host == "" || remote.Root == "" {
-			problems = append(problems, fmt.Errorf("remote %q: host and root are required", name))
+		if remote.Root == "" {
+			problems = append(problems, fmt.Errorf("remote %q: root is required", name))
 		}
 		if remote.Port < 0 || remote.Port > 65535 {
 			problems = append(problems, fmt.Errorf("remote %q: port must be between 0 and 65535", name))
@@ -72,6 +88,9 @@ func (c Config) Validate() error {
 			if !filepath.IsAbs(listener.Address) {
 				problems = append(problems, fmt.Errorf("listener %q: unix address must be absolute", name))
 			}
+			if len(listener.ReplicationRoots) != 0 {
+				problems = append(problems, fmt.Errorf("listener %q: replication_roots require TCP", name))
+			}
 		case "tcp":
 			if listener.Address == "" {
 				problems = append(problems, fmt.Errorf("listener %q: address is required", name))
@@ -79,11 +98,24 @@ func (c Config) Validate() error {
 			if listener.AuthMode != "token" && listener.AuthMode != "mtls" && listener.AuthMode != "mtls+token" {
 				problems = append(problems, fmt.Errorf("listener %q: TCP auth_mode must be token, mtls, or mtls+token", name))
 			}
-			if listener.TLSCert == "" || listener.TLSKey == "" {
-				problems = append(problems, fmt.Errorf("listener %q: TCP tls_cert and tls_key are required", name))
+			if (listener.TLSCert == "") != (listener.TLSKey == "") {
+				problems = append(problems, fmt.Errorf("listener %q: tls_cert and tls_key must be supplied together", name))
 			}
-			if (listener.AuthMode == "mtls" || listener.AuthMode == "mtls+token") && listener.ClientCA == "" {
-				problems = append(problems, fmt.Errorf("listener %q: client_ca is required for mTLS", name))
+			if listener.TLSCert == "" {
+				host, _, err := net.SplitHostPort(listener.AdvertisedAddress)
+				if err != nil || host == "" || host == "0.0.0.0" || host == "::" {
+					problems = append(problems, fmt.Errorf("listener %q: managed TLS requires a client-visible advertised_address", name))
+				}
+			}
+			for _, field := range []struct{ name, value string }{{"tls_cert", listener.TLSCert}, {"tls_key", listener.TLSKey}, {"client_ca", listener.ClientCA}, {"pairing_ca", listener.PairingCA}} {
+				if field.value != "" && !filepath.IsAbs(field.value) {
+					problems = append(problems, fmt.Errorf("listener %q: %s must be absolute", name, field.name))
+				}
+			}
+			for _, root := range listener.ReplicationRoots {
+				if root == "" || strings.ContainsAny(root, "@#\t\r\n ") || strings.HasPrefix(root, "/") {
+					problems = append(problems, fmt.Errorf("listener %q: replication root must be a ZFS dataset name", name))
+				}
 			}
 		default:
 			problems = append(problems, fmt.Errorf("listener %q: network must be unix or tcp", name))

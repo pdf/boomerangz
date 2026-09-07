@@ -51,9 +51,10 @@ type PathsConfig struct {
 	SocketPath     string `toml:"socket_path" json:"socket_path"`
 }
 
-// RemoteConfig defines an SSH replication destination.
+// RemoteConfig defines an SSH or native replication destination.
 type RemoteConfig struct {
 	Transport      string   `toml:"transport" json:"transport"`
+	Credential     string   `toml:"credential" json:"credential,omitempty"`
 	Endpoint       string   `toml:"endpoint" json:"endpoint,omitempty"`
 	Host           string   `toml:"host" json:"host"`
 	Port           int      `toml:"port" json:"port"`
@@ -66,12 +67,16 @@ type RemoteConfig struct {
 
 // ListenerConfig defines a local Unix or authenticated TCP control listener.
 type ListenerConfig struct {
-	Network  string `toml:"network" json:"network"`
-	Address  string `toml:"address" json:"address"`
-	AuthMode string `toml:"auth_mode" json:"auth_mode,omitempty"`
-	TLSCert  string `toml:"tls_cert" json:"tls_cert,omitempty"`
-	TLSKey   string `toml:"tls_key" json:"tls_key,omitempty" secret:"true"`
-	ClientCA string `toml:"client_ca" json:"client_ca,omitempty"`
+	Network               string   `toml:"network" json:"network"`
+	Address               string   `toml:"address" json:"address"`
+	AdvertisedAddress     string   `toml:"advertised_address" json:"advertised_address,omitempty"`
+	AuthMode              string   `toml:"auth_mode" json:"auth_mode,omitempty"`
+	TLSCert               string   `toml:"tls_cert" json:"tls_cert,omitempty"`
+	TLSKey                string   `toml:"tls_key" json:"tls_key,omitempty" secret:"true"`
+	ClientCA              string   `toml:"client_ca" json:"client_ca,omitempty"`
+	PairingCA             string   `toml:"pairing_ca" json:"pairing_ca,omitempty"`
+	PairingPinCertificate bool     `toml:"pairing_pin_certificate" json:"pairing_pin_certificate,omitempty"`
+	ReplicationRoots      []string `toml:"replication_roots" json:"replication_roots,omitempty"`
 }
 
 // Defaults returns a valid configuration with no remotes or listeners.

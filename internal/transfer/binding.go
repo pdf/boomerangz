@@ -57,11 +57,11 @@ type localIdentityReader interface {
 func InspectTarget(ctx context.Context, reader localIdentityReader, request Request, source zfs.State) (LocalTargetInspection, error) {
 	transport, canonical := requestTransport(request), canonicalTarget(request)
 	configured := request.DestinationRoot
-	if transport == "ssh" {
+	if transport == "ssh" || transport == "native" {
 		configured = request.RemoteName
 	}
 	inspection := LocalTargetInspection{ConfiguredName: configured, Transport: transport, CanonicalEndpoint: canonical, DestinationRoot: request.DestinationRoot}
-	if (transport != "local" && transport != "ssh") || canonical == "" {
+	if (transport != "local" && transport != "ssh" && transport != "native") || canonical == "" {
 		inspection.Status = "invalid-mapping"
 		return inspection, fmt.Errorf("unsupported or incomplete target transport")
 	}

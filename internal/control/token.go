@@ -20,7 +20,7 @@ import (
 const tokenFilename = "token-verifiers.json"
 const tokenLockFilename = "token-verifiers.lock"
 
-var validScopes = []string{"admin", "status", "trigger"}
+var validScopes = []string{"admin", "prune", "replicate", "status", "trigger"}
 
 // TokenRecord is safe to display: the one-time secret is never retained.
 type TokenRecord struct {
