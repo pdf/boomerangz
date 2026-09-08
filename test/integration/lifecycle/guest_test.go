@@ -1,18 +1,31 @@
 //go:build integration
 
-package lifecycle
+package lifecycle_test
 
 import (
+	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/testutil/zfstest"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
+
+type cleanSafety struct{}
+
+func (cleanSafety) Quiescent(context.Context, []string) error         { return nil }
+func (cleanSafety) CheckTarget(context.Context, string, string) error { return nil }
+
+func activePolicy(dataset string) policy.Effective {
+	row := zfs.Property{Dataset: dataset, Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal}
+	return policy.Resolve(zfs.Dataset{Name: dataset, Type: zfs.Filesystem, EncryptionRoot: "-"}, nil, []zfs.Property{row}, nil)
+}
 
 // This test is opt-in and must run in the disposable guest, never on the host.
 func TestGuestLifecycle(t *testing.T) {
@@ -20,7 +33,11 @@ func TestGuestLifecycle(t *testing.T) {
 	if runID == "" {
 		t.Skip("disposable guest only")
 	}
-	pool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, "/dev/vdb")
+	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
+	if sourceDevice == "" {
+		t.Fatal("source test device is required")
+	}
+	pool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,8 +50,8 @@ func TestGuestLifecycle(t *testing.T) {
 		}
 		return strings.TrimSpace(string(out))
 	}
-	serial := command("lsblk", "-dn", "-o", "SERIAL", "/dev/vdb")
-	if err := zfstest.VerifyGuestGuard(marker, runID, pool, []zfstest.Vdev{{Path: "/dev/vdb", Serial: serial}}); err != nil {
+	serial := command("lsblk", "-dn", "-o", "SERIAL", sourceDevice)
+	if err := zfstest.VerifyGuestGuard(marker, runID, pool, []zfstest.Vdev{{Path: sourceDevice, Serial: serial}}); err != nil {
 		t.Fatal(err)
 	}
 	if serial != zfstest.DiskSerial(runID, zfstest.SourceDisk) {
@@ -49,7 +66,7 @@ func TestGuestLifecycle(t *testing.T) {
 		}
 		vdevs++
 		parent := command("lsblk", "-dn", "-o", "PKNAME", fields[0])
-		if parent != "vdb" && (parent != "" || fields[0] != "/dev/vdb") {
+		if parent != filepath.Base(sourceDevice) && (parent != "" || fields[0] != sourceDevice) {
 			t.Fatal("unexpected test-pool vdev")
 		}
 	}
@@ -66,12 +83,12 @@ func TestGuestLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	const installation = "abcdefab-cdef-4abc-8def-abcdefabcdef"
-	service, err := NewService(direct, installation)
+	service, err := lifecycle.NewService(direct, installation)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	effective := activeTestPolicy(root)
+	effective := activePolicy(root)
 	first, err := service.CreateSnapshot(t.Context(), root, true, now.Add(-2*time.Hour), effective)
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +101,7 @@ func TestGuestLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshotsIn(state, root)) != 2 || len(snapshotsIn(state, root+"/child")) != 1 {
+	if len(lifecycle.Snapshots(state, root)) != 2 || len(lifecycle.Snapshots(state, root+"/child")) != 1 {
 		t.Fatal("incorrect recursive/nonrecursive snapshot scope")
 	}
 	old := root + "@" + first.Name()
@@ -123,7 +140,7 @@ func TestGuestLifecycle(t *testing.T) {
 	if _, err := service.Prune(t.Context(), root, effective, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := direct.InheritProperty(t.Context(), root, LineageProperty); err != nil {
+	if err := direct.InheritProperty(t.Context(), root, lifecycle.LineageProperty); err != nil {
 		t.Fatal(err)
 	}
 	adopted, err := service.AdoptDataset(t.Context(), root, effective)
@@ -134,7 +151,7 @@ func TestGuestLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshotsIn(state, root)) != 1 || len(snapshotsIn(state, root+"/child")) != 1 {
+	if len(lifecycle.Snapshots(state, root)) != 1 || len(lifecycle.Snapshots(state, root+"/child")) != 1 {
 		t.Fatal("pruning changed a descendant snapshot")
 	}
 	ref, err = service.Protect(t.Context(), root, root+"@"+second.Name(), "local:disposable-target")
@@ -146,11 +163,11 @@ func TestGuestLifecycle(t *testing.T) {
 	}
 	// No transfer has run against this synthetic target; the test knows it has
 	// no active work or resume dependency. Production callers must probe targets.
-	cleanPreview, err := service.Clean(t.Context(), root, CleanOptions{Recursive: true}, false, testCleanSafety{})
+	cleanPreview, err := service.Clean(t.Context(), root, lifecycle.CleanOptions{Recursive: true}, false, cleanSafety{})
 	if err != nil || len(cleanPreview.Blockers) > 0 {
 		t.Fatalf("clean preview=%v err=%v", cleanPreview, err)
 	}
-	applied, err := service.Clean(t.Context(), root, CleanOptions{Recursive: true}, true, testCleanSafety{})
+	applied, err := service.Clean(t.Context(), root, lifecycle.CleanOptions{Recursive: true}, true, cleanSafety{})
 	if err != nil || applied.Applied != len(cleanPreview.Actions) {
 		t.Fatalf("clean apply=%v err=%v", applied, err)
 	}
@@ -158,7 +175,7 @@ func TestGuestLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(state.Properties) != 0 || len(snapshotsIn(state, root)) != 1 || len(snapshotsIn(state, root+"/child")) != 1 {
+	if len(state.Properties) != 0 || len(lifecycle.Snapshots(state, root)) != 1 || len(lifecycle.Snapshots(state, root+"/child")) != 1 {
 		t.Fatal("clean did not preserve snapshots and clear metadata")
 	}
 	if binary := os.Getenv("BOOMERANGZ_LIFECYCLE_GUEST_CLI"); binary != "" {
@@ -166,10 +183,10 @@ func TestGuestLifecycle(t *testing.T) {
 		command("zfs", "create", "-u", cliRoot)
 		command("zfs", "set", policy.Namespace+"enabled=on", cliRoot)
 		command("zfs", "snapshot", cliRoot+"@foreign")
-		if _, err := service.CreateSnapshot(t.Context(), cliRoot, false, time.Now(), activeTestPolicy(cliRoot)); err != nil {
+		if _, err := service.CreateSnapshot(t.Context(), cliRoot, false, time.Now(), activePolicy(cliRoot)); err != nil {
 			t.Fatal(err)
 		}
-		if err := direct.InheritProperty(t.Context(), cliRoot, LineageProperty); err != nil {
+		if err := direct.InheritProperty(t.Context(), cliRoot, lifecycle.LineageProperty); err != nil {
 			t.Fatal(err)
 		}
 		configPath := os.Getenv("BOOMERANGZ_LIFECYCLE_GUEST_CONFIG")
@@ -181,7 +198,7 @@ func TestGuestLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		remaining := snapshotsIn(state, cliRoot)
+		remaining := lifecycle.Snapshots(state, cliRoot)
 		if len(remaining) != 1 || remaining[0].Name != cliRoot+"@foreign" || len(state.Properties) != 0 {
 			t.Fatal("CLI clean failed to delete owned snapshot or preserve foreign snapshot")
 		}

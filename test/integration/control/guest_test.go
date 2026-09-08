@@ -1,11 +1,13 @@
 //go:build integration
 
-package cli
+package control_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -28,11 +30,16 @@ func TestGuestDaemonControl(t *testing.T) {
 	if binary == "" || configPath == "" {
 		t.Fatal("guest boomerangz executable and configuration paths are required")
 	}
-	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, "/dev/vdb")
+	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
+	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
+	if sourceDevice == "" || destinationDevice == "" {
+		t.Fatal("source and destination test devices are required")
+	}
+	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, "/dev/vdc"); err != nil {
+	if _, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, destinationDevice); err != nil {
 		t.Fatal(err)
 	}
 	direct, err := zfs.NewDirect("zfs")
@@ -99,6 +106,25 @@ func TestGuestDaemonControl(t *testing.T) {
 		initialSnapshots = len(lifecycle.Snapshots(state, source))
 		return initialSnapshots > 0
 	})
+	waitFor("completed initial snapshot job", func() bool {
+		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
+		if statusErr != nil {
+			return false
+		}
+		type jobStatus struct {
+			Job   string `json:"job"`
+			State string `json:"state"`
+		}
+		var status struct {
+			Jobs []jobStatus `json:"jobs"`
+		}
+		if json.Unmarshal(output, &status) != nil {
+			return false
+		}
+		return slices.ContainsFunc(status.Jobs, func(job jobStatus) bool {
+			return job.Job == "snapshot:"+source && job.State == "succeeded"
+		})
+	})
 	trigger := command(binary, "trigger", "--config", configPath, source)
 	if !strings.Contains(trigger, source) {
 		t.Fatalf("trigger response did not accept %s: %s", source, trigger)
@@ -132,11 +158,16 @@ func TestGuestDaemonAbruptRestart(t *testing.T) {
 	if binary == "" || configPath == "" || socket == "" {
 		t.Fatal("guest boomerangz executable, configuration, and socket paths are required")
 	}
-	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, "/dev/vdb")
+	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
+	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
+	if sourceDevice == "" || destinationDevice == "" {
+		t.Fatal("source and destination test devices are required")
+	}
+	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, "/dev/vdc"); err != nil {
+	if _, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, destinationDevice); err != nil {
 		t.Fatal(err)
 	}
 	direct, err := zfs.NewDirect("zfs")

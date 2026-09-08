@@ -23,7 +23,7 @@ func VerifyGuestPool(ctx context.Context, runID string, role DiskRole, device st
 	}
 	version, err := os.ReadFile("/run/boomerangz-vmtest/bootstrap-version")
 	if err != nil || strings.TrimSpace(string(version)) != guestBootstrapVersion {
-		return "", fmt.Errorf("guest bootstrap version mismatch; refresh the reusable base image")
+		return "", fmt.Errorf("guest bootstrap version mismatch; refresh the integration harness")
 	}
 	query := func(name string, args ...string) (string, error) {
 		out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()

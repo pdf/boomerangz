@@ -1,6 +1,6 @@
 //go:build integration
 
-package daemon
+package daemon_test
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/daemon"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/testutil/zfstest"
@@ -26,11 +27,16 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 	if runID == "" {
 		t.Skip("disposable guest only")
 	}
-	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, "/dev/vdb")
+	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
+	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
+	if sourceDevice == "" || destinationDevice == "" {
+		t.Fatal("source and destination test devices are required")
+	}
+	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, "/dev/vdc"); err != nil {
+	if _, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, destinationDevice); err != nil {
 		t.Fatal(err)
 	}
 	command := func(args ...string) {
@@ -51,7 +57,7 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 	cfg.Daemon.InactiveGracePeriod.Duration = 2 * time.Second
 	cfg.Daemon.ManagementWorkers = 2
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	runtime, err := New(cfg, direct, "abcdefab-cdef-4abc-8def-abcdefabcdef", logger)
+	runtime, err := daemon.New(cfg, direct, "abcdefab-cdef-4abc-8def-abcdefabcdef", logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +137,11 @@ func TestGuestRemoteOutageReconnection(t *testing.T) {
 	if remoteEndpoint == "ssh-shell" && remoteCLI == "" {
 		t.Fatal("remote boomerangz executable is required for SSH-shell")
 	}
-	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, "/dev/vdb")
+	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
+	if sourceDevice == "" {
+		t.Fatal("source test device is required")
+	}
+	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,36 +167,28 @@ func TestGuestRemoteOutageReconnection(t *testing.T) {
 		ConnectTimeout: config.Duration{Duration: 10 * time.Second},
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	runtime, err := New(cfg, direct, "abcdefab-cdef-4abc-8def-abcdefabcdef", logger)
+	runtime, err := daemon.New(cfg, direct, "abcdefab-cdef-4abc-8def-abcdefabcdef", logger)
 	if err != nil {
 		t.Fatal(err)
-	}
-	events := make(chan Event, 256)
-	record := runtime.remote.report
-	runtime.remote.report = func(event Event) {
-		record(event)
-		events <- event
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
 	remoteJob := "remote:" + source + ":home"
-	waitForEvent := func(state string, timeout time.Duration) Event {
+	waitForEvent := func(state string, timeout time.Duration) daemon.Event {
 		t.Helper()
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
-		for {
-			select {
-			case event := <-events:
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			for _, event := range runtime.Status() {
 				if event.Job == remoteJob && event.State == state {
 					return event
 				}
-			case <-timer.C:
-				t.Fatalf("timed out waiting for remote state %q: %+v", state, runtime.status.Snapshot())
-				return Event{}
 			}
+			time.Sleep(100 * time.Millisecond)
 		}
+		t.Fatalf("timed out waiting for remote state %q: %+v", state, runtime.Status())
+		return daemon.Event{}
 	}
 	failure := waitForEvent("waiting-retry", 30*time.Second)
 	if failure.Reason == "" {
@@ -207,7 +209,7 @@ func TestGuestRemoteOutageReconnection(t *testing.T) {
 			}
 		}
 		if time.Now().After(initialDeadline) {
-			t.Fatalf("timed out waiting for the initial pending snapshot hold: %+v", runtime.status.Snapshot())
+			t.Fatalf("timed out waiting for the initial pending snapshot hold: %+v", runtime.Status())
 		}
 		if initialName == "" {
 			time.Sleep(100 * time.Millisecond)
@@ -227,7 +229,7 @@ func TestGuestRemoteOutageReconnection(t *testing.T) {
 			}
 		}
 		if time.Now().After(coalesceDeadline) {
-			t.Fatalf("timed out waiting for a newer coalesced snapshot hold: %+v", runtime.status.Snapshot())
+			t.Fatalf("timed out waiting for a newer coalesced snapshot hold: %+v", runtime.Status())
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

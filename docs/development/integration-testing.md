@@ -2,17 +2,17 @@
 
 No development-host test may execute `zfs` or `zpool`. Unit tests inject a fake
 runner beneath the direct executor. Real operations run only inside disposable
-libvirt/QEMU guests.
+QEMU guests.
 
-Real-ZFS tests remain next to the packages they exercise, but every such file
-uses the `integration` build tag. Ordinary `go test ./...` runs therefore do not
-compile or execute guest-only test code. Build a package's guest test binary
-explicitly with `go test -tags=integration -c ./internal/<package>` and run that
-binary only inside a guarded disposable guest with the documented environment.
+Real-ZFS and installed-system tests live under `test/integration`, separate from
+the application packages. Every Go guest suite uses the `integration` build
+tag, so ordinary `go test ./...` does not compile or execute guest-only code.
+The host harness builds static test binaries and runs them only inside its
+guarded disposable guest.
 
-The first integration spike must run in a CachyOS guest with two virtual scratch
-disks and must record the guest's kernel, `zfs-utils`, and ZFS module versions.
-It will test an unprivileged account delegated only the candidate permissions
+The initial target runs in a CachyOS guest with two virtual scratch disks and
+records the guest's kernel, `zfs-utils`, and ZFS module versions. It tests an
+unprivileged account delegated only the candidate permissions
 against source and destination roots. The matrix is defined in section 2.1 of
 `PLAN.md` and includes snapshots, bookmarks, holds, full/incremental/recursive
 sends, resumable receives with `-u`, and receive property changes.
@@ -26,79 +26,96 @@ Before any destructive guest command, the in-guest harness must verify all of:
    source or destination serial derived from that UUID. Serials use a short
    hash because virtio exposes at most 20 bytes.
 
-A missing or mismatched check aborts without cleanup. The host harness uses
-`qemu:///session`, transient domains, read-only base images, copy-on-write
-overlays, QEMU user networking, and per-run sockets and logs. It must not call
-host `zfs` or `zpool`, modify host services, or create persistent libvirt state.
+A missing or mismatched check aborts without destructive cleanup. The generic
+host harness uses direct KVM-backed QEMU, read-only checksum-pinned base images,
+copy-on-write overlays, QEMU user networking, and per-run keys and logs. It must
+not call host `zfs` or `zpool`, modify host services, or create persistent
+virtualization state.
 
-## Host prerequisites
+## Running the canonical harness
 
-The current Arch-family package set is:
+There are two deliberately different integration-test operations:
+
+```sh
+make integration-test-compile
+make integration-test
+```
+
+`integration-test-compile` compiles the integration-only Go packages and runs
+no tests. The `integration` build tag only makes the guest-side tests available
+to the Go tool; it does not authorize them to operate on the development host.
+Running `go test -tags=integration ./test/integration/...` directly therefore
+reports those guarded tests as skipped when their guest environment variables
+are absent. This protects the host, but it is not a successful real-ZFS test
+run.
+
+`integration-test` is the real suite. It creates the guarded disposable guest
+and invokes the test binaries there. The default target is `cachyos`; select a
+different supported matrix adapter with, for example,
+`make integration-test INTEGRATION_TARGET=<target>`.
+
+GitHub Actions installs these Ubuntu runner packages:
 
 ```text
-qemu-desktop qemu-img libvirt virt-install passt edk2-ovmf openssh
+cloud-image-utils openssh-client qemu-system-x86 qemu-utils
 ```
 
-The user must have read/write access to `/dev/kvm`, and `qemu:///session` must be
-available. `swtpm` is not required because this matrix does not use a virtual TPM.
+The host must have read/write access to `/dev/kvm`. `libvirt`, `passt`, and a
+virtual TPM are not required.
 
-Run the non-destructive prerequisite check with an installed qcow2 base image,
-an existing artifact directory, and an unused loopback port:
+The workflow names a target adapter. The same command runs locally on a Linux
+host with the required tools and KVM access:
 
 ```sh
-go run ./cmd/boomerangz-vmtest preflight \
-  --base-image /storage/vm/base/cachyos.qcow2 \
-  --work-dir /storage/vm/boomerangz-runs \
-  --ssh-port 22022
+make integration-test
 ```
 
-`prepare` performs the same checks, creates a uniquely named qcow2 system
-overlay, and creates separate source and destination scratch disks. The base
-image cannot reside under the artifact directory, preventing later run cleanup
-from making it a possible target.
+The Make target and GitHub Actions both invoke the underlying harness at
+`test/integration/host/run.sh`.
 
-```sh
-go run ./cmd/boomerangz-vmtest prepare \
-  --base-image /storage/vm/base/cachyos.qcow2 \
-  --work-dir /storage/vm/boomerangz-runs \
-  --ssh-port 22022
-```
+The generic host layer validates the target name and required adapter fields,
+verifies the base image, creates per-run overlays and scratch disks, boots QEMU,
+and handles SSH and diagnostics. Files under `test/integration/targets/<name>`
+own target-specific image preparation, seed data, provisioning, device names,
+and installed-system assertions. Adding another operating system does not add
+its package manager or service manager to the generic layer.
 
-`launch` additionally starts a transient domain with `passt` forwarding the
-chosen loopback port to guest SSH. Its VNC listener is restricted to loopback,
-and a QEMU guest-agent channel is available for base-image maintenance. It does
-not yet enter the guest or run ZFS commands automatically.
+Local runs use `/tmp` by default and are intentionally disposable. Set
+`RUNNER_TEMP` to a dedicated durable scratch directory if diagnostics must
+survive a reboot.
 
-The root-owned `guest-bootstrap.sh` asset implements the only passwordless
-guest elevation. It independently checks the run marker, exact pool prefix,
-whole-disk identity, virtio serials, and pool vdev parents before creating or
-destroying pools. `guest-matrix.sh` repeats the marker, name, vdev, and serial
-checks before exercising delegated ZFS operations. The sudo policy permits the
-`boomerangz` account to invoke only the guarded bootstrap asset.
+The `bootstrap.sh` asset independently checks the run marker, exact pool prefix,
+whole-disk identity, virtual-disk serials, and pool vdev parents before creating
+or destroying pools. `delegated-matrix.sh` repeats the marker, name, vdev, and
+serial checks before exercising delegated ZFS operations. Target provisioning
+may require guest root access, but all Boomerangz and delegated-ZFS assertions
+run as the unprivileged test account. Destructive pool setup and teardown go
+only through the guarded bootstrap.
 
-## Base-image contract
+## Target adapter contract
 
-The reusable base image remains read-only and must contain:
+Each target adapter supplies a versioned, checksum-pinned base image and the
+logic needed to prepare it. Before the target suite runs, its guest must have:
 
-- an installed CachyOS system using a kernel with matching ZFS modules;
-- `zfs-utils`, OpenSSH, and a non-root test account reachable by key;
-- passwordless elevation limited to the guest bootstrap operations needed to
-  create the disposable test pools and delegated account;
+- its target operating system, OpenZFS implementation, and matching kernel
+  components;
+- the target's ZFS tools, SSH service, and a non-root test account reachable
+  only through the generated test key;
 - no existing pools backed by the two harness scratch-disk serial prefixes;
-- a stable boot configuration compatible with virtio disks, a serial console,
-  and the loopback-only diagnostic display.
+- a boot and device configuration matching the adapter's declared QEMU and
+  guest-device settings.
 
-The current harness deliberately stops before automating base-image installation
-and SSH orchestration. The initial CachyOS base and delegated-operation spike
-have been built and verified manually; the exact result is recorded in
-`integration-spike-cachyos-260809.md`. No host ZFS command is introduced by the
-bootstrap or matrix paths.
+The CachyOS adapter starts from a pinned official Arch cloud image, provisions
+the CachyOS repositories and matching LTS kernel/OpenZFS module entirely inside
+the guest, and reboots before testing. Other targets may use different image,
+boot, package, device, and service conventions without changing the generic
+host lifecycle. No host ZFS command is introduced by any adapter.
 
 ## Lifecycle integration
 
-`internal/lifecycle/guest_test.go` is integration-only. Build it on the host with
-`go test -tags=integration -c ./internal/lifecycle`, copy the binary into the
-disposable guest, and run there with `BOOMERANGZ_LIFECYCLE_GUEST_RUN` matching the
+`test/integration/lifecycle/guest_test.go` is integration-only. The harness
+builds it on the host, copies the binary into the disposable guest, and runs it
+with `BOOMERANGZ_LIFECYCLE_GUEST_RUN` matching the
 guarded run marker. It verifies source disk serial and actual pool vdevs before
 creating uniquely named fixtures beneath the source pool's `data` subtree. The
 guest account additionally needs delegated `create` for these fixture datasets.

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/discovery"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
@@ -78,6 +79,34 @@ func TestRuntimeGracefulShutdownWithoutPolicies(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("daemon did not shut down")
+	}
+}
+
+func TestScheduledSnapshotRetriesWhenActivationGateIsNotReady(t *testing.T) {
+	t.Parallel()
+	cfg := config.Defaults()
+	cfg.Daemon.ReconcileInterval.Duration = 10 * time.Millisecond
+	scheduler := NewScheduler()
+	entry := scheduledEntry(t, "tank/data", "1x5m")
+	if _, _, err := scheduler.Update([]discovery.Entry{entry}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	schedule, ok := scheduler.Next(t.Context())
+	if !ok {
+		t.Fatal("initial schedule was not due")
+	}
+	runtime := &Runtime{config: cfg, gate: &lifecycle.Gate{}, scheduler: scheduler, now: time.Now}
+	if runtime.enqueueSnapshot(schedule) {
+		t.Fatal("disabled activation gate accepted snapshot work")
+	}
+	if err := runtime.gate.SetEnabled(entry.Dataset.Name, true); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	retry, ok := scheduler.Next(ctx)
+	if !ok || retry.Dataset != entry.Dataset.Name {
+		t.Fatalf("schedule was not retried after activation: %#v", retry)
 	}
 }
 

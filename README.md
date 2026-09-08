@@ -55,15 +55,19 @@ go tool golangci-lint run
 Real `zfs` and `zpool` commands must only be run by the integration harness in
 a disposable virtual machine. Development-host tests use fake command runners.
 
-The VM harness can check prerequisites, create isolated copy-on-write disks,
-and launch a transient guest:
+The canonical harness verifies a target image, creates isolated copy-on-write
+disks, provisions a disposable guest, and runs the real-ZFS suites:
 
 ```sh
-go run ./cmd/boomerangz-vmtest preflight \
-  --base-image /absolute/path/cachyos-base.qcow2 \
-  --work-dir /absolute/path/vm-runs \
-  --ssh-port 22022
+make integration-test
 ```
+
+This is not equivalent to running `go test` with the `integration` build tag:
+the tagged Go packages contain guest-side tests which remain guarded against
+execution on the development host. Use `make integration-test-compile` to
+compile that code without provisioning a guest. Use `make integration-test`
+to execute the real scenarios; it invokes `test/integration/host/run.sh` with
+the `cachyos` target by default.
 
 See [PLAN.md](PLAN.md) for the architecture and [docs/configuration.md](docs/configuration.md)
 for the configuration reference. Developer-only implementation and test notes

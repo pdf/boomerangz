@@ -217,6 +217,13 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 	schedulable := slices.DeleteFunc(slices.Clone(entries), func(entry discovery.Entry) bool {
 		return !actionableRoot(entry, r.installation)
 	})
+	// Enable lifecycle admission before Update publishes immediately due work
+	// to the scheduler loop. Queue failures remain retryable as a backstop.
+	for _, entry := range schedulable {
+		if isSchedulable(entry) {
+			_ = r.gate.SetEnabled(entry.Dataset.Name, true)
+		}
+	}
 	active, _, err := r.scheduler.Update(schedulable, now)
 	if err != nil {
 		r.logger.Error("update snapshot schedules", "error", err)
@@ -257,9 +264,6 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 	}
 	r.mu.Unlock()
 	for _, name := range active {
-		if !previousActive[name] {
-			_ = r.gate.SetEnabled(name, true)
-		}
 		if changed[name] {
 			r.enqueueInactive(name, true)
 		}
@@ -373,6 +377,9 @@ func (r *Runtime) enqueueRetirement(dataset string) {
 func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 	ticket, err := r.gate.Queue(context.Background(), schedule.Dataset, lifecycle.Management)
 	if err != nil {
+		if !schedule.Force {
+			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.config.Daemon.ReconcileInterval.Duration))
+		}
 		return false
 	}
 	dropped := func() {

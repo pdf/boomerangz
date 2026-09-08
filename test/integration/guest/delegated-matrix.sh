@@ -9,8 +9,10 @@ fail() {
 
 [[ $# -eq 3 ]] || fail "usage: $0 RUN_ID SOURCE_DISK DESTINATION_DISK"
 readonly run_id=$1
-readonly source_disk=$(readlink -f -- "$2")
-readonly destination_disk=$(readlink -f -- "$3")
+source_disk=$(readlink -f -- "$2")
+readonly source_disk
+destination_disk=$(readlink -f -- "$3")
+readonly destination_disk
 readonly marker_path=/run/boomerangz-vmtest/guest-marker
 readonly version_path=/run/boomerangz-vmtest/bootstrap-version
 readonly bootstrap_version=2

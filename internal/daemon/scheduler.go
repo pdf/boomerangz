@@ -51,6 +51,13 @@ func (s *Scheduler) signal() {
 	s.wake = make(chan struct{})
 }
 
+func isSchedulable(entry discovery.Entry) bool {
+	if entry.CoveredBy != "" || !entry.Inspected || !entry.Policy.Enabled || !entry.Policy.Valid() {
+		return false
+	}
+	return lifecycle.ActiveRoot(entry.Policy, entry.Dataset.Name) == nil && entry.Policy.Grid.Cadence() > 0
+}
+
 // Update atomically replaces schedulable roots from a complete generation.
 // Existing deadlines survive policy generations when cadence is unchanged.
 func (s *Scheduler) Update(entries []discovery.Entry, now time.Time) (active, removed []string, err error) {
@@ -59,16 +66,10 @@ func (s *Scheduler) Update(entries []discovery.Entry, now time.Time) (active, re
 	}
 	next := make(map[string]deadline)
 	for _, entry := range entries {
-		if entry.CoveredBy != "" || !entry.Inspected || !entry.Policy.Enabled || !entry.Policy.Valid() {
-			continue
-		}
-		if lifecycle.ActiveRoot(entry.Policy, entry.Dataset.Name) != nil {
+		if !isSchedulable(entry) {
 			continue
 		}
 		cadence := entry.Policy.Grid.Cadence()
-		if cadence <= 0 {
-			continue
-		}
 		item := deadline{policy: entry.Policy.Clone(), cadence: cadence, next: now.UTC()}
 		if previous, exists := s.entry(entry.Dataset.Name); exists && previous.cadence == cadence {
 			item.next, item.pending = previous.next, previous.pending

@@ -1,6 +1,6 @@
 //go:build integration
 
-package transfer
+package transfer_test
 
 import (
 	"context"
@@ -21,6 +21,7 @@ import (
 	replicationnative "github.com/pdf/boomerangz/internal/replication/native"
 	replicationssh "github.com/pdf/boomerangz/internal/replication/ssh"
 	"github.com/pdf/boomerangz/internal/testutil/zfstest"
+	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
@@ -34,11 +35,16 @@ func TestGuestSSHTransfer(t *testing.T) {
 	if key == "" || shellPath == "" || !filepath.IsAbs(key) || !filepath.IsAbs(shellPath) {
 		t.Fatal("guest SSH key and boomerangz executable paths are required")
 	}
-	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, "/dev/vdb")
+	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
+	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
+	if sourceDevice == "" || destinationDevice == "" {
+		t.Fatal("source and destination test devices are required")
+	}
+	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
-	destinationPool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, "/dev/vdc")
+	destinationPool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, destinationDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +103,7 @@ func TestGuestSSHTransfer(t *testing.T) {
 		bytes uint64
 	}
 	const sampleCount = 3
-	run := func(mode, root string) (Result, measurement) {
+	run := func(mode, root string) (transfer.Result, measurement) {
 		t.Helper()
 		totalStarted := time.Now()
 		client, clientErr := replicationssh.New("ssh", replicationssh.Config{Host: "127.0.0.1", Port: 22, User: user, Root: root, IdentityFile: key, ShellPath: shellPath, ConnectTimeout: 5 * time.Second})
@@ -110,8 +116,8 @@ func TestGuestSSHTransfer(t *testing.T) {
 		if endpointErr != nil {
 			t.Fatal(endpointErr)
 		}
-		request := Request{Source: source, DestinationRoot: root, Snapshot: source + "@" + metadata.Name(), Policy: effective, Transport: "ssh", RemoteName: "home", CanonicalTarget: client.CanonicalTarget()}
-		engine, engineErr := NewRemote(direct, endpoint.Executor, endpoint.Stream, installation)
+		request := transfer.Request{Source: source, DestinationRoot: root, Snapshot: source + "@" + metadata.Name(), Policy: effective, Transport: "ssh", RemoteName: "home", CanonicalTarget: client.CanonicalTarget()}
+		engine, engineErr := transfer.NewRemote(direct, endpoint.Executor, endpoint.Stream, installation)
 		if engineErr != nil {
 			t.Fatal(engineErr)
 		}
@@ -186,8 +192,8 @@ func TestGuestSSHTransfer(t *testing.T) {
 		if openErr != nil {
 			t.Fatal(openErr)
 		}
-		nativeRequest := Request{Source: source, DestinationRoot: nativeRoot, Snapshot: source + "@" + metadata.Name(), Policy: effective, Transport: "native", RemoteName: "home", CanonicalTarget: nativeEndpoint.CanonicalTarget()}
-		nativeEngine, engineErr := NewRemote(direct, nativeEndpoint.Executor(), nativeEndpoint.Stream(), installation)
+		nativeRequest := transfer.Request{Source: source, DestinationRoot: nativeRoot, Snapshot: source + "@" + metadata.Name(), Policy: effective, Transport: "native", RemoteName: "home", CanonicalTarget: nativeEndpoint.CanonicalTarget()}
+		nativeEngine, engineErr := transfer.NewRemote(direct, nativeEndpoint.Executor(), nativeEndpoint.Stream(), installation)
 		if engineErr != nil {
 			t.Fatal(engineErr)
 		}

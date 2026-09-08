@@ -1044,9 +1044,11 @@ pre-created empty. Interfaces belong at consumer boundaries, especially around
 the ZFS command runner, clocks, remote transports, and filesystem/process
 integration.
 
-Integration tests remain colocated with relevant packages under an `integration`
-build tag. Shared disposable-pool helpers live in
-`internal/testutil/zfstest`; no separate top-level integration tree is needed.
+Real-ZFS and installed-system tests live under `test/integration`, separate
+from application packages. Shared disposable-pool guards live in
+`internal/testutil/zfstest` so the destructive boundary remains small and unit
+tested. The guest suites use an `integration` build tag and ordinary
+`go test ./...` does not compile or execute them.
 
 ## 13. Toolchain, CI, and quality
 
@@ -1077,44 +1079,44 @@ working tree changes.
 
 The ordinary checks above run on every supported development host without real
 ZFS access. A separate GitHub Actions workflow owns the supported-platform
-integration matrix, but the workflow is not assumed to be capable of running
-the current local VM harness unchanged. Phase 10 begins with a runner
-feasibility spike covering KVM availability, unprivileged session libvirt,
-networking, storage, runtime, and safe lifecycle cleanup.
+integration matrix. The Phase 10 feasibility spike proved usable KVM, direct
+QEMU lifecycle, deterministic user networking, dedicated SSH access, multiple
+scratch disks, and post-shutdown image inspection on the standard
+`ubuntu-24.04` runner. Direct QEMU is therefore the canonical launch path; the
+earlier session-libvirt harness is not carried forward.
 
-CI integration and end-to-end jobs must use only standard GitHub-hosted runners
+CI integration and end-to-end jobs use only standard GitHub-hosted runners
 available without charge to public repositories. Self-hosted and paid larger
-runners are not supported fallbacks. The feasibility spike determines whether
-those runners can use KVM reliably; if they cannot, adapt the launch path to
-software-only QEMU and retain it only if the complete matrix meets the standard
-runner's runtime and reliability limits. Failure of both approaches blocks CI
-matrix completion rather than silently moving it to paid or privately operated
-infrastructure.
+runners are not supported fallbacks. A future runner regression may use a
+suitably reduced software-QEMU path only after its complete matrix is shown to
+meet the standard runner's runtime and reliability limits; otherwise it blocks
+the affected target rather than silently moving it to paid or privately
+operated infrastructure.
 
-The CI adaptation must automate acquisition or reproducible construction of a
+The CI harness must automate acquisition or reproducible construction of a
 versioned, checksum-verified, read-only guest base image; remove assumptions
 about developer-local paths and libvirt storage pools; provision unique
 per-job overlays, scratch disks, networking, and dedicated test SSH keys; and
-always collect diagnostics before guarded teardown. It may use direct QEMU
-instead of libvirt, reduce guest and sparse-disk sizing, and shard single-guest
-and two-guest scenarios as necessary to fit the documented standard-runner and
-free cache/artifact limits.
+always collect diagnostics before guarded teardown. A generic host layer owns
+only virtualization lifecycle and artifacts. Per-target adapters own image
+preparation, provisioning, guest device names, dependency installation, and
+installed-system assertions. This keeps CachyOS as the first target rather than
+making Arch-family or Linux conventions part of the harness contract.
 
-If satisfying those constraints requires a substantially different harness,
-the CI-compatible implementation becomes the canonical harness and the local
-integration workflow follows it. Do not retain a separate local architecture
-or force developer-machine assumptions into GitHub Actions merely to preserve
-the current implementation. A replacement local workflow is acceptable only
-when it provides equivalent or stronger isolation from the host: real ZFS
-commands and destructive storage operations remain confined to disposable
+The CI-compatible implementation is the canonical harness and the optional
+local integration workflow follows it. Do not retain a separate local
+architecture or force developer-machine assumptions into GitHub Actions. A
+local workflow is acceptable only when it provides equivalent or stronger
+isolation from the host: real ZFS commands and destructive storage operations
+remain confined to disposable
 guests, per-run storage and networking cannot overlap unrelated resources, and
 cleanup remains guarded by positive guest, pool, and virtual-disk identity
 checks. Local-only conveniences may wrap the canonical harness but must not
 define a different test path. CI jobs use only ephemeral credentials and
 writable state created for that job.
 
-The initial matrix contains only the Arch-family target exercised with CachyOS
-and OpenZFS. Its dimensions and reusable workflow interface must allow later
+The initial matrix contains only the CachyOS target with OpenZFS. Its dimensions
+and reusable workflow interface must allow later
 entries for other Linux distributions and other operating systems supported by
 OpenZFS without treating non-OpenZFS ZFS implementations as compatible targets.
 Integration jobs run the integration-tagged real-ZFS tests and installed-system
@@ -1144,7 +1146,7 @@ Command execution tests use helper processes rather than shell scripts wherever
 practical.
 
 All tests that execute real `zfs` or `zpool` commands run inside disposable
-libvirt/QEMU/KVM guests. The host-side harness may perform read-only prerequisite
+QEMU/KVM guests. The host-side harness may perform read-only prerequisite
 checks and create ordinary user-owned VM images, overlays, sockets, logs, and
 test artifacts. It must not:
 
@@ -1152,16 +1154,16 @@ test artifacts. It must not:
 - load or unload host kernel modules;
 - install or remove host packages;
 - alter host services, users, groups, capabilities, mounts, or firewall rules;
-- create persistent system or session libvirt domains, networks, storage pools,
-  or secrets;
+- create persistent virtualization domains, networks, storage pools, or
+  secrets;
 - pass the host's `/dev/zfs`, ZFS block devices, or existing pools into a
   guest.
 
-Prefer transient domains on `qemu:///session`, copy-on-write overlays backed by
-a read-only CachyOS base image, QEMU user-mode networking, and dedicated virtual
-scratch disks. Every run receives unique names and identifiers. Guest shutdown
-deletes the overlays and scratch disks while leaving the reusable base image
-unchanged.
+Use direct KVM-backed QEMU, copy-on-write overlays backed by a target adapter's
+read-only verified base image, user-mode networking, and dedicated virtual
+scratch disks. Every run receives unique names and identifiers. CI discards its
+ephemeral runner after the job; local artifacts remain within the explicitly
+selected per-run directory for inspection without changing the base image.
 
 The in-guest harness creates disposable pools only on virtual disks carrying
 expected test serial numbers. Before any destructive command it verifies a

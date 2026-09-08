@@ -1,6 +1,6 @@
 //go:build integration
 
-package transfer
+package transfer_test
 
 import (
 	"context"
@@ -16,6 +16,7 @@ import (
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/testutil/zfstest"
+	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
@@ -83,11 +84,16 @@ func TestGuestLocalTransfer(t *testing.T) {
 	if runID == "" {
 		t.Skip("disposable guest only")
 	}
-	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, "/dev/vdb")
+	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
+	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
+	if sourceDevice == "" || destinationDevice == "" {
+		t.Fatal("source and destination test devices are required")
+	}
+	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
-	destinationPool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, "/dev/vdc")
+	destinationPool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, destinationDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,20 +108,20 @@ func TestGuestLocalTransfer(t *testing.T) {
 	direct, _ := zfs.NewDirect("zfs")
 	stream, _ := zfs.NewLocalStream("zfs")
 	const installation = "abcdefab-cdef-4abc-8def-abcdefabcdef"
-	engine, _ := NewLocal(direct, stream, installation)
+	engine, _ := transfer.NewLocal(direct, stream, installation)
 	snapshots, _ := lifecycle.NewService(direct, installation)
 	source := sourcePool + "/data/payload"
 	suffix := time.Now().UTC().Format("150405")
 	latest := destinationPool + "/data/latest-" + suffix
 	all := destinationPool + "/data/all-" + suffix
 	command("set", policy.Namespace+"enabled=on", policy.Namespace+"local="+latest+","+all, source)
-	request := func(root, snapshot string) Request {
+	request := func(root, snapshot string) transfer.Request {
 		t.Helper()
 		rows, err := direct.GetStoredProperties(t.Context(), []string{source})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return Request{Source: source, DestinationRoot: root, Snapshot: snapshot, Policy: policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, nil)}
+		return transfer.Request{Source: source, DestinationRoot: root, Snapshot: snapshot, Policy: policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, nil)}
 	}
 	now := time.Now().UTC()
 	first, err := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-4*time.Hour), request(latest, "").Policy)
@@ -216,7 +222,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 		if _, err := snapshots.CreateSnapshot(t.Context(), tree, true, now, treePolicy); err != nil {
 			t.Fatal(err)
 		}
-		req := Request{Source: tree, DestinationRoot: destinationPool + "/data", Policy: treePolicy}
+		req := transfer.Request{Source: tree, DestinationRoot: destinationPool + "/data", Policy: treePolicy}
 		result, err := engine.Apply(t.Context(), req, nil)
 		if err != nil || !result.Verified {
 			t.Fatalf("recursive %s=%+v err=%v", discard, result, err)
@@ -244,11 +250,16 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 	if runID == "" {
 		t.Skip("disposable guest only")
 	}
-	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, "/dev/vdb")
+	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
+	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
+	if sourceDevice == "" || destinationDevice == "" {
+		t.Fatal("source and destination test devices are required")
+	}
+	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
-	destinationPool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, "/dev/vdc")
+	destinationPool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, destinationDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,8 +293,8 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := Request{Source: source, DestinationRoot: destination, Snapshot: source + "@" + metadata.Name(), Policy: effective}
-	interrupted, err := NewLocal(direct, interruptedReceiveStream{}, installation)
+	request := transfer.Request{Source: source, DestinationRoot: destination, Snapshot: source + "@" + metadata.Name(), Policy: effective}
+	interrupted, err := transfer.NewLocal(direct, interruptedReceiveStream{}, installation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +314,7 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := NewLocal(direct, stream, installation)
+	restarted, err := transfer.NewLocal(direct, stream, installation)
 	if err != nil {
 		t.Fatal(err)
 	}
