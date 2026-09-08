@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -36,9 +37,11 @@ type Config struct {
 
 // Client owns one authenticated SSH endpoint and its typed remote executor.
 type Client struct {
-	config  Config
-	command zfs.CommandFactory
-	exec    zfs.Executor
+	config      Config
+	command     zfs.CommandFactory
+	exec        zfs.Executor
+	controlPath string
+	controlDir  string
 }
 
 // UnavailableError identifies a connection-level failure suitable for bounded
@@ -143,7 +146,10 @@ func (c *Client) Probe(ctx context.Context) ([]zfs.Dataset, error) {
 }
 
 func (c *Client) sshArguments(remoteCommand string) []string {
-	args := []string{"-T", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes", "-o", "StrictHostKeyChecking=yes"}
+	args := []string{"-T", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no", "-o", "StrictHostKeyChecking=yes"}
+	if c.controlPath != "" {
+		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "-o", "ControlPath="+c.controlPath)
+	}
 	seconds := int((c.connectTimeout() + time.Second - 1) / time.Second)
 	args = append(args, "-o", "ConnectTimeout="+strconv.Itoa(seconds))
 	if c.config.Port != 0 {
@@ -156,7 +162,58 @@ func (c *Client) sshArguments(remoteCommand string) []string {
 	if c.config.User != "" {
 		destination = c.config.User + "@" + destination
 	}
-	return append(args, "--", destination, remoteCommand)
+	args = append(args, "--", destination)
+	if remoteCommand != "" {
+		args = append(args, remoteCommand)
+	}
+	return args
+}
+
+// multiplexed returns an endpoint-scoped client whose OpenSSH processes share
+// one authenticated transport through a private control socket.
+func (c *Client) multiplexed() (*Client, error) {
+	directory, err := os.MkdirTemp("", "boomerangz-ssh-")
+	if err != nil {
+		return nil, fmt.Errorf("create SSH control directory: %w", err)
+	}
+	clone, err := newClient(c.config, c.command)
+	if err != nil {
+		_ = os.RemoveAll(directory)
+		return nil, err
+	}
+	clone.controlDir = directory
+	clone.controlPath = filepath.Join(directory, "control")
+	return clone, nil
+}
+
+func (c *Client) closeMultiplexed(ctx context.Context) error {
+	if c == nil || c.controlPath == "" {
+		return nil
+	}
+	args := c.sshArguments("")
+	separator := -1
+	for index, arg := range args {
+		if arg == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 {
+		return fmt.Errorf("construct SSH control command")
+	}
+	controlArgs := []string{"-O", "exit"}
+	controlArgs = append(controlArgs, args[separator:]...)
+	args = append(args[:separator], controlArgs...)
+	command := c.command(ctx, args)
+	err := command.Run()
+	removeErr := os.RemoveAll(c.controlDir)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 255 {
+		// No master is a normal outcome when opening the endpoint failed before
+		// the first remote command established the control connection.
+		err = nil
+	}
+	return errors.Join(err, removeErr)
 }
 
 func quoteArgument(value string) string {

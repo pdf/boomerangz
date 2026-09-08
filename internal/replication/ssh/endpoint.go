@@ -16,6 +16,7 @@ type Endpoint struct {
 		Run(context.Context, zfs.SendOptions, zfs.ReceiveOptions, zfs.Estimate, func(zfs.Progress)) (zfs.Progress, error)
 	}
 	shell *Shell
+	close func() error
 }
 
 // OpenEndpoint selects direct or SSH-shell operation. Empty mode means auto.
@@ -45,16 +46,36 @@ func OpenEndpoint(ctx context.Context, client *Client, zfsPath, mode string) (*E
 	if mode != "auto" && mode != "direct" {
 		return nil, fmt.Errorf("unsupported SSH endpoint mode %q", mode)
 	}
-	stream, err := NewStream(client, zfsPath)
+	multiplexed, err := client.multiplexed()
 	if err != nil {
 		return nil, err
 	}
-	return &Endpoint{Mode: "direct", Executor: client.Executor(), Stream: stream}, nil
+	stream, err := NewStream(multiplexed, zfsPath)
+	if err != nil {
+		_ = multiplexed.closeMultiplexed(context.Background())
+		return nil, err
+	}
+	return &Endpoint{
+		Mode:     "direct",
+		Executor: multiplexed.Executor(),
+		Stream:   stream,
+		close: func() error {
+			closeCtx, cancel := context.WithTimeout(context.Background(), client.connectTimeout())
+			defer cancel()
+			return multiplexed.closeMultiplexed(closeCtx)
+		},
+	}, nil
 }
 
 // Close releases an optional persistent SSH-shell session.
 func (e *Endpoint) Close() error {
-	if e == nil || e.shell == nil {
+	if e == nil {
+		return nil
+	}
+	if e.close != nil {
+		return e.close()
+	}
+	if e.shell == nil {
 		return nil
 	}
 	return e.shell.Close()

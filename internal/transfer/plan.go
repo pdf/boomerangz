@@ -148,7 +148,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		if canonical != canonicalLocalTarget(request.DestinationRoot) {
 			return plan, fmt.Errorf("local canonical target does not match destination")
 		}
-	case "ssh":
+	case "ssh", "native":
 		if request.RemoteName == "" || !slices.Contains(p.Remote, request.RemoteName) {
 			return plan, fmt.Errorf("remote is not configured by the source remote property")
 		}

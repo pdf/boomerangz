@@ -18,6 +18,10 @@ inspection occurs when replication work is due, during a retry, or when an
 operator explicitly requests reconciliation; ordinary local policy scans do not
 connect to every destination.
 
+Direct mode multiplexes its remote commands and receive stream over one
+authenticated SSH connection for each opened replication endpoint. Its private
+control socket is removed when the endpoint closes.
+
 The configured leaf dataset may be absent before its first replication, provided
 an existing ancestor has the required delegation. If the destination pool is
 temporarily unavailable or unimported, the daemon retains the protected source

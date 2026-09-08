@@ -5,8 +5,10 @@ go 1.26.0
 toolchain go1.26.8
 
 require (
-	github.com/alecthomas/kingpin/v2 v2.4.0
+	github.com/alecthomas/kong v1.16.1
 	github.com/pelletier/go-toml/v2 v2.4.3
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	google.golang.org/grpc v1.83.1
 	google.golang.org/protobuf v1.36.12
 )
@@ -60,7 +62,6 @@ require (
 	github.com/OpenPeeDeeP/depguard/v2 v2.2.1 // indirect
 	github.com/alecthomas/chroma/v2 v2.27.0 // indirect
 	github.com/alecthomas/go-check-sumtype v0.3.1 // indirect
-	github.com/alecthomas/units v0.0.0-20240927000941-0f3dac36c52b // indirect
 	github.com/alexkohler/nakedret/v2 v2.0.6 // indirect
 	github.com/alexkohler/prealloc v1.1.0 // indirect
 	github.com/alfatraining/structtag v1.0.0 // indirect
@@ -259,7 +260,6 @@ require (
 	github.com/uudashr/gocognit v1.2.1 // indirect
 	github.com/uudashr/iface v1.5.1 // indirect
 	github.com/xen0n/gosmopolitan v1.3.0 // indirect
-	github.com/xhit/go-str2duration/v2 v2.1.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yagipy/maintidx v1.0.0 // indirect
 	github.com/yeya24/promlinter v0.3.0 // indirect
@@ -287,8 +287,6 @@ require (
 	golang.org/x/mod v0.40.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/tools v0.49.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260904194346-d0f1323225a4 // indirect

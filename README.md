@@ -26,7 +26,7 @@ boomerangz trigger pool/data
 ```
 
 See [docs/control-api.md](docs/control-api.md) for output behavior, local access,
-token pairing, and optional TLS listeners.
+authenticated pairing, and optional TLS listeners.
 
 On a ZFS system (use the disposable guest for development), inspect datasets:
 

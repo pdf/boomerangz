@@ -136,6 +136,18 @@ stream. The run also confirmed that destination delegation needs `userprop` for
 lineage and ownership reconciliation; the guarded bootstrap now grants it, in
 line with the documented SSH destination baseline.
 
+The corrected 2026-09-08 Phase 9 loopback run used the guarded transient
+`phase9mux-260908a` guest and the same 33,637,624-byte ZFS payload for three
+fresh end-to-end samples on each remote path. Direct mode multiplexed all ZFS
+commands and the receive stream over one authenticated SSH connection per
+sample. Median totals were 1.842 seconds for direct SSH (17.42 MiB/s), 1.825
+seconds for gRPC over SSH shell (17.58 MiB/s), and 1.669 seconds for native TLS
+gRPC (19.22 MiB/s). The corresponding ranges were 1.745-1.926, 1.796-1.919,
+and 1.630-1.718 seconds. Every sample completed destination GUID verification.
+These short guest-loopback measurements check for material regressions; they do
+not predict throughput on real networks. Host access and guest-loopback SSH used
+separate dedicated test keys with agent forwarding disabled.
+
 The completed 2026-09-07 Phase 8 matrix used Linux
 `6.18.42-1-cachyos-lts`, `zfs-utils 2.4.3-2`, and ZFS module `2.4.3-1`.
 OpenZFS 2.4.3 is therefore the minimum verified version for the initial CachyOS
@@ -160,10 +172,9 @@ the selected generation, treated the missing remote anchor as retryable, and
 completed through gRPC over `ssh-shell` after pool import. The configured leaf
 did not exist before reconnection; bootstrap created it and the received snapshot
 GUID matched the newest source generation. The completed recovery hold was then
-released. Direct SSH remains covered by the single-guest transfer matrix; the
-nested two-guest `passt` port-forward topology is unsuitable for its sequence of
-short independent SSH connections and is not used as evidence about production
-direct-SSH behavior.
+released. Direct SSH remains covered by the single-guest transfer matrix. The
+nested two-guest `passt` port-forward topology is retained for outage behavior
+rather than transport performance comparisons.
 
 `guest-property-layers.sh` separately demonstrated that receive exclusions and
 plain inheritance retain hidden received values, including snapshot user-property

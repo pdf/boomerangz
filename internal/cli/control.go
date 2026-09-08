@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pdf/boomerangz/internal/config"
@@ -220,26 +221,58 @@ func runPairingImport(out io.Writer, cfg config.Config, name, path string) error
 	return err
 }
 
-func runTokenList(out io.Writer, cfg config.Config) error {
-	store, err := control.NewTokenStore(cfg.Paths.IdentityDir)
+func runPairingList(out io.Writer, cfg config.Config) error {
+	pairings, err := control.ListPairings(cfg.Paths.IdentityDir)
 	if err != nil {
 		return err
 	}
-	tokens, err := store.List()
-	if err != nil {
-		return err
+	type view struct {
+		Role     string     `json:"role"`
+		Name     string     `json:"name,omitempty"`
+		ID       string     `json:"id"`
+		Listener string     `json:"listener,omitempty"`
+		Endpoint string     `json:"endpoint,omitempty"`
+		AuthMode string     `json:"auth_mode"`
+		Scopes   []string   `json:"scopes,omitempty"`
+		Created  time.Time  `json:"created,omitempty"`
+		Expires  *time.Time `json:"expires,omitempty"`
+		Revoked  bool       `json:"revoked,omitempty"`
 	}
-	return json.NewEncoder(out).Encode(tokens)
+	result := make([]view, 0, len(pairings))
+	for _, pairing := range pairings {
+		result = append(result, view{Role: "issued", ID: pairing.ID, Listener: pairing.Listener, AuthMode: pairing.AuthMode, Scopes: pairing.Scopes, Created: pairing.Created, Expires: pairing.Expires, Revoked: pairing.Revoked})
+	}
+	entries, readErr := os.ReadDir(cfg.Paths.CredentialsDir)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		bundle, err := control.LoadPairingBundle(filepath.Join(cfg.Paths.CredentialsDir, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("imported pairing %s: %w", entry.Name(), err)
+		}
+		authMode := "token"
+		if bundle.ClientCert != "" && bundle.TokenID != "" {
+			authMode = "mtls+token"
+		} else if bundle.ClientCert != "" {
+			authMode = "mtls"
+		}
+		result = append(result, view{Role: "imported", Name: strings.TrimSuffix(entry.Name(), ".json"), ID: bundle.PairingID, Endpoint: bundle.Endpoint, AuthMode: authMode, Scopes: bundle.Scopes, Created: bundle.Created, Expires: bundle.Expires})
+	}
+	return json.NewEncoder(out).Encode(result)
 }
 
-func runTokenRevoke(out io.Writer, cfg config.Config, id string) error {
+func runPairingRevoke(out io.Writer, cfg config.Config, id string) error {
 	store, err := control.NewTokenStore(cfg.Paths.IdentityDir)
 	if err != nil {
 		return err
 	}
-	if err := store.Revoke(id); err != nil {
+	if err := control.RevokePairing(cfg.Paths.IdentityDir, store, id); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(out, "revoked token %s\n", id)
+	_, err = fmt.Fprintf(out, "revoked pairing %s\n", id)
 	return err
 }

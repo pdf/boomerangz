@@ -58,7 +58,7 @@ func testTLSCertificate(t *testing.T) (tls.Certificate, *x509.Certificate) {
 func TestAuthenticatedNativeEndpointNegotiatesSharedService(t *testing.T) {
 	t.Parallel()
 	certificate, leaf := testTLSCertificate(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

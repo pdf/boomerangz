@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -23,6 +26,106 @@ type managedIdentity struct {
 	cert string
 	key  string
 	ca   string
+}
+
+// ManagedClientRecord identifies a client certificate issued by boomerangz.
+type ManagedClientRecord struct {
+	ID          string    `json:"id"`
+	Fingerprint string    `json:"fingerprint"`
+	Created     time.Time `json:"created"`
+	Revoked     bool      `json:"revoked"`
+}
+
+type managedClientFile struct {
+	Version int                   `json:"version"`
+	Clients []ManagedClientRecord `json:"clients"`
+}
+
+func managedClientsPath(identityDir string) string {
+	return filepath.Join(identityDir, "pki", "clients", "identities.json")
+}
+
+func loadManagedClients(identityDir string) (managedClientFile, error) {
+	path := managedClientsPath(identityDir)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return managedClientFile{Version: 1}, nil
+	}
+	if err != nil {
+		return managedClientFile{}, err
+	}
+	defer func() { _ = file.Close() }()
+	var stored managedClientFile
+	decoder := json.NewDecoder(file)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&stored); err != nil || stored.Version != 1 {
+		return managedClientFile{}, fmt.Errorf("invalid managed client identity store")
+	}
+	return stored, nil
+}
+
+func saveManagedClients(identityDir string, stored managedClientFile) error {
+	data, err := json.MarshalIndent(stored, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return atomicPrivateFile(managedClientsPath(identityDir), data, 0o600)
+}
+
+func clientFingerprint(certificate *x509.Certificate) string {
+	digest := sha256.Sum256(certificate.RawSubjectPublicKeyInfo)
+	return hex.EncodeToString(digest[:])
+}
+
+func authorizeManagedClient(identityDir string, certificate *x509.Certificate) error {
+	lock, err := managedLock(identityDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }()
+	stored, err := loadManagedClients(identityDir)
+	if err != nil {
+		return err
+	}
+	fingerprint := clientFingerprint(certificate)
+	for _, record := range stored.Clients {
+		if record.Fingerprint == fingerprint && !record.Revoked {
+			return nil
+		}
+	}
+	return fmt.Errorf("managed client identity is unknown or revoked")
+}
+
+// ListManagedClients returns all managed client identities, including revoked identities.
+func ListManagedClients(identityDir string) ([]ManagedClientRecord, error) {
+	lock, err := managedLock(identityDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = lock.Close() }()
+	stored, err := loadManagedClients(identityDir)
+	return stored.Clients, err
+}
+
+// RevokeManagedClient prevents a managed client identity from authenticating again.
+func RevokeManagedClient(identityDir, id string) error {
+	lock, err := managedLock(identityDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }()
+	stored, err := loadManagedClients(identityDir)
+	if err != nil {
+		return err
+	}
+	for index := range stored.Clients {
+		if stored.Clients[index].ID == id {
+			stored.Clients[index].Revoked = true
+			return saveManagedClients(identityDir, stored)
+		}
+	}
+	return fmt.Errorf("managed client identity %s was not found", id)
 }
 
 func atomicPrivateFile(path string, data []byte, mode os.FileMode) error {
@@ -115,7 +218,7 @@ func ensureCA(dir, commonName string) (*x509.Certificate, ed25519.PrivateKey, st
 		key, err := parsePrivateKey(keyPath)
 		return certificate, key, certPath, err
 	}
-	if !(errors.Is(certErr, os.ErrNotExist) && errors.Is(keyErr, os.ErrNotExist)) {
+	if !errors.Is(certErr, os.ErrNotExist) || !errors.Is(keyErr, os.ErrNotExist) {
 		return nil, nil, "", fmt.Errorf("managed CA is incomplete")
 	}
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -198,10 +301,10 @@ func ensureManagedServerIdentity(identityDir, listener, advertised string) (mana
 	if err != nil {
 		return managedIdentity{}, err
 	}
-	certPath, keyPath := filepath.Join(dir, "server.crt"), filepath.Join(dir, "server.key")
+	pairPath := filepath.Join(dir, "server.pem")
 	renew := true
-	if certificate, certErr := parseCertificate(certPath); certErr == nil {
-		if key, keyErr := parsePrivateKey(keyPath); keyErr == nil {
+	if certificate, certErr := parseCertificate(pairPath); certErr == nil {
+		if key, keyErr := parsePrivateKey(pairPath); keyErr == nil {
 			public, ok := certificate.PublicKey.(ed25519.PublicKey)
 			if ok && bytes.Equal(key.Public().(ed25519.PublicKey), public) && certificate.VerifyHostname(host) == nil && time.Until(certificate.NotAfter) > managedLeafRenewBefore {
 				renew = false
@@ -213,14 +316,12 @@ func ensureManagedServerIdentity(identityDir, listener, advertised string) (mana
 		if err != nil {
 			return managedIdentity{}, err
 		}
-		if err := atomicPrivateFile(keyPath, keyPEM, 0o600); err != nil {
-			return managedIdentity{}, err
-		}
-		if err := atomicPrivateFile(certPath, certPEM, 0o644); err != nil {
+		pairPEM := append(certPEM, keyPEM...)
+		if err := atomicPrivateFile(pairPath, pairPEM, 0o600); err != nil {
 			return managedIdentity{}, err
 		}
 	}
-	return managedIdentity{cert: certPath, key: keyPath, ca: caPath}, nil
+	return managedIdentity{cert: pairPath, key: pairPath, ca: caPath}, nil
 }
 
 func ensureManagedClientCA(identityDir string) (certPath string, err error) {
@@ -251,5 +352,26 @@ func issueManagedClientIdentity(identityDir, name string) (certificate, key []by
 	if err != nil {
 		return nil, nil, err
 	}
-	return issueLeaf(ca, caKey, name, true)
+	certificate, key, err = issueLeaf(ca, caKey, name, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	block, _ := pem.Decode(certificate)
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	stored, err := loadManagedClients(identityDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	id := name
+	if len(name) > len("boomerangz-") && name[:len("boomerangz-")] == "boomerangz-" {
+		id = name[len("boomerangz-"):]
+	}
+	stored.Clients = append(stored.Clients, ManagedClientRecord{ID: id, Fingerprint: clientFingerprint(leaf), Created: time.Now().UTC()})
+	if err := saveManagedClients(identityDir, stored); err != nil {
+		return nil, nil, err
+	}
+	return certificate, key, nil
 }

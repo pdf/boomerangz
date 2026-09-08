@@ -45,6 +45,20 @@ type socketFile struct {
 	inode  uint64
 }
 
+// Addresses returns the bound addresses for diagnostics and guarded tests.
+func (s *Server) Addresses(network string) []string {
+	if s == nil {
+		return nil
+	}
+	var result []string
+	for _, listener := range s.listeners {
+		if network == "" || listener.Addr().Network() == network {
+			result = append(result, listener.Addr().String())
+		}
+	}
+	return result
+}
+
 func identifySocket(path string) (socketFile, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -149,12 +163,14 @@ func tlsServerConfig(name string, listener config.ListenerConfig, identityDir st
 		}
 		listener.TLSCert, listener.TLSKey = managed.cert, managed.key
 	}
+	managedClientAuth := false
 	if (listener.AuthMode == "mtls" || listener.AuthMode == "mtls+token") && listener.ClientCA == "" {
 		managedCA, err := ensureManagedClientCA(identityDir)
 		if err != nil {
 			return nil, err
 		}
 		listener.ClientCA = managedCA
+		managedClientAuth = true
 	}
 	reloader := &certificateReloader{certFile: listener.TLSCert, keyFile: listener.TLSKey, logger: logger, listener: name}
 	if _, err := reloader.get(nil); err != nil {
@@ -172,6 +188,14 @@ func tlsServerConfig(name string, listener config.ListenerConfig, identityDir st
 		}
 		result.ClientAuth = tls.RequireAndVerifyClientCert
 		result.ClientCAs = pool
+		if managedClientAuth {
+			result.VerifyConnection = func(state tls.ConnectionState) error {
+				if len(state.PeerCertificates) == 0 {
+					return fmt.Errorf("client supplied no certificate")
+				}
+				return authorizeManagedClient(identityDir, state.PeerCertificates[0])
+			}
+		}
 	}
 	return result, nil
 }

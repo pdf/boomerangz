@@ -32,7 +32,7 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 		if !slices.Contains(p.Local, request.DestinationRoot) || canonical != canonicalLocalTarget(request.DestinationRoot) {
 			return plan, zero, fmt.Errorf("destination is not configured by the source local property")
 		}
-	case "ssh":
+	case "ssh", "native":
 		if request.RemoteName == "" || !slices.Contains(p.Remote, request.RemoteName) || canonical == "" || strings.ContainsAny(canonical, "\x00\r\n") {
 			return plan, zero, fmt.Errorf("remote is not configured with a canonical target")
 		}

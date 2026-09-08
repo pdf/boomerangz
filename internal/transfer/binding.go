@@ -53,7 +53,7 @@ type localIdentityReader interface {
 }
 
 // InspectTarget resolves the exact dataset or nearest existing ancestor and
-// compares it with any persistent source-root binding for local or SSH targets.
+// compares it with any persistent source-root binding for local or remote targets.
 func InspectTarget(ctx context.Context, reader localIdentityReader, request Request, source zfs.State) (LocalTargetInspection, error) {
 	transport, canonical := requestTransport(request), canonicalTarget(request)
 	configured := request.DestinationRoot
@@ -248,7 +248,7 @@ func storedTargetBinding(state zfs.State, root, canonical string) (*TargetBindin
 }
 
 func validateBinding(binding TargetBinding) error {
-	if binding.Version != targetBindingVersion || (binding.Transport != "local" && binding.Transport != "ssh") || binding.CanonicalTarget == "" || binding.DestinationRoot == "" || binding.MappedDataset == "" || binding.Pool == "" || binding.PoolGUID == 0 || binding.Anchor == "" || binding.AnchorGUID == 0 {
+	if binding.Version != targetBindingVersion || (binding.Transport != "local" && binding.Transport != "ssh" && binding.Transport != "native") || binding.CanonicalTarget == "" || binding.DestinationRoot == "" || binding.MappedDataset == "" || binding.Pool == "" || binding.PoolGUID == 0 || binding.Anchor == "" || binding.AnchorGUID == 0 {
 		return fmt.Errorf("target binding is incomplete or unsupported")
 	}
 	if targetBindingProperty(binding.CanonicalTarget) == targetBindingPrefix {

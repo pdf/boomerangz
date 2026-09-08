@@ -434,8 +434,7 @@ func TestManagedServerAndClientPKI(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(cfg.Paths.IdentityDir, "pki", "listeners", "managed", "ca.crt"),
 		filepath.Join(cfg.Paths.IdentityDir, "pki", "listeners", "managed", "ca.key"),
-		filepath.Join(cfg.Paths.IdentityDir, "pki", "listeners", "managed", "server.crt"),
-		filepath.Join(cfg.Paths.IdentityDir, "pki", "listeners", "managed", "server.key"),
+		filepath.Join(cfg.Paths.IdentityDir, "pki", "listeners", "managed", "server.pem"),
 		filepath.Join(cfg.Paths.IdentityDir, "pki", "clients", "ca.crt"),
 		filepath.Join(cfg.Paths.IdentityDir, "pki", "clients", "ca.key"),
 	} {
@@ -446,7 +445,7 @@ func TestManagedServerAndClientPKI(t *testing.T) {
 		if !info.Mode().IsRegular() {
 			t.Fatalf("managed PKI file %s is not regular", path)
 		}
-		if filepath.Ext(path) == ".key" && info.Mode().Perm()&0o077 != 0 {
+		if (filepath.Ext(path) == ".key" || filepath.Ext(path) == ".pem") && info.Mode().Perm()&0o077 != 0 {
 			t.Fatalf("managed private key %s mode=%o", path, info.Mode().Perm())
 		}
 	}
@@ -481,12 +480,29 @@ func TestManagedMTLSPairingNeedsNoTokenOrClientFiles(t *testing.T) {
 	if bundle.TokenID != "" || bundle.Secret != "" || bundle.ClientCert == "" || bundle.ClientKey == "" || bundle.ClientID == "" {
 		t.Fatalf("unexpected managed mTLS pairing: %+v", bundle)
 	}
+	pairings, err := ListPairings(cfg.Paths.IdentityDir)
+	if err != nil || len(pairings) != 1 || pairings[0].ID != bundle.PairingID {
+		t.Fatalf("pairings=%v err=%v", pairings, err)
+	}
 	connection, err := DialPairingConnection(bundle)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = connection.Close() }()
 	if _, err := controlrpc.NewStatusServiceClient(connection).GetStatus(t.Context(), &controlrpc.GetStatusRequest{}); err != nil {
 		t.Fatal(err)
+	}
+	if err := connection.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := RevokePairing(cfg.Paths.IdentityDir, store, bundle.PairingID); err != nil {
+		t.Fatal(err)
+	}
+	connection, err = DialPairingConnection(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connection.Close() }()
+	if _, err := controlrpc.NewStatusServiceClient(connection).GetStatus(t.Context(), &controlrpc.GetStatusRequest{}); err == nil {
+		t.Fatal("revoked managed mTLS identity was accepted")
 	}
 }

@@ -19,7 +19,8 @@ The design has four guiding principles:
 
 The program will be written for Go 1.26.x. The module path will be
 `github.com/pdf/boomerangz` and the CLI will use
-`github.com/alecthomas/kingpin/v2`.
+`github.com/alecthomas/kong`, using command structs, `Run` methods, and lifecycle
+hooks rather than a central command-dispatch switch.
 
 ## 2. Initial platform scope
 
@@ -761,7 +762,8 @@ settings. Password handling and arbitrary shell snippets are not supported.
 
 Two SSH endpoint modes are supported:
 
-- direct SSH invokes a fixed, implementation-owned set of ZFS operations and
+- direct SSH invokes a fixed, implementation-owned set of ZFS operations,
+  multiplexes them over one authenticated connection per opened endpoint, and
   requires no `boomerangz` installation on the destination;
 - the optional `boomerangz ssh-shell` carries versioned gRPC services over the
   command channel's stdin and stdout for probe, receive, resume-token,
@@ -896,10 +898,11 @@ Issue one token per client by default so clients can have separate scopes and be
 revoked independently. A shared token remains possible. Suggested scopes are
 `status`, `trigger`, `replicate`, `prune`, and `admin`.
 
-The CLI represents this as a general `auth pairing create` and `auth pairing
-import` workflow rather than requiring users to repeat listener endpoint and
-trust configuration for every token. Token inspection and revocation remain
-under `auth token`. Pairing creation takes its endpoint, server name, and trust
+The CLI represents this as one `pairing` create, import, list, and revoke
+workflow rather than requiring users to repeat listener endpoint and trust
+configuration for every credential. One pairing identifier covers its token
+and managed client certificate so revocation disables both together. Pairing
+creation takes its endpoint, server name, and trust
 material from the selected listener; only client-specific external mTLS
 certificate material remains an input when managed client PKI is not used.
 
@@ -976,10 +979,10 @@ boomerangz identity recover [--owner <installation-uuid>] [--apply]
 boomerangz config check
 boomerangz config show
 boomerangz trigger [<dataset>...]
-boomerangz auth token create
-boomerangz auth token import
-boomerangz auth token list
-boomerangz auth token revoke
+boomerangz pairing create
+boomerangz pairing import
+boomerangz pairing list
+boomerangz pairing revoke
 boomerangz target reseed <dataset> <target>
 boomerangz version
 ```
@@ -1208,7 +1211,7 @@ and refusal to clean ambiguous or resume-dependent state.
    worker pools, fairness, execution of due retirement plans, graceful shutdown,
    and systemd integration.
 7. **Control plane and UI**: implement gRPC over Unix sockets, status/watch,
-   terminal progress, token pairing, and optional secured TCP listeners.
+   terminal progress, authenticated pairing, and optional secured TCP listeners.
 8. **Hardening**: run destructive integration and fault tests, document
    delegated permissions, and implement and harden the Linux helper only if the
    integration matrix requires it.
@@ -1279,6 +1282,6 @@ artifact checksums, never `SKIP` for downloaded archives.
 - [OpenZFS `zfs allow`](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-allow.8.html)
 - [Linux capabilities](https://man7.org/linux/man-pages/man7/capabilities.7.html)
 - [zrepl grid policy](https://zrepl.github.io/configuration/prune.html#policy-grid)
-- [Kingpin](https://github.com/alecthomas/kingpin)
+- [Kong](https://github.com/alecthomas/kong)
 - [gRPC authentication](https://grpc.io/docs/guides/auth/)
 - [Go module tool directives](https://go.dev/ref/mod#go-mod-file-tool)

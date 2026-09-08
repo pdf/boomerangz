@@ -3,26 +3,11 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"log/slog"
-	"os"
 
-	"github.com/alecthomas/kingpin/v2"
-	"github.com/pdf/boomerangz/internal/config"
-	"github.com/pdf/boomerangz/internal/control"
-	"github.com/pdf/boomerangz/internal/daemon"
+	"github.com/alecthomas/kong"
 	"github.com/pdf/boomerangz/internal/discovery"
-	"github.com/pdf/boomerangz/internal/identity"
-	remoterpc "github.com/pdf/boomerangz/internal/replication/rpc"
-	"github.com/pdf/boomerangz/internal/zfs"
-)
-
-const (
-	defaultConfig  = "/etc/boomerangz/config.toml"
-	defaultDropIns = "/etc/boomerangz/config.d"
 )
 
 // BuildInfo describes the binary version injected by the build system.
@@ -48,259 +33,20 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, build Bui
 }
 
 func runWithReader(ctx context.Context, args []string, stdout, stderr io.Writer, build BuildInfo, reader discovery.Reader) error {
-	app := kingpin.New("boomerangz", "Property-driven ZFS snapshot and replication manager.")
-	app.HelpFlag.Short('h')
-	app.UsageWriter(stdout)
-
-	configCmd := app.Command("config", "Inspect and validate daemon configuration.")
-	checkCmd := configCmd.Command("check", "Validate configuration and all drop-ins.")
-	checkPath := checkCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
-	checkDropIns := checkCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
-
-	showCmd := configCmd.Command("show", "Show merged, effective configuration.")
-	showPath := showCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
-	showDropIns := showCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
-
-	versionCmd := app.Command("version", "Show version information.")
-	versionJSON := versionCmd.Flag("json", "Emit JSON.").Bool()
-	daemonCmd := app.Command("daemon", "Run snapshot and replication management in the foreground.")
-	daemonPath := daemonCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
-	daemonDropIns := daemonCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
-	statusCmd := app.Command("status", "Show live daemon status.")
-	statusPath := statusCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
-	statusDropIns := statusCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
-	statusCredential := statusCmd.Flag("credential", "Imported token bundle name or absolute path.").String()
-	statusWatch := statusCmd.Flag("watch", "Continuously watch status.").Short('w').Bool()
-	statusInterval := statusCmd.Flag("interval", "Maximum interval between watch updates.").Short('i').Default("2s").Duration()
-	triggerCmd := app.Command("trigger", "Queue an immediate snapshot for selected active roots.")
-	triggerPath := triggerCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
-	triggerDropIns := triggerCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
-	triggerCredential := triggerCmd.Flag("credential", "Imported token bundle name or absolute path.").String()
-	triggerDatasets := triggerCmd.Arg("datasets", "Active scheduling roots; empty selects all.").Strings()
-
-	authCmd := app.Command("auth", "Manage authenticated API pairings and tokens.")
-	authPath := authCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
-	authDropIns := authCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
-	pairingCmd := authCmd.Command("pairing", "Create or import authenticated client pairings.")
-	pairingCreateCmd := pairingCmd.Command("create", "Create a one-time pairing bundle.")
-	pairingCreateListener := pairingCreateCmd.Flag("listener", "Configured TCP listener name.").String()
-	pairingCreateClientCert := pairingCreateCmd.Flag("client-cert", "External mTLS client certificate.").ExistingFile()
-	pairingCreateClientKey := pairingCreateCmd.Flag("client-key", "External mTLS client private key.").ExistingFile()
-	pairingCreateScopes := pairingCreateCmd.Flag("scope", "Authorized token scope; repeat for multiple scopes.").Default("status").Strings()
-	pairingCreateExpiry := pairingCreateCmd.Flag("expires-in", "Token lifetime; zero means no expiry.").Default("0s").Duration()
-	pairingImportCmd := pairingCmd.Command("import", "Import a pairing bundle for client use.")
-	pairingImportName := pairingImportCmd.Arg("name", "Local credential name.").Required().String()
-	pairingImportPath := pairingImportCmd.Arg("bundle", "Pairing bundle JSON file.").Required().ExistingFile()
-	tokenCmd := authCmd.Command("token", "Inspect or revoke server-side tokens.")
-	tokenListCmd := tokenCmd.Command("list", "List token identifiers, scopes, and expiry.")
-	tokenRevokeCmd := tokenCmd.Command("revoke", "Revoke one token identifier.")
-	tokenRevokeID := tokenRevokeCmd.Arg("id", "Token identifier.").Required().String()
-	sshShellCmd := app.Command("ssh-shell", "Serve the restricted replication protocol over an SSH command channel.").Hidden()
-	sshShellRoot := sshShellCmd.Flag("root", "Allowed destination ZFS root.").Required().String()
-
-	datasetCmd := app.Command("dataset", "Dataset inspection and explicit lifecycle administration.")
-	datasetPath := datasetCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
-	datasetDropIns := datasetCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
-	listCmd := datasetCmd.Command("list", "List sparse inventory and active policies as JSON.")
-	inspectCmd := datasetCmd.Command("inspect", "Inspect effective policy and stored properties as JSON.")
-	inspectName := inspectCmd.Arg("dataset", "Exact ZFS dataset name.").Required().String()
-	adoptCmd := datasetCmd.Command("adopt", "Preview transfer of an existing lineage to this installation.")
-	adoptName := adoptCmd.Arg("dataset", "Exact ZFS dataset name.").Required().String()
-	adoptApply := adoptCmd.Flag("apply", "Apply the adoption after revalidation.").Bool()
-	cleanCmd := datasetCmd.Command("clean", "Preview explicit local decommissioning; preserves snapshots by default.")
-	cleanNames := cleanCmd.Arg("datasets", "Exact ZFS dataset scopes.").Strings()
-	cleanRecursive := cleanCmd.Flag("recursive", "Include descendants of the selected scopes.").Bool()
-	cleanAll := cleanCmd.Flag("all", "Explicitly select all local datasets recursively.").Bool()
-	cleanDestroy := cleanCmd.Flag("destroy-owned-snapshots", "Also delete fully proven owned snapshots without dependencies.").Bool()
-	cleanApply := cleanCmd.Flag("apply", "Apply clean after revalidation.").Bool()
-
-	identityCmd := app.Command("identity", "Inspect and recover installation identity.")
-	identityPath := identityCmd.Flag("config", "Primary configuration file.").Default(defaultConfig).String()
-	identityDropIns := identityCmd.Flag("config-dir", "Configuration drop-in directory.").Default(defaultDropIns).String()
-	recoverCmd := identityCmd.Command("recover", "Preview recovery from local source-root owner markers.")
-	recoverOwner := recoverCmd.Flag("owner", "Explicit owner UUID when more than one candidate exists.").String()
-	recoverApply := recoverCmd.Flag("apply", "Apply the identity replacement after revalidation.").Bool()
-
-	command, err := app.Parse(args)
+	root := &commandLine{}
+	parser, err := kong.New(
+		root,
+		kong.Name("boomerangz"),
+		kong.Description("Property-driven ZFS snapshot and replication manager."),
+		kong.Writers(stdout, stderr),
+		kong.UsageOnError(),
+	)
 	if err != nil {
 		return err
 	}
-
-	switch command {
-	case daemonCmd.FullCommand():
-		loaded, err := config.Load(*daemonPath, *daemonDropIns)
-		if err != nil {
-			return err
-		}
-		lock, err := lifecycleLock(loaded.Config)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = lock.Close() }()
-		installation, err := identity.LoadOrCreate(loaded.Config.Paths.IdentityDir)
-		if err != nil {
-			return err
-		}
-		var source daemonBackend
-		if reader != nil {
-			source, _ = reader.(daemonBackend)
-		}
-		if source == nil {
-			source, err = zfs.NewDirect("zfs")
-			if err != nil {
-				return err
-			}
-		}
-		logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		runtime, err := daemon.New(loaded.Config, source, installation, logger)
-		if err != nil {
-			return err
-		}
-		controlServer, err := control.StartServerWithReplication(loaded.Config, runtime, source, "zfs", logger)
-		if err != nil {
-			return err
-		}
-		finished := make(chan struct{})
-		go func() {
-			select {
-			case <-ctx.Done():
-				_ = controlServer.Close()
-			case <-finished:
-			}
-		}()
-		runErr := runtime.Run(ctx)
-		close(finished)
-		return errors.Join(runErr, controlServer.Close())
-	case statusCmd.FullCommand():
-		loaded, err := config.Load(*statusPath, *statusDropIns)
-		if err != nil {
-			return err
-		}
-		return runStatus(ctx, stdout, loaded.Config, *statusCredential, *statusWatch, *statusInterval)
-	case triggerCmd.FullCommand():
-		loaded, err := config.Load(*triggerPath, *triggerDropIns)
-		if err != nil {
-			return err
-		}
-		return runTrigger(ctx, stdout, loaded.Config, *triggerCredential, *triggerDatasets)
-	case pairingCreateCmd.FullCommand(), pairingImportCmd.FullCommand(), tokenListCmd.FullCommand(), tokenRevokeCmd.FullCommand():
-		loaded, err := config.Load(*authPath, *authDropIns)
-		if err != nil {
-			return err
-		}
-		switch command {
-		case pairingCreateCmd.FullCommand():
-			return runPairingCreate(stdout, loaded.Config, *pairingCreateListener, *pairingCreateClientCert, *pairingCreateClientKey, *pairingCreateScopes, *pairingCreateExpiry)
-		case pairingImportCmd.FullCommand():
-			return runPairingImport(stdout, loaded.Config, *pairingImportName, *pairingImportPath)
-		case tokenListCmd.FullCommand():
-			return runTokenList(stdout, loaded.Config)
-		default:
-			return runTokenRevoke(stdout, loaded.Config, *tokenRevokeID)
-		}
-	case sshShellCmd.FullCommand():
-		executor, err := zfs.NewDirect("zfs")
-		if err != nil {
-			return err
-		}
-		service, err := remoterpc.NewServer(executor, *sshShellRoot, "zfs")
-		if err != nil {
-			return err
-		}
-		return remoterpc.ServeStdio(ctx, service, os.Stdin, stdout)
-	case adoptCmd.FullCommand(), cleanCmd.FullCommand(), recoverCmd.FullCommand():
-		configPath, configDir := *datasetPath, *datasetDropIns
-		if command == recoverCmd.FullCommand() {
-			configPath, configDir = *identityPath, *identityDropIns
-		}
-		loaded, err := config.Load(configPath, configDir)
-		if err != nil {
-			return err
-		}
-		if command == cleanCmd.FullCommand() {
-			if handled, controlErr := runDaemonClean(ctx, stdout, loaded.Config, *cleanNames, *cleanRecursive, *cleanAll, *cleanDestroy, *cleanApply); handled {
-				return controlErr
-			}
-		}
-		if reader == nil {
-			reader, err = zfs.NewDirect("zfs")
-			if err != nil {
-				return err
-			}
-		}
-		executor, ok := reader.(zfs.Executor)
-		if !ok {
-			return fmt.Errorf("lifecycle executor unavailable")
-		}
-		if command == recoverCmd.FullCommand() {
-			return runIdentityRecover(ctx, stdout, loaded.Config, reader, executor, *recoverOwner, *recoverApply)
-		}
-		if command == adoptCmd.FullCommand() {
-			return runAdopt(ctx, stdout, loaded.Config, executor, *adoptName, *adoptApply)
-		}
-		return runClean(ctx, stdout, loaded.Config, executor, *cleanNames, *cleanRecursive, *cleanAll, *cleanDestroy, *cleanApply)
-	case listCmd.FullCommand(), inspectCmd.FullCommand():
-		loaded, err := config.Load(*datasetPath, *datasetDropIns)
-		if err != nil {
-			return err
-		}
-		if reader == nil {
-			reader, err = zfs.NewDirect("zfs")
-			if err != nil {
-				return err
-			}
-		}
-		var remotes []string
-		for name := range loaded.Config.Remotes {
-			remotes = append(remotes, name)
-		}
-		scanner, err := discovery.New(reader, discovery.Options{Remotes: remotes})
-		if err != nil {
-			return err
-		}
-		var inspect []string
-		if command == inspectCmd.FullCommand() {
-			inspect = []string{*inspectName}
-		}
-		generation, err := scanner.Scan(ctx, inspect)
-		if err != nil {
-			return err
-		}
-		encoder := json.NewEncoder(stdout)
-		encoder.SetIndent("", "  ")
-		if command == inspectCmd.FullCommand() {
-			entry, exists := generation.Inspect(*inspectName)
-			if !exists {
-				return fmt.Errorf("dataset %q was not found", *inspectName)
-			}
-			return encoder.Encode(entry)
-		}
-		return encoder.Encode(generation.Entries())
-	case checkCmd.FullCommand():
-		loaded, err := config.Load(*checkPath, *checkDropIns)
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintf(stdout, "configuration valid (%d source files)\n", len(loaded.Sources))
+	parsed, err := parser.Parse(args)
+	if err != nil {
 		return err
-	case showCmd.FullCommand():
-		loaded, err := config.Load(*showPath, *showDropIns)
-		if err != nil {
-			return err
-		}
-		encoded, err := config.MarshalRedacted(loaded.Config)
-		if err != nil {
-			return fmt.Errorf("encode configuration: %w", err)
-		}
-		_, err = stdout.Write(encoded)
-		return err
-	case versionCmd.FullCommand():
-		if *versionJSON {
-			return json.NewEncoder(stdout).Encode(build)
-		}
-		_, err = fmt.Fprintf(stdout, "boomerangz %s (commit %s, built %s)\n", build.Version, build.Commit, build.Date)
-		return err
-	default:
-		return errors.New("no command selected")
 	}
+	return parsed.Run(&commandEnvironment{Context: ctx, Stdout: stdout, Stderr: stderr, Build: build, Reader: reader, Root: root})
 }

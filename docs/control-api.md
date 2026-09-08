@@ -73,7 +73,7 @@ Create one token per client and transfer the resulting JSON bundle through a
 trusted channel. The token secret appears only in this output:
 
 ```sh
-boomerangz auth pairing create \
+boomerangz pairing create \
   --listener remote_control \
   --scope status >laptop-pairing.json
 ```
@@ -86,18 +86,22 @@ CA-chain, hostname, validity, and usage verification still apply.
 On the client, import and use the bundle:
 
 ```sh
-boomerangz auth pairing import backup laptop-pairing.json
+boomerangz pairing import backup laptop-pairing.json
 boomerangz status --credential backup
 ```
 
 Imported bundles are stored in `paths.credentials_dir` with mode `0600` and
-contain client authorization material. Treat them as secrets. List or revoke
-server-side tokens by identifier:
+contain client authorization material. Treat them as secrets. List imported and
+server-issued pairings, or revoke an issued pairing by identifier:
 
 ```sh
-boomerangz auth token list
-boomerangz auth token revoke TOKEN_ID
+boomerangz pairing list
+boomerangz pairing revoke PAIRING_ID
 ```
+
+Revocation disables every Boomerangz-managed token and client certificate in
+the pairing. Certificates issued by an external client CA must also be revoked
+through that external PKI.
 
 Available scopes are `status`, `trigger`, `replicate`, `prune`, and `admin`. `status` permits status
 snapshots, watches, and dataset listing; `trigger` permits snapshot triggers and

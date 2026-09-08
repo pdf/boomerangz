@@ -98,6 +98,6 @@ The opt-in guest test was compiled locally and run in the guarded guest as
 Phase 7 should expose the daemon's existing status store and lifecycle gate over
 the versioned local gRPC control API. It should add status snapshots and watches,
 trigger and reconcile operations, daemon-coordinated explicit lifecycle actions,
-terminal progress, Unix-socket authorization, token pairing, and optional
+terminal progress, Unix-socket authorization, authenticated pairing, and optional
 authenticated TLS listeners. It must not weaken the just-in-time ZFS authority
 and target-binding checks already enforced by the runtime.

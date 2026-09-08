@@ -874,7 +874,10 @@ func (r *Runtime) Trigger(datasets []string) ([]string, error) {
 	return accepted, nil
 }
 
+// DatasetStatus is the public control-plane view of one managed dataset.
 type DatasetStatus = daemonstate.DatasetStatus
+
+// ControlSnapshot is an immutable daemon status generation.
 type ControlSnapshot = daemonstate.ControlSnapshot
 
 // ControlStatus builds a cheap in-memory status snapshot.

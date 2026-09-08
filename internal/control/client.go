@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -28,18 +29,21 @@ import (
 
 // PairingBundle is the one-time portable client credential document.
 type PairingBundle struct {
-	Version    int      `json:"version"`
-	Endpoint   string   `json:"endpoint"`
-	TrustMode  string   `json:"trust_mode"`
-	CAPEM      string   `json:"ca_pem,omitempty"`
-	ServerName string   `json:"server_name"`
-	SPKIPin    string   `json:"spki_pin,omitempty"`
-	TokenID    string   `json:"token_id"`
-	Secret     string   `json:"token_secret"`
-	Scopes     []string `json:"scopes"`
-	ClientCert string   `json:"client_certificate_pem,omitempty"`
-	ClientKey  string   `json:"client_private_key_pem,omitempty"`
-	ClientID   string   `json:"client_id,omitempty"`
+	Version    int        `json:"version"`
+	PairingID  string     `json:"pairing_id"`
+	Endpoint   string     `json:"endpoint"`
+	TrustMode  string     `json:"trust_mode"`
+	CAPEM      string     `json:"ca_pem,omitempty"`
+	ServerName string     `json:"server_name"`
+	SPKIPin    string     `json:"spki_pin,omitempty"`
+	TokenID    string     `json:"token_id"`
+	Secret     string     `json:"token_secret"`
+	Scopes     []string   `json:"scopes"`
+	ClientCert string     `json:"client_certificate_pem,omitempty"`
+	ClientKey  string     `json:"client_private_key_pem,omitempty"`
+	ClientID   string     `json:"client_id,omitempty"`
+	Created    time.Time  `json:"created,omitempty"`
+	Expires    *time.Time `json:"expires,omitempty"`
 }
 
 func certificateDetails(path string) (*x509.Certificate, error) {
@@ -152,7 +156,12 @@ func CreateListenerPairing(store *TokenStore, identityDir, listenerName string, 
 	if err := certificate.VerifyHostname(host); err != nil {
 		return PairingBundle{}, fmt.Errorf("server certificate does not cover %s: %w", host, err)
 	}
-	bundle := PairingBundle{Version: 1, Endpoint: endpoint, ServerName: host}
+	pairingID, err := randomHex(16)
+	if err != nil {
+		return PairingBundle{}, err
+	}
+	created := time.Now().UTC()
+	bundle := PairingBundle{Version: 1, PairingID: pairingID, Endpoint: endpoint, ServerName: host, Created: created, Expires: expires}
 	if caFile == "" {
 		bundle.TrustMode = "system"
 	} else {
@@ -185,7 +194,7 @@ func CreateListenerPairing(store *TokenStore, identityDir, listenerName string, 
 			if clientCertFile != "" || clientKeyFile != "" {
 				return PairingBundle{}, fmt.Errorf("client certificate files cannot be combined with managed client PKI")
 			}
-			bundle.ClientID, err = randomHex(16)
+			bundle.ClientID = pairingID
 			if err == nil {
 				var cert, key []byte
 				cert, key, err = issueManagedClientIdentity(identityDir, "boomerangz-"+bundle.ClientID)
@@ -212,6 +221,16 @@ func CreateListenerPairing(store *TokenStore, identityDir, listenerName string, 
 			}
 			return PairingBundle{}, err
 		}
+	}
+	record := PairingRecord{ID: pairingID, Listener: listenerName, AuthMode: listener.AuthMode, TokenID: bundle.TokenID, ClientID: bundle.ClientID, Scopes: slices.Clone(bundle.Scopes), Created: created, Expires: expires}
+	if err := recordPairing(identityDir, record); err != nil {
+		if bundle.TokenID != "" {
+			_ = store.Revoke(bundle.TokenID)
+		}
+		if bundle.ClientID != "" {
+			_ = RevokeManagedClient(identityDir, bundle.ClientID)
+		}
+		return PairingBundle{}, err
 	}
 	return bundle, nil
 }

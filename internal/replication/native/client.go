@@ -23,6 +23,8 @@ type UnavailableError struct{ Err error }
 
 func (e *UnavailableError) Error() string { return "native endpoint unavailable: " + e.Err.Error() }
 func (e *UnavailableError) Unwrap() error { return e.Err }
+
+// Temporary reports that reconnecting may make the endpoint available.
 func (*UnavailableError) Temporary() bool { return true }
 
 func mapRPCError(err error) error {

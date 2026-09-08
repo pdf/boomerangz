@@ -3,11 +3,14 @@ package ssh
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +78,7 @@ func TestClientArgumentsAndProbe(t *testing.T) {
 	if err != nil || len(inventory) != 2 {
 		t.Fatalf("inventory=%v err=%v", inventory, err)
 	}
-	want := []string{"-T", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=2", "-p", "2222", "-o", "IdentitiesOnly=yes", "-i", "/keys/backup", "--", "replicator@Backup.EXAMPLE.net", "'zfs' 'list' '-H' '-p' '-t' 'filesystem,volume' '-o' 'name,type,encryptionroot'"}
+	want := []string{"-T", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=2", "-p", "2222", "-o", "IdentitiesOnly=yes", "-i", "/keys/backup", "--", "replicator@Backup.EXAMPLE.net", "'zfs' 'list' '-H' '-p' '-t' 'filesystem,volume' '-o' 'name,type,encryptionroot'"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("SSH args:\n got %#v\nwant %#v", got, want)
 	}
@@ -270,5 +273,51 @@ func TestEndpointSelectionAndExplicitFallback(t *testing.T) {
 	}
 	if _, err := OpenEndpoint(t.Context(), client, "/usr/bin/zfs", "ssh-shell"); !IsShellUnavailable(err) {
 		t.Fatalf("required SSH shell did not fail closed: %v", err)
+	}
+}
+
+func TestDirectEndpointMultiplexesAndCleansUp(t *testing.T) {
+	t.Parallel()
+	var calls [][]string
+	client, err := newClient(Config{Host: "backup.example.net", Root: "tank/backups"}, func(ctx context.Context, args []string) *exec.Cmd {
+		calls = append(calls, append([]string(nil), args...))
+		return helperCommand(ctx, "inventory")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := OpenEndpoint(t.Context(), client, "/usr/bin/zfs", "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := endpoint.Executor.ListDatasets(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("remote calls = %d, want 1", len(calls))
+	}
+	joined := strings.Join(calls[0], " ")
+	if !strings.Contains(joined, "ControlMaster=auto") || !strings.Contains(joined, "ControlPersist=60") {
+		t.Fatalf("direct SSH call is not multiplexed: %v", calls[0])
+	}
+	controlPrefix := "ControlPath="
+	var controlPath string
+	for _, arg := range calls[0] {
+		if strings.HasPrefix(arg, controlPrefix) {
+			controlPath = strings.TrimPrefix(arg, controlPrefix)
+		}
+	}
+	if controlPath == "" {
+		t.Fatalf("direct SSH call has no private control path: %v", calls[0])
+	}
+	controlDir := filepath.Dir(controlPath)
+	if err := endpoint.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 || !slices.Contains(calls[1], "exit") {
+		t.Fatalf("SSH master was not closed: %v", calls)
+	}
+	if _, err := os.Stat(controlDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("control directory remains after close: %v", err)
 	}
 }
