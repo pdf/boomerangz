@@ -1,0 +1,27 @@
+# boomerangz uses safe defaults when a setting is omitted. Add only values you
+# intend to override, then run `boomerangz config check` before starting the
+# service.
+
+[daemon]
+reconcile_interval = "1m"
+inactive_grace_period = "24h"
+management_workers = 0
+local_transfer_workers = 2
+remote_transfer_workers = 1
+
+[paths]
+credentials_dir = "/etc/boomerangz/credentials.d"
+identity_dir = "/var/lib/boomerangz/identity"
+socket_path = "/run/boomerangz/boomerangz.sock"
+
+# Define destinations explicitly. See docs/remote-ssh.md before enabling one.
+#
+# [remotes.home]
+# transport = "ssh"
+# endpoint = "ssh-shell"
+# host = "backup.example.net"
+# port = 22
+# user = "boomerangz-receive"
+# root = "tank/backups"
+# identity_file = "/etc/boomerangz/credentials.d/home_ed25519"
+# connect_timeout = "10s"

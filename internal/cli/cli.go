@@ -10,7 +10,7 @@ import (
 	"github.com/pdf/boomerangz/internal/discovery"
 )
 
-// BuildInfo describes the binary version injected by the build system.
+// BuildInfo describes the module and VCS metadata embedded in the binary.
 type BuildInfo struct {
 	Version string `json:"version"`
 	Commit  string `json:"commit"`

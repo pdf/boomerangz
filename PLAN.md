@@ -1266,11 +1266,13 @@ Packaging is intentionally deferred until after native transport and the CI
 integration/E2E matrix so package contents and dependencies reflect the
 complete initial release and release artifacts are gated by the supported
 OpenZFS target. Version `v0.1.0` uses the MIT license and provides two Arch
-PKGBUILDs: `boomerangz` builds with CGO disabled from a deterministic source
-archive published as a GitHub Release artifact, while `boomerangz-bin` installs
-CI-built release binaries. Race-test jobs may enable CGO; shipped binaries and
-normal package builds do not require it. Release recipes must contain real
-artifact checksums, never `SKIP` for downloaded archives.
+PKGBUILDs: `boomerangz` builds with CGO disabled and Arch's PIE policy from a
+deterministic source archive published as a GitHub Release artifact, while
+`boomerangz-bin` installs portable, statically linked CI-built release binaries
+without a libc dependency. Race-test jobs may enable CGO; shipped binaries and
+normal package builds do not require it. GoReleaser manages release archives,
+checksums, and both AUR recipes. Release recipes must contain real artifact
+checksums, never `SKIP` for downloaded archives.
 
 ## 16. References
 

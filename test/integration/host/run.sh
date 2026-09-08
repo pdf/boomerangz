@@ -8,6 +8,7 @@ readonly script_dir
 repository=$(cd -- "$script_dir/../../.." && pwd)
 readonly repository
 readonly target=${1:?usage: run.sh TARGET}
+readonly release_dir=${BOOMERANGZ_RELEASE_DIR:-}
 
 [[ $target =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
 	printf 'boomerangz integration: invalid target %q\n' "$target" >&2
@@ -164,9 +165,12 @@ for name in \
 	target_poweroff_command target_provision_command; do
 	required_target_value "$name"
 done
-for adapter in prepare-image.sh seed.sh provision.sh run.sh; do
+for adapter in prepare-image.sh seed.sh provision.sh run.sh package.sh; do
 	[[ -x $target_dir/$adapter ]] || fail "target $target is missing executable $adapter"
 done
+if [[ -n $release_dir ]]; then
+	[[ $release_dir == /* && -d $release_dir ]] || fail "BOOMERANGZ_RELEASE_DIR must be an absolute directory"
+fi
 [[ $ssh_port =~ ^[0-9]+$ ]] || fail "invalid SSH port"
 [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]] || fail "/dev/kvm is not usable"
 for tool in curl qemu-img "$target_qemu_binary" scp ssh ssh-keygen; do
@@ -215,6 +219,11 @@ cp "$repository/test/integration/guest/run-common.sh" "$artifacts/"
 cp "$repository/contrib/systemd/boomerangz.service" "$artifacts/"
 cp "$repository/contrib/sysusers.d/boomerangz.conf" "$artifacts/boomerangz.sysusers"
 cp "$repository/contrib/tmpfiles.d/boomerangz.conf" "$artifacts/boomerangz.tmpfiles"
+if [[ -n $release_dir ]]; then
+	mkdir -p "$artifacts/target"
+	cp "$target_dir/package.sh" "$artifacts/target/package.sh"
+	cp -R -- "$release_dir" "$artifacts/release"
+fi
 copy_to_guest "$artifacts" "$target_dir/run.sh"
 ssh_guest "mv /home/$target_guest_user/integration/run.sh /home/$target_guest_user/integration/target/run.sh"
 ssh_guest "BOOMERANGZ_INTEGRATION_RUN=$run_id /home/$target_guest_user/integration/target/run.sh /home/$target_guest_user/integration/artifacts $run_id $target_source_device $target_destination_device" | tee "$diagnostics/test-output.txt"

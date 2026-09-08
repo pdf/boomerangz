@@ -90,7 +90,7 @@ func (c *versionCommand) Run(env *commandEnvironment) error {
 	if c.JSON {
 		return json.NewEncoder(env.Stdout).Encode(env.Build)
 	}
-	_, err := fmt.Fprintf(env.Stdout, "boomerangz %s (commit %s, built %s)\n", env.Build.Version, env.Build.Commit, env.Build.Date)
+	_, err := fmt.Fprintf(env.Stdout, "boomerangz %s (commit %s at %s)\n", env.Build.Version, env.Build.Commit, env.Build.Date)
 	return err
 }
 

@@ -12,6 +12,10 @@ cat /etc/os-release
 pacman -Q linux-cachyos-lts linux-cachyos-lts-zfs zfs-utils
 modinfo -F version zfs
 
+if [[ -d $artifact_dir/release ]]; then
+	"$artifact_dir/target/package.sh" "$artifact_dir/release" "$run_id" "$source_device" "$destination_device"
+fi
+
 "$artifact_dir/run-common.sh" "$artifact_dir" "$run_id" "$source_device" "$destination_device"
 
 # Installed-system behavior is target-specific. CachyOS uses systemd and the

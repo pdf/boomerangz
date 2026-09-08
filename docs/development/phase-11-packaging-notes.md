@@ -1,8 +1,7 @@
 # Phase 11 packaging notes
 
-Packaging is deferred until the feature, native-transport, and CI
-integration/E2E phases are complete. The current draft is preserved on the
-branch `feat/phase-11-packaging` at commit `cff963d` and is not part of `main`.
+Packaging work is isolated on `feat/phase-11-packaging` after completion of the
+feature, native-transport, and CI integration/E2E phases.
 
 Confirmed release decisions:
 
@@ -14,13 +13,23 @@ Confirmed release decisions:
 - `boomerangz-bin` installs CI-built GitHub Release binaries;
 - normal and release builds disable CGO; the race detector may enable it only
   for testing;
+- generic release binaries use the normal static Go executable build mode so
+  they do not bind to the build host's libc; only the source AUR package applies
+  Arch's PIE policy and declares `glibc`, which supplies the ELF interpreter
+  requested by Go's Linux PIE output even when CGO is disabled;
+- GoReleaser v2 is the source of truth for binary and source archives,
+  checksums, release metadata, and generated `boomerangz` and `boomerangz-bin`
+  AUR recipes;
 - CI publishes amd64 and arm64 binary archives, the source archive, checksums,
   and rendered PKGBUILDs containing the real archive checksums;
 - downloaded release archives must never use `SKIP` integrity checks.
 
-Before Phase 11 is completed, rebase the draft onto the finished
-implementation, refresh installed documentation and completions, validate both
-PKGBUILDs from the published artifacts, and exercise clean install,
-protected-config upgrade, service-account, tmpfiles, sysusers, and systemd
-behavior in a fresh disposable guest after the supported-platform CI matrix
-passes.
+Both generated PKGBUILDs were validated from the exact draft-release artifacts
+in a fresh disposable CachyOS guest. The validation covered archive checksums,
+source and binary builds, clean installation, protected-configuration upgrades,
+service-account creation, tmpfiles and sysusers behavior, systemd startup,
+package removal, and expected executable linkage.
+
+AUR publication is gated by the repository `PUBLISH_AUR` variable and a
+dedicated AUR SSH credential so release validation cannot publish a broken
+recipe.

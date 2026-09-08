@@ -1,0 +1,112 @@
+.TH BOOMERANGZ 1 "September 2026" "boomerangz" "User Commands"
+.SH NAME
+boomerangz \- property-driven ZFS snapshot and replication manager
+.SH SYNOPSIS
+.B boomerangz
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B boomerangz
+manages OpenZFS snapshots, retention, local replication, SSH replication, and
+authenticated native replication
+from policy stored in ZFS user properties. The daemon runs as an unprivileged
+service account with explicitly delegated ZFS permissions.
+.SH COMMANDS
+.TP
+.B daemon
+Run reconciliation, scheduling, replication, pruning, and inactive-dataset
+retirement in the foreground.
+.TP
+.B status
+Show daemon status. Use
+.B --watch
+to follow changes and
+.B --interval
+to bound refresh time.
+.TP
+.B trigger
+Queue an immediate snapshot for selected active roots, or all active roots when
+no dataset is named.
+.TP
+.B dataset list
+List discovered datasets and effective policy as JSON.
+.TP
+.B dataset inspect DATASET
+Inspect one dataset's resolved policy and property provenance as JSON.
+.TP
+.B dataset adopt DATASET
+Preview adoption of an existing lineage. Add
+.B --apply
+to apply after revalidation.
+.TP
+.B dataset clean
+Preview explicit decommissioning. Selection requires exact dataset arguments,
+.BR --recursive ,
+or
+.BR --all .
+Snapshots are retained unless
+.B --destroy-owned-snapshots
+is supplied. Add
+.B --apply
+to apply after revalidation.
+.TP
+.B identity recover
+Preview installation-identity recovery from local owner markers. Add
+.B --owner
+when more than one candidate exists and
+.B --apply
+to apply.
+.TP
+.B config check
+Validate the primary configuration file, every drop-in, and the merged result.
+.TP
+.B config show
+Print the effective configuration with secrets redacted.
+.TP
+.B pairing create
+Create a one-time pairing bundle for a configured TCP listener. Scopes are
+.BR status ,
+.BR trigger ,
+.BR replicate ,
+.BR prune ,
+and
+.BR admin .
+.TP
+.B pairing import NAME BUNDLE
+Import a pairing bundle under a local credential name.
+.TP
+.B pairing list
+List issued and imported pairings.
+.TP
+.B pairing revoke ID
+Revoke a Boomerangz-managed pairing.
+.TP
+.B ssh-shell --root DATASET
+Serve the restricted replication protocol over standard input and output. This
+command is intended for a forced OpenSSH command, not interactive use.
+.TP
+.B version
+Show build version, commit, and date. Use
+.B --json
+for structured output.
+.SH FILES
+.TP
+.I /etc/boomerangz/config.toml
+Primary configuration file.
+.TP
+.I /etc/boomerangz/config.d/*.toml
+Lexically ordered configuration drop-ins.
+.TP
+.I /etc/boomerangz/credentials.d/
+Imported client credentials and SSH key material.
+.TP
+.I /var/lib/boomerangz/identity/
+Installation identity, server identity, and token verifiers.
+.TP
+.I /run/boomerangz/boomerangz.sock
+Local daemon control socket.
+.SH SEE ALSO
+.BR boomerangz.toml (5),
+.BR zfs (8),
+.BR zfs-allow (8),
+.BR ssh (1)

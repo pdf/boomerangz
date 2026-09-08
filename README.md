@@ -15,7 +15,8 @@ boomerangz daemon
 ```
 
 The supplied systemd integration runs the same command as a dedicated service
-account. See [docs/daemon.md](docs/daemon.md) before enabling it.
+account. See [docs/installation.md](docs/installation.md) and
+[docs/daemon.md](docs/daemon.md) before enabling it.
 
 Inspect or watch a running daemon and request an immediate snapshot:
 

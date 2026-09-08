@@ -1,0 +1,34 @@
+#compdef boomerangz
+
+_boomerangz() {
+  local context state line
+  typeset -A opt_args
+  _arguments -C \
+    '(-h --help)'{-h,--help}'[show help]' \
+    '1:command:->command' \
+    '*::argument:->argument'
+  case $state in
+    command)
+      _values 'command' \
+        'config[inspect and validate daemon configuration]' \
+        'daemon[run management in the foreground]' \
+        'dataset[inspect and administer datasets]' \
+        'identity[inspect and recover installation identity]' \
+        'pairing[manage authenticated API pairings]' \
+        'status[show live daemon status]' \
+        'trigger[queue an immediate snapshot]' \
+        'version[show version information]'
+      ;;
+    argument)
+      case $words[2] in
+        config) _values 'command' check show ;;
+        dataset) _values 'command' adopt clean inspect list ;;
+        identity) _values 'command' recover ;;
+        pairing) _values 'command' create import list revoke ;;
+        *) _files ;;
+      esac
+      ;;
+  esac
+}
+
+_boomerangz "$@"

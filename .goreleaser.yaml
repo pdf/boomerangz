@@ -1,0 +1,138 @@
+version: 2
+
+project_name: boomerangz
+
+builds:
+  - id: boomerangz
+    main: ./cmd/boomerangz
+    binary: boomerangz
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+      - -mod=readonly
+    ldflags:
+      - -s -w -buildid=
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: boomerangz
+    ids:
+      - boomerangz
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    wrap_in_directory: "{{ .ProjectName }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - LICENSE
+      - contrib/config.toml
+      - contrib/completions/*
+      - contrib/man/*
+      - contrib/systemd/*
+      - contrib/sysusers.d/*
+      - contrib/tmpfiles.d/*
+
+source:
+  enabled: true
+  name_template: "{{ .ProjectName }}-v{{ .Version }}-source"
+  format: tar.gz
+  prefix_template: "{{ .ProjectName }}-v{{ .Version }}-source/"
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+release:
+  draft: true
+  replace_existing_draft: true
+  extra_files:
+    - glob: ./dist/aur/boomerangz.pkgbuild
+      name_template: boomerangz-PKGBUILD
+    - glob: ./dist/aur/boomerangz-bin.pkgbuild
+      name_template: boomerangz-bin-PKGBUILD
+
+aurs:
+  - name: boomerangz-bin
+    ids:
+      - boomerangz
+    homepage: https://github.com/pdf/boomerangz
+    description: Property-driven ZFS snapshot and replication manager (prebuilt binary)
+    license: MIT
+    git_url: ssh://aur@aur.archlinux.org/boomerangz-bin.git
+    # The release workflow publishes this only after guest validation.
+    skip_upload: true
+    provides:
+      - boomerangz
+    conflicts:
+      - boomerangz
+    depends:
+      - zfs-utils
+    optdepends:
+      - "openssh: SSH replication destinations"
+    backup:
+      - etc/boomerangz/config.toml
+    package: |-
+      case "${CARCH}" in
+        x86_64) goarch=amd64 ;;
+        aarch64) goarch=arm64 ;;
+      esac
+      release_version=${pkgver//_/-}
+      cd "boomerangz-v${release_version}-linux-${goarch}"
+      install -Dm755 boomerangz "${pkgdir}/usr/bin/boomerangz"
+      install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/boomerangz/LICENSE"
+      install -dm750 "${pkgdir}/etc/boomerangz"
+      install -Dm644 contrib/config.toml "${pkgdir}/etc/boomerangz/config.toml"
+      install -Dm644 contrib/systemd/boomerangz.service "${pkgdir}/usr/lib/systemd/system/boomerangz.service"
+      install -Dm644 contrib/sysusers.d/boomerangz.conf "${pkgdir}/usr/lib/sysusers.d/boomerangz.conf"
+      install -Dm644 contrib/tmpfiles.d/boomerangz.conf "${pkgdir}/usr/lib/tmpfiles.d/boomerangz.conf"
+      install -Dm644 contrib/man/boomerangz.1 "${pkgdir}/usr/share/man/man1/boomerangz.1"
+      install -Dm644 contrib/man/boomerangz.toml.5 "${pkgdir}/usr/share/man/man5/boomerangz.toml.5"
+      install -Dm644 contrib/completions/boomerangz.bash "${pkgdir}/usr/share/bash-completion/completions/boomerangz"
+      install -Dm644 contrib/completions/_boomerangz "${pkgdir}/usr/share/zsh/site-functions/_boomerangz"
+      install -Dm644 contrib/completions/boomerangz.fish "${pkgdir}/usr/share/fish/vendor_completions.d/boomerangz.fish"
+
+aur_sources:
+  - name: boomerangz
+    homepage: https://github.com/pdf/boomerangz
+    description: Property-driven ZFS snapshot and replication manager
+    license: MIT
+    git_url: ssh://aur@aur.archlinux.org/boomerangz.git
+    # The release workflow publishes this only after guest validation.
+    skip_upload: true
+    conflicts:
+      - boomerangz-bin
+    depends:
+      - glibc
+      - zfs-utils
+    makedepends:
+      - go>=1.26.0
+    optdepends:
+      - "openssh: SSH replication destinations"
+    backup:
+      - etc/boomerangz/config.toml
+    build: |-
+      release_version=${pkgver//_/-}
+      cd "boomerangz-v${release_version}-source"
+      export CGO_ENABLED=0
+      export GOFLAGS="-buildmode=pie -trimpath -mod=readonly -modcacherw"
+      go build -ldflags="-compressdwarf=false -X main.sourceVersion=v{{ .Version }} -X main.sourceCommit={{ .FullCommit }} -X main.sourceDate={{ .CommitDate }}" -o boomerangz ./cmd/boomerangz
+    package: |-
+      release_version=${pkgver//_/-}
+      cd "boomerangz-v${release_version}-source"
+      install -Dm755 boomerangz "${pkgdir}/usr/bin/boomerangz"
+      install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/boomerangz/LICENSE"
+      install -dm750 "${pkgdir}/etc/boomerangz"
+      install -Dm644 contrib/config.toml "${pkgdir}/etc/boomerangz/config.toml"
+      install -Dm644 contrib/systemd/boomerangz.service "${pkgdir}/usr/lib/systemd/system/boomerangz.service"
+      install -Dm644 contrib/sysusers.d/boomerangz.conf "${pkgdir}/usr/lib/sysusers.d/boomerangz.conf"
+      install -Dm644 contrib/tmpfiles.d/boomerangz.conf "${pkgdir}/usr/lib/tmpfiles.d/boomerangz.conf"
+      install -Dm644 contrib/man/boomerangz.1 "${pkgdir}/usr/share/man/man1/boomerangz.1"
+      install -Dm644 contrib/man/boomerangz.toml.5 "${pkgdir}/usr/share/man/man5/boomerangz.toml.5"
+      install -Dm644 contrib/completions/boomerangz.bash "${pkgdir}/usr/share/bash-completion/completions/boomerangz"
+      install -Dm644 contrib/completions/_boomerangz "${pkgdir}/usr/share/zsh/site-functions/_boomerangz"
+      install -Dm644 contrib/completions/boomerangz.fish "${pkgdir}/usr/share/fish/vendor_completions.d/boomerangz.fish"

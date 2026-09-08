@@ -1,0 +1,101 @@
+.TH BOOMERANGZ.TOML 5 "September 2026" "boomerangz" "File Formats"
+.SH NAME
+boomerangz.toml \- boomerangz daemon configuration
+.SH DESCRIPTION
+The primary file is read before lexically ordered
+.I /etc/boomerangz/config.d/*.toml
+drop-ins. Tables merge recursively, later scalar values override earlier values,
+and arrays replace earlier arrays. ZFS dataset policy is not configured here;
+it uses
+.B org.boomerangz:*
+user properties.
+.SH DAEMON
+The
+.B [daemon]
+table accepts
+.BR reconcile_interval ,
+.BR inactive_grace_period ,
+.BR management_workers ,
+.BR local_transfer_workers ,
+and
+.BR remote_transfer_workers .
+Durations use Go duration syntax. A zero inactive grace period disables automatic
+retirement. Zero management workers selects the process's available logical CPU
+count.
+.SH PATHS
+The
+.B [paths]
+table accepts
+.BR credentials_dir ,
+.BR identity_dir ,
+and
+.BR socket_path .
+The service account must be able to read credentials and write the identity and
+socket locations.
+.SH REMOTES
+Each
+.B [remotes.NAME]
+table defines an SSH or native destination. Fields are
+.BR transport ,
+.BR credential ,
+.BR endpoint ,
+.BR host ,
+.BR port ,
+.BR user ,
+.BR root ,
+.BR identity_file ,
+.BR ssh_shell_path ,
+and
+.BR connect_timeout .
+Transport is
+.B ssh
+or
+.BR native .
+For SSH, endpoint is
+.BR direct ,
+.BR ssh-shell ,
+or
+.BR auto .
+Native transport uses an imported pairing named by
+.B credential
+and does not accept SSH connection fields.
+Strict host-key checking is always enabled.
+.SH LISTENERS
+Each
+.B [listeners.NAME]
+table defines an optional authenticated TCP control listener. Fields are
+.BR network ,
+.BR address ,
+.BR advertised_address ,
+.BR auth_mode ,
+.BR tls_cert ,
+.BR tls_key ,
+.BR client_ca ,
+.BR pairing_ca ,
+.BR pairing_pin_certificate ,
+and
+.BR replication_roots .
+Network is
+.B unix
+or
+.BR tcp .
+TCP authentication modes are
+.BR token ,
+.BR mtls ,
+and
+.BR mtls+token .
+There is no unauthenticated TCP mode.
+When the TLS certificate and key are omitted, boomerangz manages a private CA
+and renewable server certificate using the client-visible
+.BR advertised_address .
+Replication roots expose only the listed ZFS destination subtrees; an empty
+list keeps a TCP listener control-only.
+.SH VALIDATION
+Run
+.B boomerangz config check
+after changing any configuration source. Run
+.B boomerangz config show
+to inspect the merged, redacted result.
+.SH SEE ALSO
+.BR boomerangz (1),
+.BR zfsprops (7)
