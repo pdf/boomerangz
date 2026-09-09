@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,6 +25,14 @@ import (
 )
 
 func TestGuestSSHTransfer(t *testing.T) {
+	runGuestRemoteTransfers(t, nil)
+}
+
+func BenchmarkGuestRemoteTransfer(b *testing.B) {
+	runGuestRemoteTransfers(b, b)
+}
+
+func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 	runID := os.Getenv("BOOMERANGZ_REMOTE_GUEST_RUN")
 	if runID == "" {
 		t.Skip("disposable guest only")
@@ -100,16 +107,8 @@ func TestGuestSSHTransfer(t *testing.T) {
 	if restrictedUser == "" {
 		restrictedUser = directUser
 	}
-	type measurement struct {
-		open  time.Duration
-		apply time.Duration
-		total time.Duration
-		bytes uint64
-	}
-	const sampleCount = 3
-	run := func(mode, root string) (transfer.Result, measurement) {
+	runSSH := func(mode, root string) transfer.Result {
 		t.Helper()
-		totalStarted := time.Now()
 		user := directUser
 		if mode == "ssh-shell" {
 			user = restrictedUser
@@ -118,9 +117,7 @@ func TestGuestSSHTransfer(t *testing.T) {
 		if clientErr != nil {
 			t.Fatal(clientErr)
 		}
-		openStarted := time.Now()
 		endpoint, endpointErr := replicationssh.OpenEndpoint(t.Context(), client, "zfs", mode)
-		openElapsed := time.Since(openStarted)
 		if endpointErr != nil {
 			t.Fatal(endpointErr)
 		}
@@ -129,94 +126,109 @@ func TestGuestSSHTransfer(t *testing.T) {
 		if engineErr != nil {
 			t.Fatal(engineErr)
 		}
-		started := time.Now()
 		result, applyErr := engine.Apply(t.Context(), request, nil)
-		applyElapsed := time.Since(started)
 		if applyErr != nil || !result.Verified {
 			t.Fatalf("%s result=%+v err=%v", mode, result, applyErr)
 		}
 		if closeErr := endpoint.Close(); closeErr != nil {
 			t.Fatal(closeErr)
 		}
-		return result, measurement{open: openElapsed, apply: applyElapsed, total: time.Since(totalStarted), bytes: result.Progress.Bytes}
-	}
-	report := func(name string, samples []measurement) {
-		t.Helper()
-		sort.Slice(samples, func(i, j int) bool { return samples[i].total < samples[j].total })
-		median := samples[len(samples)/2]
-		t.Logf("%s: %d samples, median total=%s (open=%s apply=%s, %.2f MiB/s), range=%s..%s", name, len(samples), median.total, median.open, median.apply, float64(median.bytes)/(1024*1024)/median.total.Seconds(), samples[0].total, samples[len(samples)-1].total)
+		return result
 	}
 	for _, mode := range []string{"direct", "ssh-shell"} {
-		samples := make([]measurement, 0, sampleCount)
-		for index := range sampleCount {
-			root := destinationPool + "/data/remote-" + mode + "-" + suffix + "-" + strconv.Itoa(index)
-			result, measured := run(mode, root)
-			if result.Plan.TargetBinding.Transport != "ssh" || !strings.HasPrefix(result.Plan.TargetBinding.CanonicalTarget, "ssh://") {
-				t.Fatalf("%s target binding=%+v", mode, result.Plan.TargetBinding)
-			}
-			samples = append(samples, measured)
+		if benchmark != nil {
+			benchmark.Run(mode, func(b *testing.B) {
+				benchmarkSuffix := strconv.FormatInt(time.Now().UTC().UnixNano(), 10)
+				b.ResetTimer()
+				for index := range b.N {
+					root := destinationPool + "/data/benchmark-" + mode + "-" + benchmarkSuffix + "-" + strconv.Itoa(index)
+					result := runSSH(mode, root)
+					b.SetBytes(int64(result.Progress.Bytes))
+				}
+				b.StopTimer()
+			})
+			continue
 		}
-		report(mode+" SSH", samples)
+		root := destinationPool + "/data/remote-" + mode + "-" + suffix
+		result := runSSH(mode, root)
+		if result.Plan.TargetBinding.Transport != "ssh" || !strings.HasPrefix(result.Plan.TargetBinding.CanonicalTarget, "ssh://") {
+			t.Fatalf("%s target binding=%+v", mode, result.Plan.TargetBinding)
+		}
 	}
 
-	nativeRoots := make([]string, sampleCount)
-	for index := range sampleCount {
-		nativeRoots[index] = destinationPool + "/data/remote-native-" + suffix + "-" + strconv.Itoa(index)
-	}
-	pkiDir := t.TempDir()
-	nativeConfig := config.Defaults()
-	nativeConfig.Paths.SocketPath = filepath.Join(pkiDir, "control.sock")
-	nativeConfig.Paths.IdentityDir = filepath.Join(pkiDir, "identity")
-	listenerConfig := config.ListenerConfig{Network: "tcp", Address: "127.0.0.1:0", AdvertisedAddress: "localhost:7443", AuthMode: "token", ReplicationRoots: nativeRoots}
-	nativeConfig.Listeners["replication"] = listenerConfig
-	server, err := control.StartServerWithReplication(nativeConfig, nil, direct, "zfs", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = server.Close() }()
-	addresses := server.Addresses("tcp")
-	if len(addresses) != 1 {
-		t.Fatalf("native listener addresses=%v", addresses)
-	}
-	_, port, err := net.SplitHostPort(addresses[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	listenerConfig.AdvertisedAddress = net.JoinHostPort("localhost", port)
-	store, err := control.NewTokenStore(nativeConfig.Paths.IdentityDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bundle, err := control.CreateListenerPairing(store, nativeConfig.Paths.IdentityDir, "replication", listenerConfig, "", "", []string{"replicate"}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nativeSamples := make([]measurement, 0, sampleCount)
-	for _, nativeRoot := range nativeRoots {
-		totalStarted := time.Now()
-		openStarted := time.Now()
-		nativeEndpoint, openErr := replicationnative.Open(t.Context(), bundle, nativeRoot, "zfs")
-		openElapsed := time.Since(openStarted)
-		if openErr != nil {
-			t.Fatal(openErr)
+	runNative := func(roots []string, execute func(int, func(string) transfer.Result)) {
+		t.Helper()
+		pkiDir := t.TempDir()
+		nativeConfig := config.Defaults()
+		nativeConfig.Paths.SocketPath = filepath.Join(pkiDir, "control.sock")
+		nativeConfig.Paths.IdentityDir = filepath.Join(pkiDir, "identity")
+		listenerConfig := config.ListenerConfig{Network: "tcp", Address: "127.0.0.1:0", AdvertisedAddress: "localhost:7443", AuthMode: "token", ReplicationRoots: roots}
+		nativeConfig.Listeners["replication"] = listenerConfig
+		server, startErr := control.StartServerWithReplication(nativeConfig, nil, direct, "zfs", nil)
+		if startErr != nil {
+			t.Fatal(startErr)
 		}
-		nativeRequest := transfer.Request{Source: source, DestinationRoot: nativeRoot, Snapshot: source + "@" + metadata.Name(), Policy: effective, Transport: "native", RemoteName: "home", CanonicalTarget: nativeEndpoint.CanonicalTarget()}
-		nativeEngine, engineErr := transfer.NewRemote(direct, nativeEndpoint.Executor(), nativeEndpoint.Stream(), installation)
-		if engineErr != nil {
-			t.Fatal(engineErr)
+		defer func() { _ = server.Close() }()
+		addresses := server.Addresses("tcp")
+		if len(addresses) != 1 {
+			t.Fatalf("native listener addresses=%v", addresses)
 		}
-		started := time.Now()
-		nativeResult, applyErr := nativeEngine.Apply(t.Context(), nativeRequest, nil)
-		applyElapsed := time.Since(started)
-		if applyErr != nil || !nativeResult.Verified || nativeResult.Plan.TargetBinding.Transport != "native" {
-			t.Fatalf("native result=%+v err=%v", nativeResult, applyErr)
+		_, port, splitErr := net.SplitHostPort(addresses[0])
+		if splitErr != nil {
+			t.Fatal(splitErr)
 		}
-		if closeErr := nativeEndpoint.Close(); closeErr != nil {
-			t.Fatal(closeErr)
+		listenerConfig.AdvertisedAddress = net.JoinHostPort("localhost", port)
+		store, storeErr := control.NewTokenStore(nativeConfig.Paths.IdentityDir)
+		if storeErr != nil {
+			t.Fatal(storeErr)
 		}
-		nativeSamples = append(nativeSamples, measurement{open: openElapsed, apply: applyElapsed, total: time.Since(totalStarted), bytes: nativeResult.Progress.Bytes})
+		bundle, pairingErr := control.CreateListenerPairing(store, nativeConfig.Paths.IdentityDir, "replication", listenerConfig, "", "", []string{"replicate"}, nil)
+		if pairingErr != nil {
+			t.Fatal(pairingErr)
+		}
+		transferRoot := func(root string) transfer.Result {
+			nativeEndpoint, openErr := replicationnative.Open(t.Context(), bundle, root, "zfs")
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			nativeRequest := transfer.Request{Source: source, DestinationRoot: root, Snapshot: source + "@" + metadata.Name(), Policy: effective, Transport: "native", RemoteName: "home", CanonicalTarget: nativeEndpoint.CanonicalTarget()}
+			nativeEngine, engineErr := transfer.NewRemote(direct, nativeEndpoint.Executor(), nativeEndpoint.Stream(), installation)
+			if engineErr != nil {
+				t.Fatal(engineErr)
+			}
+			nativeResult, applyErr := nativeEngine.Apply(t.Context(), nativeRequest, nil)
+			if applyErr != nil || !nativeResult.Verified || nativeResult.Plan.TargetBinding.Transport != "native" {
+				t.Fatalf("native result=%+v err=%v", nativeResult, applyErr)
+			}
+			if closeErr := nativeEndpoint.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			return nativeResult
+		}
+		execute(len(roots), transferRoot)
 	}
-	report("native TLS gRPC", nativeSamples)
+	if benchmark != nil {
+		benchmark.Run("native", func(b *testing.B) {
+			benchmarkSuffix := strconv.FormatInt(time.Now().UTC().UnixNano(), 10)
+			roots := make([]string, b.N)
+			for index := range b.N {
+				roots[index] = destinationPool + "/data/benchmark-native-" + benchmarkSuffix + "-" + strconv.Itoa(index)
+			}
+			runNative(roots, func(count int, transferRoot func(string) transfer.Result) {
+				b.ResetTimer()
+				for index := range count {
+					result := transferRoot(roots[index])
+					b.SetBytes(int64(result.Progress.Bytes))
+				}
+				b.StopTimer()
+			})
+		})
+		return
+	}
+	nativeRoot := destinationPool + "/data/remote-native-" + suffix
+	runNative([]string{nativeRoot}, func(_ int, transferRoot func(string) transfer.Result) {
+		transferRoot(nativeRoot)
+	})
 
 	// Keep a short connection check separate from the data transfer diagnostics.
 	probeCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)

@@ -9,9 +9,14 @@ repository=$(cd -- "$script_dir/../../.." && pwd)
 readonly repository
 readonly target=${1:?usage: run.sh TARGET}
 readonly release_dir=${BOOMERANGZ_RELEASE_DIR:-}
+readonly integration_mode=${BOOMERANGZ_INTEGRATION_MODE:-test}
 
 [[ $target =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
 	printf 'boomerangz integration: invalid target %q\n' "$target" >&2
+	exit 1
+}
+[[ $integration_mode == test || $integration_mode == benchmark ]] || {
+	printf 'boomerangz integration: invalid mode %q\n' "$integration_mode" >&2
 	exit 1
 }
 readonly target_dir=$repository/test/integration/targets/$target
@@ -229,7 +234,7 @@ fi
 copy_to_guest "$artifacts" "$target_dir/run.sh"
 ssh_guest "mv /home/$target_guest_user/integration/run.sh /home/$target_guest_user/integration/target/run.sh"
 ssh_guest "sudo mv /home/$target_guest_user/integration/artifacts $guest_artifacts"
-ssh_guest "BOOMERANGZ_INTEGRATION_RUN=$run_id /home/$target_guest_user/integration/target/run.sh $guest_artifacts $run_id $target_source_device $target_destination_device" | tee "$diagnostics/test-output.txt"
+ssh_guest "BOOMERANGZ_INTEGRATION_RUN=$run_id BOOMERANGZ_INTEGRATION_MODE=$integration_mode /home/$target_guest_user/integration/target/run.sh $guest_artifacts $run_id $target_source_device $target_destination_device" | tee "$diagnostics/test-output.txt"
 
 ssh_guest "$target_poweroff_command" || true
 for _ in {1..60}; do

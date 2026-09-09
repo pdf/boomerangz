@@ -53,6 +53,10 @@ sudo chmod 0640 /etc/boomerangz/config.toml
 BOOMERANGZ_INTEGRATION_DIRECT_SSH_USER="$direct_ssh_user" \
 	"$artifact_dir/run-common.sh" "$artifact_dir" "$run_id" "$source_device" "$destination_device"
 
+if [[ ${BOOMERANGZ_INTEGRATION_MODE:-test} == benchmark ]]; then
+	exit 0
+fi
+
 sudo systemctl daemon-reload
 sudo systemctl start boomerangz.service
 sudo systemctl is-active boomerangz.service

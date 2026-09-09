@@ -6,13 +6,14 @@ SHELLCHECK_SOURCES := $(wildcard \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test integration-test-compile integration-test
+.PHONY: help test integration-test-compile integration-test integration-benchmark
 
 help:
 	@printf '%s\n' \
 		'make test                      Run the host-safe CI validation suite' \
 		'make integration-test-compile Compile integration tests without running them' \
-		'make integration-test          Run real-ZFS tests in a disposable QEMU guest'
+		'make integration-test          Run real-ZFS tests in a disposable QEMU guest' \
+		'make integration-benchmark     Benchmark remote transfers in a disposable QEMU guest'
 
 test:
 	go test ./...
@@ -30,3 +31,6 @@ integration-test-compile:
 
 integration-test:
 	test/integration/host/run.sh $(INTEGRATION_TARGET)
+
+integration-benchmark:
+	BOOMERANGZ_INTEGRATION_MODE=benchmark test/integration/host/run.sh $(INTEGRATION_TARGET)

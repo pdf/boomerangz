@@ -11,8 +11,14 @@ readonly config=$artifact_dir/config.toml
 readonly loopback_key=$artifact_dir/loopback_ed25519
 readonly service_user=boomerangz
 readonly direct_ssh_user=${BOOMERANGZ_INTEGRATION_DIRECT_SSH_USER:?missing direct SSH user}
+readonly integration_mode=${BOOMERANGZ_INTEGRATION_MODE:-test}
 export BOOMERANGZ_INTEGRATION_SOURCE_DEVICE=$source_device
 export BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE=$destination_device
+
+[[ $integration_mode == test || $integration_mode == benchmark ]] || {
+	printf 'invalid integration mode %q\n' "$integration_mode" >&2
+	exit 1
+}
 
 run_as_service() {
 	sudo -u "$service_user" -H env \
@@ -59,6 +65,17 @@ sed 's/^/restrict /' "$loopback_key.pub" |
 	sudo tee "/var/lib/$service_user/.ssh/authorized_keys" >/dev/null
 sudo chown "$service_user:$service_user" "/var/lib/$service_user/.ssh/authorized_keys"
 sudo chmod 0600 "/var/lib/$service_user/.ssh/authorized_keys"
+
+if [[ $integration_mode == benchmark ]]; then
+	run_as_service \
+	BOOMERANGZ_REMOTE_GUEST_RUN="$run_id" \
+	BOOMERANGZ_REMOTE_GUEST_KEY="$loopback_key" \
+	BOOMERANGZ_REMOTE_GUEST_CLI="/usr/bin/boomerangz" \
+	BOOMERANGZ_REMOTE_DIRECT_SSH_USER="$direct_ssh_user" \
+	BOOMERANGZ_REMOTE_GUEST_USER="$service_user" \
+		"$artifact_dir/transfer.test" -test.run '^$' -test.bench '^BenchmarkGuestRemoteTransfer$'
+	exit 0
+fi
 
 run_as_service \
 BOOMERANGZ_LIFECYCLE_GUEST_RUN="$run_id" \
