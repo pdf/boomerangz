@@ -34,7 +34,7 @@ type ReceiveDiscard string
 
 // Receive path modes match the public discard property.
 const (
-	ReceiveExact     ReceiveDiscard = "none"
+	ReceiveExact     ReceiveDiscard = "off"
 	ReceiveDropFirst ReceiveDiscard = "first"
 	ReceiveDropAll   ReceiveDiscard = "all"
 )

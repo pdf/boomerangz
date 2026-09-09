@@ -123,7 +123,8 @@ func TestPolicyValidation(t *testing.T) {
 		{"empty target", map[string]string{"local": "tank/a,"}, false, false, "empty entry"},
 		{"argument injection", map[string]string{"local": "-bad"}, false, false, "invalid ZFS"},
 		{"toggle", map[string]string{"compressed": "yes"}, false, false, "on or off"},
-		{"mapping", map[string]string{"discard": "both"}, false, false, "none, first, or all"},
+		{"mapping", map[string]string{"discard": "both"}, false, false, "off, first, or all"},
+		{"removed mapping value", map[string]string{"discard": "none"}, false, false, "off, first, or all"},
 		{"reserved set", map[string]string{"set_prop:org.boomerangz:enabled": "on"}, false, false, "reserved"},
 		{"reserved ignore", map[string]string{"ignore_prop:org.boomerangz:state:lineage": "off"}, false, false, "reserved"},
 		{"raw encryption", map[string]string{"set_prop:encryption": "off"}, true, false, "raw encrypted"},
@@ -173,19 +174,19 @@ func TestTargets(t *testing.T) {
 
 func TestDiscardInheritance(t *testing.T) {
 	t.Parallel()
-	for _, choice := range []Discard{DiscardNone, DiscardFirst, DiscardAll} {
+	for _, choice := range []Discard{DiscardOff, DiscardFirst, DiscardAll} {
 		parent := Resolve(zfs.Dataset{Name: "tank"}, nil, []zfs.Property{property("tank", "discard", string(choice), zfs.SourceLocal)}, nil)
 		child := Resolve(zfs.Dataset{Name: "tank/child"}, &parent, nil, nil)
 		if !parent.Valid() || !child.Valid() || child.Discard != choice {
 			t.Fatalf("choice %s did not inherit: %#v", choice, child)
 		}
-		reset := Resolve(zfs.Dataset{Name: "tank/child"}, &parent, []zfs.Property{property("tank/child", "discard", "none", zfs.SourceLocal)}, nil)
-		if !reset.Valid() || reset.Discard != DiscardNone {
-			t.Fatal("none did not override inherited discard")
+		reset := Resolve(zfs.Dataset{Name: "tank/child"}, &parent, []zfs.Property{property("tank/child", "discard", "off", zfs.SourceLocal)}, nil)
+		if !reset.Valid() || reset.Discard != DiscardOff {
+			t.Fatal("off did not override inherited discard")
 		}
 	}
 	defaults := Resolve(zfs.Dataset{Name: "tank"}, nil, nil, nil)
-	if defaults.Discard != DiscardNone {
+	if defaults.Discard != DiscardOff {
 		t.Fatal("incorrect default")
 	}
 }

@@ -5,7 +5,7 @@ type Discard string
 
 // Valid discard choices correspond to no mapping flag, -d, and -e respectively.
 const (
-	DiscardNone  Discard = "none"
+	DiscardOff   Discard = "off"
 	DiscardFirst Discard = "first"
 	DiscardAll   Discard = "all"
 )

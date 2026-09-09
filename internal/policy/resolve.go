@@ -84,7 +84,7 @@ func Resolve(dataset zfs.Dataset, parent *Effective, stored []zfs.Property, remo
 	encrypted := dataset.EncryptionRoot != "" && dataset.EncryptionRoot != "-"
 	defaults := map[string]string{
 		"enabled": "off", "policy": DefaultGrid, "large_blocks": "on", "compressed": "on",
-		"raw": "off", "props": "off", "incremental": "all", "replicate": "off", "discard": "none",
+		"raw": "off", "props": "off", "incremental": "all", "replicate": "off", "discard": "off",
 	}
 	if encrypted {
 		defaults["raw"] = "on"
@@ -138,8 +138,8 @@ func Resolve(dataset zfs.Dataset, parent *Effective, stored []zfs.Property, remo
 		p.Errors = append(p.Errors, "encrypted recursive replication requires raw=on")
 	}
 	p.Discard = Discard(p.Values[Namespace+"discard"].Value)
-	if p.Discard != DiscardNone && p.Discard != DiscardFirst && p.Discard != DiscardAll {
-		p.Errors = append(p.Errors, "discard must be none, first, or all")
+	if p.Discard != DiscardOff && p.Discard != DiscardFirst && p.Discard != DiscardAll {
+		p.Errors = append(p.Errors, "discard must be off, first, or all")
 	}
 	p.receiveProperties(encrypted)
 	slices.Sort(p.Errors)

@@ -358,7 +358,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 	} else if !view.DestinationExists {
 		plan.Mode = "full"
 		parent := request.DestinationRoot
-		if p.Discard == policy.DiscardNone {
+		if p.Discard == policy.DiscardOff {
 			index := strings.LastIndexByte(parent, '/')
 			if index < 0 {
 				return plan, fmt.Errorf("cannot bootstrap into an absent pool root")
