@@ -67,6 +67,12 @@ Validate the primary configuration file, every drop-in, and the merged result.
 .B config show
 Print the effective configuration with secrets redacted.
 .TP
+.B config reload
+Validate and atomically apply the running daemon configuration. Use
+.B --socket
+to select a non-default current control socket. The JSON result identifies
+fields applied live and fields requiring restart.
+.TP
 .B pairing create
 Create a one-time pairing bundle for a configured TCP listener. Scopes are
 .BR status ,

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">boomerangz</title>
+  <desc id="desc">A ZFS snapshot and replication manager to help make sure your data comes back to you.</desc>
+  <rect width="1200" height="630" rx="32" fill="#202124"/>
+  <image href="boomerangz-mark.svg" x="35" y="48" width="390" height="390"/>
+  <text x="465" y="275" fill="#f4f4f5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="112" font-weight="650" letter-spacing="-4">boomerangz</text>
+  <text x="472" y="344" fill="#fbbf24" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="30" font-weight="600">ZFS snapshots and replication</text>
+  <text x="472" y="397" fill="#d4d4d8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="27">Make sure your data comes back to you.</text>
+</svg>

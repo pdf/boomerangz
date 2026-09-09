@@ -114,7 +114,7 @@ properties are inherited according to normal ZFS semantics unless noted below.
 | `org.boomerangz:replicate=on\|off` | `off` | Request recursive replication with `zfs send -R`. |
 | `org.boomerangz:set_prop:<name>=<value>` | unset | Apply receive-side `-o name=value`. |
 | `org.boomerangz:ignore_prop:<name>=on\|off` | unset | Apply receive-side `-x name` when enabled. |
-| `org.boomerangz:discard=none\|first\|all` | `none` | Discard no path components, the first component (`-d`), or all but the last component (`-e`) on receive. |
+| `org.boomerangz:discard=off\|first\|all` | `off` | Disable receive-path rewriting, discard the first component (`-d`), or discard all but the last component (`-e`). |
 
 Comma-separated lists are trimmed, deduplicated, and rejected if they contain
 empty entries. Unknown remote names invalidate only the affected dataset policy;
@@ -170,8 +170,8 @@ If `set_prop` and `ignore_prop` address the same receive property, reconciliatio
 emits a warning and `set_prop` wins. Only the corresponding `-o` argument is
 generated.
 
-`discard` is a single choice: `none`, `first`, or `all`. An explicit local
-`discard=none` overrides an ancestor's discard setting.
+`discard` is a single choice: `off`, `first`, or `all`. An explicit local
+`discard=off` overrides an ancestor's discard setting.
 
 Raw mode exposes both requested and effective send flags. In particular:
 
@@ -737,6 +737,30 @@ failed
 Status includes the reason for pending state and, when stable enough to report,
 queue position.
 
+### 7.3 Live configuration reload
+
+A post-documentation follow-up added an authenticated local reload operation so
+operators can apply a validated configuration without restarting the daemon or
+cancelling active work. The implementation loads and merges the same primary
+file and drop-ins as startup, rejects the complete candidate on any validation
+error, and leaves the running configuration unchanged on failure.
+
+On success, the daemon atomically replaces settings used for new discovery and
+jobs while allowing already running work to finish under its captured
+configuration. Settings that can be swapped directly are distinguished from
+worker limits that require controlled pool resizing and listener changes that
+require safe socket replacement. If a setting cannot be applied live, the
+reload result names it as restart-required rather than
+silently retaining the old value. Status reports the active configuration
+generation.
+
+Reload is exposed through the local control API and `boomerangz config reload`.
+Tests cover successful reload,
+invalid rollback, concurrent jobs, remote replacement, worker resizing,
+listener rebinding, and restart-required fields in unit and guarded integration
+tests. Only `paths.identity_dir` currently requires restart because changing it
+is an installation-identity migration.
+
 ## 8. Transfer pipeline and progress
 
 Commands are constructed as argument vectors with `os/exec`; streams never pass
@@ -791,14 +815,15 @@ downgrades. Status reports the active endpoint mode. Cached discovery is never
 proof of destination identity, cursor state, or receive readiness: the remote
 side rechecks those preconditions immediately before receiving data.
 
-Document a recommended restricted SSH deployment using a dedicated account,
-key restrictions, disabled forwarding and PTY features, delegated permissions
-limited to configured destination roots, and an authorized-key forced command
-for `boomerangz ssh-shell`. Also document direct SSH/ZFS without requiring a
-remote installation. Do not recommend restricted shells or ad-hoc parsing of
-`SSH_ORIGINAL_COMMAND` as a security boundary; OpenSSH key restrictions and ZFS
-delegation reduce exposure but cannot enforce a ZFS-only command vocabulary
-without an audited dispatcher.
+Document a recommended restricted SSH deployment using the packaged
+`/usr/lib/boomerangz/boomerangz-shell` login shell, key restrictions, disabled forwarding and PTY
+features, and delegated permissions limited to configured destination roots.
+The wrapper ignores SSH-supplied commands and arguments, starts
+`boomerangz ssh-shell`, and relies on the server-side
+`ssh_shell.replication_roots` allow-list for application-level authorization.
+The package registers the wrapper in `/etc/shells`; the main executable is not
+registered as a login shell and does not parse `SSH_ORIGINAL_COMMAND`. Also
+document direct SSH/ZFS without requiring a remote installation.
 
 ZFS data uses a bounded client-streaming or bidirectional-streaming RPC with
 gRPC flow control. Benchmark its framing and copying overhead against direct
@@ -1003,10 +1028,25 @@ Status output goes to stdout:
 Watch mode handles terminal resize and degrades cleanly when the terminal is too
 narrow for progress bars.
 
+### 11.1 Human-friendly dataset output
+
+A post-documentation CLI follow-up changed `dataset list` and `dataset inspect`
+to concise human-readable output by default and added an explicit `--json` flag
+for the stable structured representation. Readable inspection shows the
+effective policy, property source, activation state, covered-by replication
+root, validation errors, and warnings without requiring knowledge of internal
+JSON field names. List output remains useful in a narrow terminal and directs
+users to inspect an invalid dataset for detail.
+
+Structured consumers and integration tests opt into `--json`; the JSON schema
+and error-stream behavior remain stable. Behavior and JSON compatibility tests,
+completion and help coverage, and user documentation were updated with the
+implementation.
+
 ## 12. Repository layout
 
-No Makefile or mandatory task runner is planned. CI and documentation use normal
-`go` and `go tool` commands directly.
+The Makefile provides optional workflow shortcuts while normal `go`, `go tool`,
+and npm commands remain usable directly.
 
 ```text
 api/
@@ -1034,6 +1074,13 @@ internal/
     zfs/
 .github/
     workflows/
+docs/
+    .vitepress/
+    public/
+    getting-started/
+    guide/
+    operations/
+    reference/
 .golangci.yml
 go.mod
 README.md
@@ -1124,6 +1171,16 @@ end-to-end scenarios appropriate to each entry, publish version and diagnostic
 evidence, and become required checks for every platform advertised as
 supported. Release and packaging jobs consume only artifacts from a passing
 supported-platform matrix.
+
+End-user documentation is a self-contained VitePress 1.6.4 site under `docs/`.
+Its separate Pages workflow runs only `npm ci` and the development production
+build for relevant pull requests. Before the first release, the site root shows
+`main` as **Development**. Once a semantic-version release exists, the site root
+shows the latest release, `main` remains available under `/development/`, and
+every release remains available under its immutable `/vX.Y.Z/` path. All builds
+are exposed through the version menu without a generated Pages branch. The
+workflow uses Node.js 24 and npm dependency caching; heavyweight browser,
+link-crawl, and screenshot jobs are release checks rather than recurring CI.
 
 ### 13.1 Test strategy
 
@@ -1237,6 +1294,23 @@ and refusal to clean ambiguous or resume-dependent state.
     complete, produce the initial Arch packages and release artifacts, then
     validate install, upgrade, protected configuration, service-account, and
     systemd behavior in the disposable guest matrix.
+12. **End-user documentation website**: archive the internal development notes
+    outside the repository and replace `docs/` with a greenfield VitePress site
+    for GitHub Pages. Document installation, secure configuration, dataset and
+    destination setup, routine operation, recovery, troubleshooting, and the
+    complete user-facing reference without publishing internal plans or
+    speculative features. Establish the selected boomerang identity, concise
+    README, AI disclosure, lightweight documentation CI, and the
+    HTTPS-enforced `boomerangz.org` deployment.
+13. **Live configuration reload**: add an authenticated local reload operation
+    with atomic validation and rollback, configuration generations, controlled
+    worker and listener reconfiguration, explicit restart-required reporting,
+    and operational documentation that no longer requires a routine daemon
+    restart.
+14. **Human-friendly dataset output**: make `dataset list` and `dataset inspect`
+    readable by default, preserve the structured contract behind `--json`,
+    migrate automated consumers, and align reference and troubleshooting
+    documentation.
 
 ## 15. Pre-implementation decisions and validation
 

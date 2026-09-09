@@ -29,5 +29,5 @@ replication_roots = []
 # user = "boomerangz"
 # root = "tank/backups"
 # identity_file = "/etc/boomerangz/credentials.d/home_ed25519"
-# ssh_shell_path = "/usr/bin/boomerangz"
+# ssh_shell_path = "/usr/lib/boomerangz/boomerangz-shell"
 # connect_timeout = "10s"

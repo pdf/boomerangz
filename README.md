@@ -1,51 +1,39 @@
 # boomerangz
 
-`boomerangz` is a property-driven ZFS snapshot and replication manager for
-continuously connected and intermittently connected systems.
+<img src="docs/public/brand/boomerangz-lockup.svg" alt="boomerangz logo" width="420">
 
-The current implementation provides configuration loading, sparse discovery,
-local policy inheritance, normalized retention grids, automatic snapshot and
-replication workers, preview-first adoption and clean commands, and a versioned
-local control API with optional authenticated TLS access.
+> A ZFS snapshot/replication manager to help make sure your data comes back to you.
 
-Run the manager in the foreground:
+Boomerangz manages OpenZFS snapshots and local or remote replication, including
+systems whose backup destinations are not always online.
+
+The initial supported platform is CachyOS with OpenZFS. Release packaging
+provides source-built `boomerangz` and prebuilt `boomerangz-bin` AUR packages
+for `x86_64` and `aarch64`.
+
+## Get started
+
+Read the [getting-started guide](https://boomerangz.org/getting-started/) for
+prerequisites, installation, secure ZFS delegation, initial configuration, and
+verification. Published builds and package recipes appear on the
+[GitHub Releases](https://github.com/pdf/boomerangz/releases) page.
+
+Once installed:
 
 ```sh
-boomerangz daemon
-```
-
-The supplied systemd integration runs the same command as a dedicated service
-account. See [docs/installation.md](docs/installation.md) and
-[docs/daemon.md](docs/daemon.md) before enabling it.
-
-Inspect or watch a running daemon and request an immediate snapshot:
-
-```sh
+boomerangz config check
+sudo systemctl enable --now boomerangz.service
 boomerangz status
-boomerangz status --watch
-boomerangz trigger pool/data
 ```
 
-See [docs/control-api.md](docs/control-api.md) for output behavior, local access,
-authenticated pairing, and optional TLS listeners.
+Do not enable datasets until you have reviewed the
+[dataset](https://boomerangz.org/guide/datasets.html) and
+[security](https://boomerangz.org/guide/security.html) guidance.
 
-On a ZFS system (use the disposable guest for development), inspect datasets:
+## Contributing
 
-```sh
-boomerangz dataset --config /etc/boomerangz/config.toml list
-boomerangz dataset --config /etc/boomerangz/config.toml inspect pool/data
-```
-
-Both commands produce readable output by default; add `--json` for structured
-output. Inspection includes property provenance, requested and effective send
-behavior, retained received properties, errors, and replication coverage. See
-[docs/dataset-policy.md](docs/dataset-policy.md) for the policy contract.
-Adoption, clean behavior, ownership checks, and current safety boundaries are documented
-in [docs/snapshot-lifecycle.md](docs/snapshot-lifecycle.md).
-
-## Development
-
-The supported toolchain is Go 1.26.8 or newer within the Go 1.26 series.
+The project uses Go 1.26.8 and keeps real OpenZFS tests inside disposable
+virtual machines.
 
 ```sh
 go test ./...
@@ -54,26 +42,15 @@ go vet ./...
 go tool golangci-lint run
 ```
 
-Real `zfs` and `zpool` commands must only be run by the integration harness in
-a disposable virtual machine. Development-host tests use fake command runners.
+Run `make integration-test` for the guarded VM integration suite. It requires
+QEMU/KVM, `cloud-image-utils`, OpenSSH, and sufficient local storage.
 
-The canonical harness verifies a target image, creates isolated copy-on-write
-disks, provisions a disposable guest, and runs the real-ZFS suites:
+## AI disclosure
 
-```sh
-make integration-test
-```
+Boomerangz’s design, technical guidance, and verification were performed by a
+human. The majority of the implementation code was written by a large language
+model.
 
-This is not equivalent to running `go test` with the `integration` build tag:
-the tagged Go packages contain guest-side tests which remain guarded against
-execution on the development host. Use `make integration-test-compile` to
-compile that code without provisioning a guest. Use `make integration-test`
-to execute the real scenarios; it invokes `test/integration/host/run.sh` with
-the `cachyos` target by default.
+## License
 
-See [PLAN.md](PLAN.md) for the architecture and [docs/configuration.md](docs/configuration.md)
-for the configuration reference. Developer-only implementation and test notes
-live under [docs/development](docs/development/README.md). VM setup and safety requirements are in
-[docs/development/integration-testing.md](docs/development/integration-testing.md); the first delegated
-OpenZFS result is recorded in
-[docs/development/integration-spike-cachyos-260809.md](docs/development/integration-spike-cachyos-260809.md).
+Boomerangz is released under the [MIT License](LICENSE).
