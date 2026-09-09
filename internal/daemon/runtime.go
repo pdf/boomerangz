@@ -31,6 +31,7 @@ type remoteApplier struct {
 	source       backend
 	client       remoteClient
 	installation string
+	lifecycle    *lifecycle.Service
 }
 
 func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, report func(zfs.Progress)) (transfer.Result, error) {
@@ -38,7 +39,7 @@ func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, repo
 	if err != nil {
 		return transfer.Result{}, err
 	}
-	engine, err := transfer.NewRemote(a.source, endpoint.executor, endpoint.stream, a.installation)
+	engine, err := transfer.NewRemoteWithService(a.source, endpoint.executor, endpoint.stream, a.installation, a.lifecycle)
 	if err != nil {
 		return transfer.Result{}, errors.Join(err, endpoint.close())
 	}
@@ -49,6 +50,19 @@ func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, repo
 type roadState struct {
 	coordinator *transfer.Roadwarrior
 	request     transfer.Request
+}
+
+func reportWorkerState(logger *slog.Logger, status *StatusStore, event Event) {
+	status.Record(event)
+	args := []any{"pool", event.Pool, "job", event.Job, "scope", event.Scope, "target", event.Target, "state", event.State, "reason", event.Reason, "pending", event.Pending}
+	switch event.State {
+	case "failed":
+		logger.Error("worker state", args...)
+	case "blocked", "waiting-retry":
+		logger.Warn("worker state", args...)
+	default:
+		logger.Info("worker state", args...)
+	}
 }
 
 // Runtime owns one daemon's discovery coordinator, schedules, worker pools,
@@ -70,6 +84,7 @@ type Runtime struct {
 	locks        *keyLocks
 	status       *StatusStore
 	logger       *slog.Logger
+	lifecycle    *lifecycle.Service
 	now          func() time.Time
 	reloadMu     sync.Mutex
 
@@ -106,6 +121,10 @@ func New(cfg config.Config, source backend, installation string, logger *slog.Lo
 	if err != nil {
 		return nil, err
 	}
+	lifecycleService, err := lifecycle.NewService(source, installation)
+	if err != nil {
+		return nil, err
+	}
 	remoteNames := make([]string, 0, len(cfg.Remotes))
 	clients, err := buildRemoteClients(cfg.Remotes, cfg.Paths.CredentialsDir)
 	if err != nil {
@@ -121,8 +140,7 @@ func New(cfg config.Config, source backend, installation string, logger *slog.Lo
 	}
 	status := &StatusStore{}
 	report := func(event Event) {
-		status.Record(event)
-		logger.Info("worker state", "pool", event.Pool, "job", event.Job, "scope", event.Scope, "target", event.Target, "state", event.State, "reason", event.Reason, "pending", event.Pending)
+		reportWorkerState(logger, status, event)
 	}
 	management, err := NewPool("management", cfg.Daemon.EffectiveManagementWorkers(), defaultQueueCapacity, report)
 	if err != nil {
@@ -144,7 +162,7 @@ func New(cfg config.Config, source backend, installation string, logger *slog.Lo
 		config: liveConfig, backend: source, installation: installation,
 		gate: gate, scanner: scanner, scheduler: NewScheduler(), management: management,
 		local: local, remote: remote, localStream: stream, pending: &transfer.PendingSet{},
-		remotes: clients, logger: logger, status: status, locks: sharedLocks, now: time.Now, known: make(map[string]bool), active: make(map[string]bool),
+		remotes: clients, logger: logger, lifecycle: lifecycleService, status: status, locks: sharedLocks, now: time.Now, known: make(map[string]bool), active: make(map[string]bool),
 		recursive: make(map[string]bool), policies: make(map[string]policy.Effective),
 		roads: make(map[string]roadState), retireFailures: make(map[string]int), delayed: make(map[string]time.Time), dirty: make(map[string]bool), configGeneration: 1,
 	}
@@ -323,7 +341,7 @@ func (r *Runtime) ApplyConfig(next config.Config) (daemonstate.ReloadResult, err
 }
 
 func (r *Runtime) service() (*lifecycle.Service, error) {
-	return lifecycle.NewService(r.backend, r.installation)
+	return r.lifecycle, nil
 }
 
 // Safety returns the live quiescence and target checker used by retirement.
@@ -442,7 +460,12 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 		}
 		if changed[name] {
 			entry, _ := generation.Inspect(name)
-			r.enqueueTransfers(name, entry.Policy, "")
+			deadline, deadlineErr := r.nextOwnedSnapshot(name, entry.Policy.Grid.Cadence())
+			if deadlineErr != nil {
+				r.logger.Error("inspect existing transfer work", "dataset", name, "error", deadlineErr)
+			} else if !deadline.IsZero() {
+				r.enqueueTransfers(name, entry.Policy, "")
+			}
 		}
 	}
 	for name := range previousActive {
@@ -768,7 +791,7 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 		if startErr := ticket.Start(); startErr != nil {
 			return Outcome{State: "blocked", Reason: startErr.Error()}
 		}
-		engine, engineErr := transfer.NewLocal(r.backend, r.localStream, r.installation)
+		engine, engineErr := transfer.NewLocalWithService(r.backend, r.localStream, r.installation, r.lifecycle)
 		if engineErr != nil {
 			return Outcome{State: "failed", Reason: engineErr.Error()}
 		}
@@ -823,7 +846,7 @@ func (r *Runtime) road(dataset, remote string, effective policy.Effective) (road
 	}
 	client := r.remotes[remote]
 	request := transfer.Request{Source: dataset, DestinationRoot: setting.Root, Policy: effective.Clone(), Transport: client.Transport(), RemoteName: remote, CanonicalTarget: client.CanonicalTarget()}
-	coordinator, err := transfer.NewRoadwarrior(remoteApplier{source: r.backend, client: client, installation: r.installation}, request, r.pending, transfer.DefaultRetryPolicy(), r.now, rand.Float64)
+	coordinator, err := transfer.NewRoadwarrior(remoteApplier{source: r.backend, client: client, installation: r.installation, lifecycle: r.lifecycle}, request, r.pending, transfer.DefaultRetryPolicy(), r.now, rand.Float64)
 	if err != nil {
 		return roadState{}, err
 	}

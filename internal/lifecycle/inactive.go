@@ -176,8 +176,11 @@ func locallyActive(properties []zfs.Property, dataset string) (bool, error) {
 // ReconcileInactive previews or applies the durable marker transition. The
 // daemon supplies active from a complete immutable policy generation.
 func (s *Service) ReconcileInactive(ctx context.Context, dataset string, active bool, observedAt time.Time, grace time.Duration, apply bool) (InactivePlan, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock(ctx, dataset)
+	if err != nil {
+		return InactivePlan{Dataset: dataset, Active: active}, err
+	}
+	defer unlock()
 	state, err := s.backend.InspectState(ctx, dataset, false)
 	if err != nil {
 		return InactivePlan{Dataset: dataset, Active: active}, err
@@ -224,8 +227,11 @@ func (s *Service) ReconcileInactive(ctx context.Context, dataset string, active 
 // inactive marker's grace period. The daemon supplies scheduling and target-side
 // retirement coordination through CleanSafety.
 func (s *Service) Retire(ctx context.Context, dataset string, recursive bool, observedAt time.Time, grace time.Duration, apply bool, safety CleanSafety) (RetirementPlan, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock(ctx, dataset)
+	if err != nil {
+		return RetirementPlan{}, err
+	}
+	defer unlock()
 	result := RetirementPlan{}
 	backend, ok := s.backend.(cleanBackend)
 	if !ok {

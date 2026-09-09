@@ -62,15 +62,21 @@ type Local struct {
 
 // NewLocal constructs a local transfer engine bound to one installation identity.
 func NewLocal(backend Backend, stream Stream, installation string) (*Local, error) {
-	if backend == nil || stream == nil {
-		return nil, fmt.Errorf("local transfer backend and stream are required")
-	}
-	if !lifecycle.ValidID(installation) {
-		return nil, fmt.Errorf("valid installation identity required")
-	}
 	service, err := lifecycle.NewService(backend, installation)
 	if err != nil {
 		return nil, err
+	}
+	return NewLocalWithService(backend, stream, installation, service)
+}
+
+// NewLocalWithService constructs a local transfer engine using the daemon's
+// shared lifecycle coordinator.
+func NewLocalWithService(backend Backend, stream Stream, installation string, service *lifecycle.Service) (*Local, error) {
+	if backend == nil || stream == nil {
+		return nil, fmt.Errorf("local transfer backend and stream are required")
+	}
+	if !lifecycle.ValidID(installation) || service == nil {
+		return nil, fmt.Errorf("valid installation identity required")
 	}
 	return &Local{backend: backend, target: backend, stream: stream, lifecycle: service, installation: installation, sameHost: true}, nil
 }
@@ -79,15 +85,21 @@ func NewLocal(backend Backend, stream Stream, installation string) (*Local, erro
 // remain local; destination inspection and reconciliation use the remote typed
 // executor. The stream is responsible for the authenticated transport.
 func NewRemote(source Backend, destination zfs.Executor, stream Stream, installation string) (*Local, error) {
-	if source == nil || destination == nil || stream == nil {
-		return nil, fmt.Errorf("source, remote destination, and stream are required")
-	}
-	if !lifecycle.ValidID(installation) {
-		return nil, fmt.Errorf("valid installation identity required")
-	}
 	service, err := lifecycle.NewService(source, installation)
 	if err != nil {
 		return nil, err
+	}
+	return NewRemoteWithService(source, destination, stream, installation, service)
+}
+
+// NewRemoteWithService constructs a remote transfer engine using the daemon's
+// shared source lifecycle coordinator.
+func NewRemoteWithService(source Backend, destination zfs.Executor, stream Stream, installation string, service *lifecycle.Service) (*Local, error) {
+	if source == nil || destination == nil || stream == nil {
+		return nil, fmt.Errorf("source, remote destination, and stream are required")
+	}
+	if !lifecycle.ValidID(installation) || service == nil {
+		return nil, fmt.Errorf("valid installation identity required")
 	}
 	return &Local{backend: source, target: destination, stream: stream, lifecycle: service, installation: installation}, nil
 }
@@ -201,6 +213,78 @@ func sourceStable(a, b zfs.State) bool {
 	return reflect.DeepEqual(a.Objects, b.Objects) && reflect.DeepEqual(properties(a), properties(b)) && reflect.DeepEqual(a.ResumeTokens, b.ResumeTokens)
 }
 
+func missingReceiveParents(root, target string, inventory []zfs.Dataset) ([]string, error) {
+	if !inside(target, root) {
+		return nil, fmt.Errorf("mapped destination is outside configured root")
+	}
+	if target == root {
+		return nil, nil
+	}
+	existing := make(map[string]zfs.Dataset, len(inventory))
+	for _, dataset := range inventory {
+		existing[dataset.Name] = dataset
+	}
+	configured, exists := existing[root]
+	if !exists || configured.Type != zfs.Filesystem {
+		return nil, fmt.Errorf("receive root must be an existing filesystem")
+	}
+	parentIndex := strings.LastIndexByte(target, '/')
+	if parentIndex < len(root) {
+		return nil, nil
+	}
+	parent := target[:parentIndex]
+	if parent == root {
+		return nil, nil
+	}
+	relative := strings.TrimPrefix(parent, root+"/")
+	current := root
+	var missing []string
+	for _, component := range strings.Split(relative, "/") {
+		current += "/" + component
+		if dataset, found := existing[current]; found {
+			if dataset.Type != zfs.Filesystem {
+				return nil, fmt.Errorf("receive ancestor is not a filesystem: %s", current)
+			}
+			continue
+		}
+		missing = append(missing, current)
+	}
+	return missing, nil
+}
+
+func (l *Local) prepareReceiveParents(ctx context.Context, request Request, view View, plan Plan) (View, Plan, error) {
+	if plan.Mode != "full" {
+		return view, plan, nil
+	}
+	parents, err := missingReceiveParents(request.DestinationRoot, plan.Destination, view.DestinationInventory)
+	if err != nil {
+		return view, plan, err
+	}
+	for _, parent := range parents {
+		if err := l.target.CreateReceiveParent(ctx, parent); err != nil {
+			return view, plan, fmt.Errorf("prepare receive parent %s: %w", parent, err)
+		}
+	}
+	if len(parents) == 0 {
+		return view, plan, nil
+	}
+	prepared, err := l.load(ctx, request)
+	if err != nil {
+		return view, plan, err
+	}
+	if !sourceStable(view.Source, prepared.Source) {
+		return view, plan, fmt.Errorf("source state changed while preparing receive ancestors")
+	}
+	fresh, err := Build(request, prepared, l.installation)
+	if err != nil {
+		return view, plan, err
+	}
+	if fresh.Snapshot != plan.Snapshot || fresh.Base != plan.Base || !reflect.DeepEqual(fresh.Expected, plan.Expected) {
+		return view, plan, fmt.Errorf("transfer history changed while preparing receive ancestors")
+	}
+	return prepared, fresh, nil
+}
+
 // Apply rebuilds the plan, pins owned source endpoints and snapshot bases, sends,
 // verifies every expected GUID, and only then advances/relinquishes references.
 // Failures retain references and any receive token; no implicit reseed or abort.
@@ -224,6 +308,13 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 	if err != nil {
 		return result, err
 	}
+	if !resuming {
+		before, plan, err = l.prepareReceiveParents(ctx, request, before, plan)
+		if err != nil {
+			return result, err
+		}
+	}
+	result.Plan = plan
 	if !resuming {
 		if plan.BindingNew {
 			value, encodeErr := encodeBinding(plan.TargetBinding)

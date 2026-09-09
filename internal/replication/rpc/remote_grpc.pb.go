@@ -23,6 +23,7 @@ const (
 	RemoteService_ListDatasets_FullMethodName           = "/boomerangz.replication.v1.RemoteService/ListDatasets"
 	RemoteService_InspectDatasetIdentity_FullMethodName = "/boomerangz.replication.v1.RemoteService/InspectDatasetIdentity"
 	RemoteService_InspectState_FullMethodName           = "/boomerangz.replication.v1.RemoteService/InspectState"
+	RemoteService_CreateReceiveParent_FullMethodName    = "/boomerangz.replication.v1.RemoteService/CreateReceiveParent"
 	RemoteService_SetProperties_FullMethodName          = "/boomerangz.replication.v1.RemoteService/SetProperties"
 	RemoteService_InheritProperty_FullMethodName        = "/boomerangz.replication.v1.RemoteService/InheritProperty"
 	RemoteService_Receive_FullMethodName                = "/boomerangz.replication.v1.RemoteService/Receive"
@@ -36,6 +37,7 @@ type RemoteServiceClient interface {
 	ListDatasets(ctx context.Context, in *ListDatasetsRequest, opts ...grpc.CallOption) (*ListDatasetsResponse, error)
 	InspectDatasetIdentity(ctx context.Context, in *InspectDatasetIdentityRequest, opts ...grpc.CallOption) (*InspectDatasetIdentityResponse, error)
 	InspectState(ctx context.Context, in *InspectStateRequest, opts ...grpc.CallOption) (*InspectStateResponse, error)
+	CreateReceiveParent(ctx context.Context, in *CreateReceiveParentRequest, opts ...grpc.CallOption) (*CreateReceiveParentResponse, error)
 	SetProperties(ctx context.Context, in *SetPropertiesRequest, opts ...grpc.CallOption) (*SetPropertiesResponse, error)
 	InheritProperty(ctx context.Context, in *InheritPropertyRequest, opts ...grpc.CallOption) (*InheritPropertyResponse, error)
 	Receive(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ReceiveRequest, ReceiveResponse], error)
@@ -89,6 +91,16 @@ func (c *remoteServiceClient) InspectState(ctx context.Context, in *InspectState
 	return out, nil
 }
 
+func (c *remoteServiceClient) CreateReceiveParent(ctx context.Context, in *CreateReceiveParentRequest, opts ...grpc.CallOption) (*CreateReceiveParentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateReceiveParentResponse)
+	err := c.cc.Invoke(ctx, RemoteService_CreateReceiveParent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *remoteServiceClient) SetProperties(ctx context.Context, in *SetPropertiesRequest, opts ...grpc.CallOption) (*SetPropertiesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetPropertiesResponse)
@@ -130,6 +142,7 @@ type RemoteServiceServer interface {
 	ListDatasets(context.Context, *ListDatasetsRequest) (*ListDatasetsResponse, error)
 	InspectDatasetIdentity(context.Context, *InspectDatasetIdentityRequest) (*InspectDatasetIdentityResponse, error)
 	InspectState(context.Context, *InspectStateRequest) (*InspectStateResponse, error)
+	CreateReceiveParent(context.Context, *CreateReceiveParentRequest) (*CreateReceiveParentResponse, error)
 	SetProperties(context.Context, *SetPropertiesRequest) (*SetPropertiesResponse, error)
 	InheritProperty(context.Context, *InheritPropertyRequest) (*InheritPropertyResponse, error)
 	Receive(grpc.ClientStreamingServer[ReceiveRequest, ReceiveResponse]) error
@@ -154,6 +167,9 @@ func (UnimplementedRemoteServiceServer) InspectDatasetIdentity(context.Context, 
 }
 func (UnimplementedRemoteServiceServer) InspectState(context.Context, *InspectStateRequest) (*InspectStateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method InspectState not implemented")
+}
+func (UnimplementedRemoteServiceServer) CreateReceiveParent(context.Context, *CreateReceiveParentRequest) (*CreateReceiveParentResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateReceiveParent not implemented")
 }
 func (UnimplementedRemoteServiceServer) SetProperties(context.Context, *SetPropertiesRequest) (*SetPropertiesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetProperties not implemented")
@@ -257,6 +273,24 @@ func _RemoteService_InspectState_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RemoteService_CreateReceiveParent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateReceiveParentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RemoteServiceServer).CreateReceiveParent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RemoteService_CreateReceiveParent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RemoteServiceServer).CreateReceiveParent(ctx, req.(*CreateReceiveParentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RemoteService_SetProperties_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetPropertiesRequest)
 	if err := dec(in); err != nil {
@@ -322,6 +356,10 @@ var RemoteService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InspectState",
 			Handler:    _RemoteService_InspectState_Handler,
+		},
+		{
+			MethodName: "CreateReceiveParent",
+			Handler:    _RemoteService_CreateReceiveParent_Handler,
 		},
 		{
 			MethodName: "SetProperties",

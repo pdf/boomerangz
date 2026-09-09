@@ -96,11 +96,11 @@ setup() {
 	# permissions used by the integration suites. They are not deployment
 	# requirements. userprop on both sides is required by boomerangz metadata.
 	zfs allow -u "$service_user" bookmark,create,destroy,hold,mount,release,send,snapshot,userprop "$source_pool/data"
-	zfs allow -u "$service_user" compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
+	zfs allow -u "$service_user" canmount,compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
 	if [[ $direct_ssh_user != "$service_user" ]]; then
 		# Direct SSH runs ZFS as the remote login identity. Grant that dedicated,
 		# non-administrative account destination permissions only.
-		zfs allow -u "$direct_ssh_user" compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
+		zfs allow -u "$direct_ssh_user" canmount,compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
 	fi
 
 	printf 'source_pool=%s\ndestination_pool=%s\n' "$source_pool" "$destination_pool"

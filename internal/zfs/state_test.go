@@ -89,3 +89,18 @@ func TestNamespaceMutationArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateReceiveParentArguments(t *testing.T) {
+	t.Parallel()
+	r := &fakeRunner{}
+	d := &Direct{runner: r}
+	if err := d.CreateReceiveParent(t.Context(), "backup/root/data"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(r.args, []string{"create", "-o", "canmount=noauto", "backup/root/data"}) {
+		t.Fatalf("args=%v", r.args)
+	}
+	if err := d.CreateReceiveParent(t.Context(), "-invalid"); err == nil {
+		t.Fatal("accepted invalid dataset")
+	}
+}

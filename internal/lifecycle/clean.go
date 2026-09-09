@@ -297,8 +297,11 @@ func (s *Service) cleanPlan(ctx context.Context, dataset string, options CleanOp
 // before the first write and checks the remaining inventory before every write.
 // Partial progress is reported; it never rolls back, aborts receives, or uses -S.
 func (s *Service) Clean(ctx context.Context, dataset string, options CleanOptions, apply bool, safety CleanSafety) (CleanPlan, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock(ctx, dataset)
+	if err != nil {
+		return CleanPlan{}, err
+	}
+	defer unlock()
 	return s.clean(ctx, dataset, options, apply, safety, cleanMode{})
 }
 

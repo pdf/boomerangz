@@ -39,6 +39,7 @@ func (b *targetBackend) InspectState(_ context.Context, dataset string, _ bool) 
 	return b.states[dataset], nil
 }
 func (*targetBackend) SetProperties(context.Context, string, map[string]string) error { return nil }
+func (*targetBackend) CreateReceiveParent(context.Context, string) error              { return nil }
 func (b *targetBackend) InheritProperty(_ context.Context, object, property string) error {
 	state := b.states[object]
 	state.Properties = slices.DeleteFunc(state.Properties, func(row zfs.Property) bool {

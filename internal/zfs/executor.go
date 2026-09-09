@@ -56,6 +56,7 @@ type Executor interface {
 	GetActivationProperties(context.Context) ([]Property, error)
 	GetStoredProperties(context.Context, []string) ([]Property, error)
 	InspectState(context.Context, string, bool) (State, error)
+	CreateReceiveParent(context.Context, string) error
 	SetProperties(context.Context, string, map[string]string) error
 	InheritProperty(context.Context, string, string) error
 	Snapshot(context.Context, string, string, bool, map[string]string) error

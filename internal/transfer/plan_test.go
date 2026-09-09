@@ -53,7 +53,7 @@ func TestBuildFullIncrementalAndNoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Mode != "full" || len(plan.Expected) != 1 || plan.Snapshot != view.Source.Objects[2].Name {
+	if plan.Mode != "full" || len(plan.Expected) != 1 || plan.Snapshot != view.Source.Objects[2].Name || plan.Receive.Set["canmount"] != "noauto" {
 		t.Fatalf("full plan=%v", plan)
 	}
 	addDestinationBase(&view)

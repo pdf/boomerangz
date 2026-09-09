@@ -140,6 +140,16 @@ func validateObject(name string) error {
 	return validateDataset(name)
 }
 
+// CreateReceiveParent creates one exact receive container that is never
+// mounted automatically. It never creates parents implicitly.
+func (d *Direct) CreateReceiveParent(ctx context.Context, dataset string) error {
+	if err := validateDataset(dataset); err != nil {
+		return err
+	}
+	_, err := d.runner.Run(ctx, "create", "-o", "canmount=noauto", dataset)
+	return err
+}
+
 // SetProperties sets only boomerangz namespace properties on an exact object.
 func (d *Direct) SetProperties(ctx context.Context, object string, properties map[string]string) error {
 	if err := validateObject(object); err != nil {

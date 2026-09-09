@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +16,25 @@ import (
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
+
+func TestWorkerStateLogLevels(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, nil))
+	status := &StatusStore{}
+	for _, event := range []Event{{Job: "normal", State: "succeeded"}, {Job: "blocked", State: "blocked"}, {Job: "failed", State: "failed"}} {
+		reportWorkerState(logger, status, event)
+	}
+	logged := output.String()
+	for _, want := range []string{"level=INFO", "level=WARN", "level=ERROR"} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("missing %s in %q", want, logged)
+		}
+	}
+	if len(status.Snapshot()) != 3 {
+		t.Fatal("logging did not retain worker status")
+	}
+}
 
 type runtimeBackend struct {
 	scanned  chan struct{}
@@ -43,6 +65,7 @@ func (b *runtimeBackend) InspectState(context.Context, string, bool) (zfs.State,
 	return b.state, nil
 }
 func (*runtimeBackend) SetProperties(context.Context, string, map[string]string) error { return nil }
+func (*runtimeBackend) CreateReceiveParent(context.Context, string) error              { return nil }
 func (*runtimeBackend) InheritProperty(context.Context, string, string) error          { return nil }
 func (*runtimeBackend) Snapshot(context.Context, string, string, bool, map[string]string) error {
 	return nil

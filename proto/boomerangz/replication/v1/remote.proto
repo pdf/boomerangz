@@ -9,6 +9,7 @@ service RemoteService {
   rpc ListDatasets(ListDatasetsRequest) returns (ListDatasetsResponse);
   rpc InspectDatasetIdentity(InspectDatasetIdentityRequest) returns (InspectDatasetIdentityResponse);
   rpc InspectState(InspectStateRequest) returns (InspectStateResponse);
+  rpc CreateReceiveParent(CreateReceiveParentRequest) returns (CreateReceiveParentResponse);
   rpc SetProperties(SetPropertiesRequest) returns (SetPropertiesResponse);
   rpc InheritProperty(InheritPropertyRequest) returns (InheritPropertyResponse);
   rpc Receive(stream ReceiveRequest) returns (ReceiveResponse);
@@ -89,6 +90,12 @@ message InspectStateResponse {
   repeated NamedValues clones = 5;
   repeated NamedValues holds = 6;
 }
+
+message CreateReceiveParentRequest {
+  string dataset = 1;
+}
+
+message CreateReceiveParentResponse {}
 
 message SetPropertiesRequest {
   string dataset = 1;
