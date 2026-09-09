@@ -285,6 +285,22 @@ func newLocalBackend(t *testing.T) (*localBackend, Request) {
 	return &localBackend{inventory: slices.Clone(view.Inventory), source: view.Source}, request
 }
 
+func TestMissingReceiveParents(t *testing.T) {
+	t.Parallel()
+	inventory := []zfs.Dataset{{Name: "backup/root", Type: zfs.Filesystem}, {Name: "backup/root/data", Type: zfs.Filesystem}}
+	parents, err := missingReceiveParents("backup/root", "backup/root/data/home/pdf", inventory)
+	if err != nil || !slices.Equal(parents, []string{"backup/root/data/home"}) {
+		t.Fatalf("parents=%v err=%v", parents, err)
+	}
+	parents, err = missingReceiveParents("backup/root", "backup/root/leaf", inventory)
+	if err != nil || len(parents) != 0 {
+		t.Fatalf("direct child parents=%v err=%v", parents, err)
+	}
+	if _, err := missingReceiveParents("backup/root", "other/root/data", inventory); err == nil {
+		t.Fatal("accepted mapped destination outside receive root")
+	}
+}
+
 func TestApplyFailureRetainsBoundRecoveryProof(t *testing.T) {
 	t.Parallel()
 	backend, request := newLocalBackend(t)

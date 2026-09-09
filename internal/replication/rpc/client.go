@@ -80,6 +80,11 @@ func (e *clientExecutor) InspectState(ctx context.Context, dataset string, recur
 	return decodeClientState(response), nil
 }
 
+func (e *clientExecutor) CreateReceiveParent(ctx context.Context, dataset string) error {
+	_, err := e.client.remote.CreateReceiveParent(ctx, &CreateReceiveParentRequest{Dataset: dataset})
+	return e.client.mapError(err)
+}
+
 func (e *clientExecutor) SetProperties(ctx context.Context, dataset string, properties map[string]string) error {
 	_, err := e.client.remote.SetProperties(ctx, &SetPropertiesRequest{Dataset: dataset, Properties: maps.Clone(properties)})
 	return e.client.mapError(err)

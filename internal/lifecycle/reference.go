@@ -132,8 +132,11 @@ func (s *Service) Protect(ctx context.Context, dataset, snapshot, target string)
 // snapshot set. Recursive snapshots share one snapshot UUID, so separate
 // properties would collide and cannot serve as independent proofs.
 func (s *Service) ProtectSet(ctx context.Context, dataset string, snapshots []string, target string) (Reference, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock(ctx, dataset)
+	if err != nil {
+		return Reference{}, err
+	}
+	defer unlock()
 	backend, ok := s.backend.(referenceBackend)
 	if !ok {
 		return Reference{}, fmt.Errorf("reference operations unavailable")
@@ -250,8 +253,11 @@ func (s *Service) Checkpoint(ctx context.Context, dataset string, r Reference, v
 // CheckpointSet creates every versioned bookmark only after the caller supplies
 // the verified destination GUID for every protected source snapshot.
 func (s *Service) CheckpointSet(ctx context.Context, dataset string, r Reference, verifiedGUIDs map[string]uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock(ctx, dataset)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	backend, ok := s.backend.(referenceBackend)
 	if !ok {
 		return fmt.Errorf("reference operations unavailable")
@@ -320,8 +326,11 @@ func (s *Service) CheckpointSet(ctx context.Context, dataset string, r Reference
 // ReleaseReference removes only exactly proven references. Resume state blocks
 // release. Callers must also establish that no active transfer needs the hold.
 func (s *Service) ReleaseReference(ctx context.Context, dataset string, r Reference) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock(ctx, dataset)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	backend, ok := s.backend.(referenceBackend)
 	if !ok {
 		return fmt.Errorf("reference operations unavailable")

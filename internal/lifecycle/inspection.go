@@ -58,8 +58,11 @@ func (r Reference) HoldName() string { return r.hold() }
 // ReleaseCompletedHold keeps the verified bookmark/record but releases its hold.
 // The caller must have verified the destination and excluded active/resume work.
 func (s *Service) ReleaseCompletedHold(ctx context.Context, dataset string, r Reference) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock(ctx, dataset)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	backend, ok := s.backend.(referenceBackend)
 	if !ok {
 		return fmt.Errorf("reference operations unavailable")

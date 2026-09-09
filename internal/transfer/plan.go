@@ -343,7 +343,13 @@ func Build(request Request, view View, installation string) (Plan, error) {
 	}
 	plan.Warnings = slices.Clone(p.Warnings)
 	plan.Send = zfs.SendOptions{Source: request.Source, Snapshot: endpoint.Name, Recursive: p.Send.Replicate, LargeBlocks: p.Send.LargeBlocks, Compressed: p.Send.Compressed, EmbeddedData: p.Send.EmbeddedData, Raw: p.Send.Raw, Properties: p.Send.Props}
-	plan.Receive = zfs.ReceiveOptions{Root: request.DestinationRoot, Discard: zfs.ReceiveDiscard(p.Discard), Set: maps.Clone(p.SetProperties), Exclude: slices.Clone(p.IgnoreProperties)}
+	receiveProperties := maps.Clone(p.SetProperties)
+	if root.Type == "filesystem" {
+		if _, configured := receiveProperties["canmount"]; !configured {
+			receiveProperties["canmount"] = "noauto"
+		}
+	}
+	plan.Receive = zfs.ReceiveOptions{Root: request.DestinationRoot, Discard: zfs.ReceiveDiscard(p.Discard), Set: receiveProperties, Exclude: slices.Clone(p.IgnoreProperties)}
 	already := view.DestinationExists
 	for _, expected := range plan.Endpoints {
 		o, found := dest[expected.Destination]

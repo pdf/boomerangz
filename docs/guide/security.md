@@ -19,7 +19,7 @@ sudo zfs allow -u boomerangz \
 
 ```sh
 sudo zfs allow -u boomerangz \
-  compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop \
+  canmount,compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop \
   backup/boomerangz
 ```
 

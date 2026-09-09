@@ -12,9 +12,17 @@ permissions to the service account:
 ```sh
 sudo zfs create backup/boomerangz
 sudo zfs allow -u boomerangz \
-  compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop \
+  canmount,compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop \
   backup/boomerangz
 ```
+
+The destination root may remain mounted. With `discard=first` or
+`discard=all`, Boomerangz uses it only as a container and leaves its mount state
+and properties unchanged. With `discard=off`, the root is the receive target;
+it remains mounted if it is already mounted, while its `canmount` property
+defaults to `noauto`. Received filesystems and intermediate filesystems created
+below the root also use `canmount=noauto`. This prevents automatic mounting
+while allowing an administrator to mount them explicitly for recovery.
 
 Select it on the source:
 
@@ -61,7 +69,7 @@ Create the destination dataset and delegate its receive permissions:
 ```sh
 sudo zfs create tank/backups
 sudo zfs allow -u boomerangz \
-  compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop \
+  canmount,compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop \
   tank/backups
 ```
 
@@ -102,7 +110,7 @@ Delegate only the destination permissions to this account:
 ```sh
 sudo zfs create tank/backups
 sudo zfs allow -u boomerangz-replication \
-  compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop \
+  canmount,compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop \
   tank/backups
 ```
 
@@ -198,7 +206,7 @@ that will store the replica:
 ```sh
 sudo zfs create tank/backups
 sudo zfs allow -u boomerangz \
-  compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop \
+  canmount,compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop \
   tank/backups
 ```
 

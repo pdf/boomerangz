@@ -255,3 +255,37 @@ func TestServiceRejectsHiddenLineageAndCancelledContext(t *testing.T) {
 		t.Fatal("mutated cancelled scope")
 	}
 }
+
+func TestHierarchyLocksSerializeOverlappingRoots(t *testing.T) {
+	t.Parallel()
+	locks := newHierarchyLocks()
+	releaseRoot, err := locks.acquire(t.Context(), "tank/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childAcquired := make(chan func(), 1)
+	go func() {
+		release, acquireErr := locks.acquire(t.Context(), "tank/data/home")
+		if acquireErr == nil {
+			childAcquired <- release
+		}
+	}()
+	select {
+	case release := <-childAcquired:
+		release()
+		t.Fatal("overlapping descendant lock was not blocked")
+	case <-time.After(20 * time.Millisecond):
+	}
+	releaseDisjoint, err := locks.acquire(t.Context(), "backup/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseDisjoint()
+	releaseRoot()
+	select {
+	case release := <-childAcquired:
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("descendant lock was not released")
+	}
+}

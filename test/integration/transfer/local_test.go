@@ -243,6 +243,48 @@ func TestGuestLocalTransfer(t *testing.T) {
 			t.Fatal("accepted foreign latest recursive destination snapshot")
 		}
 	}
+
+	// Linux cannot rely on delegated mounting. Start from an ordinary destination
+	// root whose descendants would be mountable, then verify Boomerangz prepares
+	// every implicit -d ancestor as a container and makes the received leaf noauto.
+	linuxSource := sourcePool + "/data/linux-" + suffix + "/home/pdf"
+	for _, dataset := range []string{strings.TrimSuffix(linuxSource, "/home/pdf"), strings.TrimSuffix(linuxSource, "/pdf"), linuxSource} {
+		command("create", "-u", dataset)
+	}
+	linuxRoot := destinationPool + "/data/linux-root-" + suffix
+	ordinaryMountpoint := "/mnt/boomerangz-linux-root-" + suffix
+	command("create", "-u", "-o", "mountpoint="+ordinaryMountpoint, linuxRoot)
+	command("set", policy.Namespace+"enabled=on", policy.Namespace+"discard=first", policy.Namespace+"local="+linuxRoot, linuxSource)
+	rows, err := direct.GetStoredProperties(t.Context(), []string{linuxSource})
+	if err != nil {
+		t.Fatal(err)
+	}
+	linuxPolicy := policy.Resolve(zfs.Dataset{Name: linuxSource, Type: zfs.Filesystem, EncryptionRoot: "-"}, nil, rows, nil)
+	if _, err := snapshots.CreateSnapshot(t.Context(), linuxSource, false, now.Add(3*time.Minute), linuxPolicy); err != nil {
+		t.Fatal(err)
+	}
+	linuxResult, err := engine.Apply(t.Context(), transfer.Request{Source: linuxSource, DestinationRoot: linuxRoot, Policy: linuxPolicy}, nil)
+	if err != nil || !linuxResult.Verified {
+		t.Fatalf("Linux unmounted bootstrap=%+v err=%v", linuxResult, err)
+	}
+	if got := command("get", "-H", "-o", "value", "mountpoint", linuxRoot); got != ordinaryMountpoint {
+		t.Fatalf("configured receive root mountpoint changed: %s", got)
+	}
+	for dataset := linuxRoot + "/data"; ; {
+		wantCanmount := "noauto"
+		if got := command("get", "-H", "-o", "value", "canmount", dataset); got != wantCanmount {
+			t.Fatalf("receive dataset %s canmount=%s want=%s", dataset, got, wantCanmount)
+		}
+		if got := command("get", "-H", "-o", "value", "mounted", dataset); got != "no" {
+			t.Fatalf("receive dataset %s mounted=%s", dataset, got)
+		}
+		if dataset == linuxResult.Plan.Destination {
+			break
+		}
+		remainder := strings.TrimPrefix(linuxResult.Plan.Destination, dataset+"/")
+		next, _, _ := strings.Cut(remainder, "/")
+		dataset += "/" + next
+	}
 }
 
 func TestGuestInterruptedTransferRecovery(t *testing.T) {

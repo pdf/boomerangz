@@ -26,7 +26,62 @@ type Backend interface {
 type Service struct {
 	backend      Backend
 	installation string
-	mu           sync.Mutex
+	locks        *hierarchyLocks
+}
+
+type hierarchyLocks struct {
+	mu      sync.Mutex
+	active  map[string]int
+	changed chan struct{}
+}
+
+func newHierarchyLocks() *hierarchyLocks {
+	return &hierarchyLocks{active: make(map[string]int), changed: make(chan struct{})}
+}
+
+func overlappingScope(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
+func (l *hierarchyLocks) acquire(ctx context.Context, dataset string) (func(), error) {
+	for {
+		l.mu.Lock()
+		blocked := false
+		for active := range l.active {
+			if overlappingScope(active, dataset) {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			l.active[dataset]++
+			l.mu.Unlock()
+			return func() {
+				l.mu.Lock()
+				l.active[dataset]--
+				if l.active[dataset] == 0 {
+					delete(l.active, dataset)
+				}
+				close(l.changed)
+				l.changed = make(chan struct{})
+				l.mu.Unlock()
+			}, nil
+		}
+		changed := l.changed
+		l.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+func (s *Service) lock(ctx context.Context, dataset string) (func(), error) {
+	if err := zfs.ValidateDataset(dataset); err != nil {
+		return nil, err
+	}
+	return s.locks.acquire(ctx, dataset)
 }
 
 // NewService constructs an operational lifecycle service.
@@ -37,7 +92,7 @@ func NewService(backend Backend, installation string) (*Service, error) {
 	if !ValidID(installation) {
 		return nil, fmt.Errorf("valid installation identity required")
 	}
-	return &Service{backend: backend, installation: installation}, nil
+	return &Service{backend: backend, installation: installation, locks: newHierarchyLocks()}, nil
 }
 
 // NewCleanService constructs the explicitly administrative clean surface.
@@ -46,7 +101,7 @@ func NewCleanService(backend Backend) (*Service, error) {
 	if backend == nil {
 		return nil, fmt.Errorf("lifecycle backend is required")
 	}
-	return &Service{backend: backend}, nil
+	return &Service{backend: backend, locks: newHierarchyLocks()}, nil
 }
 
 // storedLineage never treats inherited lineage as ownership of another dataset.
@@ -146,8 +201,11 @@ func AdoptionLineage(state zfs.State, dataset string) (string, error) {
 // lineage when uniquely proven and changing the owner. Callers must first show
 // and verify every configured target; this low-level mutation never probes them.
 func (s *Service) AdoptDataset(ctx context.Context, dataset string, effective policy.Effective) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock(ctx, dataset)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return "", err
 	}
@@ -195,8 +253,11 @@ func (s *Service) AdoptDataset(ctx context.Context, dataset string, effective po
 // attached atomically by zfs snapshot. Scheduling/cadence is the caller's concern.
 // Existing snapshot metadata requires explicit adoption if root lineage is lost.
 func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive bool, now time.Time, effective policy.Effective) (Metadata, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock(ctx, dataset)
+	if err != nil {
+		return Metadata{}, err
+	}
+	defer unlock()
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return Metadata{}, err
 	}
@@ -304,8 +365,11 @@ func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive 
 // Prune returns the initial preview and, when apply is true, re-plans before
 // each exact deletion. Previously completed deletions are not rolled back on error.
 func (s *Service) Prune(ctx context.Context, dataset string, effective policy.Effective, apply bool) ([]Decision, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock(ctx, dataset)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return nil, err
 	}
