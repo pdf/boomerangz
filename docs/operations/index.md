@@ -65,13 +65,23 @@ prove that an independent copy exists.
 
 After editing configuration files, apply them without interrupting active work:
 
-```sh
+::: code-group
+
+```sh [Linux / systemd]
+sudo systemctl reload boomerangz.service
+```
+
+```sh [Direct command]
 boomerangz config reload
 ```
 
-The JSON result identifies fields applied live and any `restart_required`
-fields retained from the previous configuration. An invalid or otherwise
-unusable candidate leaves the running configuration unchanged. See
+:::
+
+The direct command's JSON result identifies fields applied live and any
+`restart_required` fields retained from the previous configuration. The
+systemd action writes the same result to the service journal. An invalid or
+otherwise unusable candidate leaves the running configuration unchanged and
+causes the reload action to fail. See
 [Configure the daemon](/guide/configuration#validate-changes) for the reload
 contract and non-default socket usage.
 

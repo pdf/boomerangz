@@ -25,7 +25,7 @@
     Local status and control socket; boomerangz:boomerangz, mode 0660.
 
 /usr/lib/systemd/system/boomerangz.service
-    systemd service unit.
+    systemd service unit, including start and live-reload actions.
 ```
 
 :::

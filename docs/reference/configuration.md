@@ -2,10 +2,11 @@
 
 All durations use Go duration syntax such as `10s`, `5m`, or `24h`.
 
-Validated changes can be applied with `boomerangz config reload`. Every field
-below is reloadable without interrupting active work except `paths.identity_dir`,
-which is reported as restart-required and retains its previous value until the
-daemon restarts.
+Validated changes can be applied with `systemctl reload boomerangz.service` for
+the packaged service, or directly with `boomerangz config reload`. Every field
+below is reloadable without interrupting active work except
+`paths.identity_dir`, which is reported as restart-required and retains its
+previous value until the daemon restarts.
 
 ## `[daemon]`
 

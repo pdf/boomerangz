@@ -56,6 +56,8 @@ BOOMERANGZ_INTEGRATION_DIRECT_SSH_USER="$direct_ssh_user" \
 sudo systemctl daemon-reload
 sudo systemctl start boomerangz.service
 sudo systemctl is-active boomerangz.service
+sudo systemctl reload boomerangz.service
+sudo systemctl is-active boomerangz.service
 if sudo systemctl is-enabled boomerangz.service >/dev/null 2>&1; then
 	printf 'integration install unexpectedly enabled the service\n' >&2
 	exit 1

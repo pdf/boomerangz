@@ -38,16 +38,25 @@ redacted.
 
 Apply the files to the running daemon without interrupting active work:
 
-```sh
+::: code-group
+
+```sh [Linux / systemd]
+sudo systemctl reload boomerangz.service
+```
+
+```sh [Direct command]
 boomerangz config reload
 ```
 
+:::
+
 Reload reads and validates the same primary file and drop-ins that started the
 daemon. If validation or preparation fails, the running configuration remains
-unchanged. A successful command prints a JSON result containing the new
-configuration `generation`, the fields `applied` live, and any
-`restart_required` fields. Check the latter before considering the change
-complete.
+unchanged and `systemctl reload` fails. The direct command prints a JSON result
+containing the new configuration `generation`, the fields `applied` live, and
+any `restart_required` fields. The service action records that result in the
+system journal; inspect it with `journalctl -u boomerangz.service`. Check
+`restart_required` before considering the change complete.
 
 Most settings, including worker counts, remotes, listeners, credential and
 socket paths, and restricted-shell roots, are applied live. Running jobs finish
@@ -56,10 +65,12 @@ with the configuration they captured when they started. Changing
 until then because it changes the installation's identity and authorization
 boundary.
 
-By default, `config reload` connects to
+The packaged systemd service runs the reload command as the `boomerangz` user.
+By default, the direct `config reload` command connects to
 `/run/boomerangz/boomerangz.sock`. Use `--socket PATH` when the running daemon's
 current control socket is elsewhere. If the reload changes `socket_path`, use
-the new path for later control commands.
+the new path for later control commands and update the service's `ExecReload`
+override so future `systemctl reload` operations select it.
 
 ## Scheduling and concurrency
 

@@ -8,6 +8,7 @@ Type=simple
 User=boomerangz
 Group=boomerangz
 ExecStart=/usr/bin/boomerangz daemon
+ExecReload=/usr/bin/boomerangz config reload
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=5min
