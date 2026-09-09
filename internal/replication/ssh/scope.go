@@ -54,6 +54,26 @@ func (e *scopedExecutor) CreateReceiveParent(ctx context.Context, dataset string
 	}
 	return e.backend.CreateReceiveParent(ctx, dataset)
 }
+func (e *scopedExecutor) AbortReceive(ctx context.Context, dataset string) error {
+	if !e.inside(dataset) {
+		return fmt.Errorf("dataset is outside configured SSH destination scope")
+	}
+	backend, ok := e.backend.(zfs.ReseedExecutor)
+	if !ok {
+		return fmt.Errorf("destination reseed operations are unavailable")
+	}
+	return backend.AbortReceive(ctx, dataset)
+}
+func (e *scopedExecutor) DestroyDataset(ctx context.Context, dataset string, recursive bool) error {
+	if !e.inside(dataset) {
+		return fmt.Errorf("dataset is outside configured SSH destination scope")
+	}
+	backend, ok := e.backend.(zfs.ReseedExecutor)
+	if !ok {
+		return fmt.Errorf("destination reseed operations are unavailable")
+	}
+	return backend.DestroyDataset(ctx, dataset, recursive)
+}
 func (e *scopedExecutor) SetProperties(ctx context.Context, dataset string, properties map[string]string) error {
 	if !e.inside(dataset) {
 		return fmt.Errorf("dataset is outside configured SSH destination scope")

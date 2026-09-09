@@ -73,14 +73,27 @@ parents and children before enabling a broad root.
 Select configured remote destinations by name:
 
 ```sh
-sudo zfs set org.boomerangz:remote=home-backup tank/data
+sudo zfs set \
+  org.boomerangz:discard=first \
+  org.boomerangz:remote=home-backup \
+  tank/data
 ```
 
 For a destination dataset on the same host:
 
 ```sh
-sudo zfs set org.boomerangz:local=backup/data tank/data
+sudo zfs set \
+  org.boomerangz:discard=first \
+  org.boomerangz:local=backup/data \
+  tank/data
 ```
+
+`first` is recommended when the configured local or remote root is a persistent
+destination container. The default `off` instead treats that configured path as
+the exact, replica-owned receive dataset; it must initially be absent and its
+receive permissions must be delegated on the parent. Review the
+[receive path mapping](/reference/properties#receive-path-mapping) before
+selecting a destination.
 
 Multiple names are comma-separated. Empty entries and unknown remote names make
 the affected policy invalid. Configure and secure the destination before

@@ -43,6 +43,14 @@ Preview adoption of an existing lineage. Add
 .B --apply
 to apply after revalidation.
 .TP
+.B dataset reseed DATASET TARGET
+Preview the destructive reset of one configured local destination root or
+named remote. Applying the plan abandons partial receive state, destroys the
+mapped replica subtree, and releases the corresponding source-side replication
+history. Add
+.B --apply
+to apply after revalidation.
+.TP
 .B dataset clean
 Preview explicit decommissioning. Selection requires exact dataset arguments,
 .BR --recursive ,

@@ -1,7 +1,7 @@
 complete -c boomerangz -f
 complete -c boomerangz -n '__fish_use_subcommand' -a 'config daemon dataset identity pairing status trigger version'
 complete -c boomerangz -n '__fish_seen_subcommand_from config' -a 'check reload show'
-complete -c boomerangz -n '__fish_seen_subcommand_from dataset' -a 'adopt clean inspect list'
+complete -c boomerangz -n '__fish_seen_subcommand_from dataset' -a 'adopt clean inspect list reseed'
 complete -c boomerangz -n '__fish_seen_subcommand_from identity' -a 'recover'
 complete -c boomerangz -n '__fish_seen_subcommand_from pairing' -a 'create import list revoke'
 complete -c boomerangz -l config -r -F

@@ -6,8 +6,9 @@ and through a secured native listener.
 
 ## Local destination
 
-Create a destination root on different storage and delegate the receive
-permissions to the service account:
+The recommended general-purpose layout uses `discard=first`: create a persistent
+destination container on different storage and delegate the receive permissions
+to the service account:
 
 ```sh
 sudo zfs create backup/boomerangz
@@ -16,19 +17,28 @@ sudo zfs allow -u boomerangz \
   backup/boomerangz
 ```
 
-The destination root may remain mounted. With `discard=first` or
-`discard=all`, Boomerangz uses it only as a container and leaves its mount state
-and properties unchanged. With `discard=off`, the root is the receive target;
-it remains mounted if it is already mounted, while its `canmount` property
-defaults to `noauto`. Received filesystems and intermediate filesystems created
-below the root also use `canmount=noauto`. This prevents automatic mounting
-while allowing an administrator to mount them explicitly for recovery.
+The container may remain mounted. Boomerangz leaves its mount state and
+properties unchanged. Received filesystems and intermediate filesystems below
+it use `canmount=noauto`, preventing automatic mounting while allowing an
+administrator to mount a replica explicitly for recovery.
 
 Select it on the source:
 
 ```sh
-sudo zfs set org.boomerangz:local=backup/boomerangz tank/data
+sudo zfs set \
+  org.boomerangz:discard=first \
+  org.boomerangz:local=backup/boomerangz \
+  tank/data
 ```
+
+With source `tank/data`, this creates `backup/boomerangz/data`. Use `all` to
+create only `backup/boomerangz/data` when the source is nested more deeply, but
+ensure leaf names cannot collide. Use `off` only when the configured path itself
+should be replica-owned: leave that path absent and delegate the same permissions
+on its existing parent. A reseed can destroy and recreate an `off` destination,
+including any local properties or delegation set directly on it. See
+[Receive path mapping](/reference/properties#receive-path-mapping) for the full
+layout and mounting implications.
 
 ## SSH destination
 
@@ -73,6 +83,11 @@ sudo zfs allow -u boomerangz \
   tank/backups
 ```
 
+This prepares `tank/backups` as a persistent `first` or `all` container. Select
+one of those strategies on each source that uses this remote. For `off`, leave
+the configured remote root absent and place the delegation on its existing
+parent instead.
+
 Allow the restricted service to access this destination root in the receiving
 host's Boomerangz configuration:
 
@@ -113,6 +128,10 @@ sudo zfs allow -u boomerangz-replication \
   canmount,create,destroy,mount,receive:append,userprop \
   tank/backups
 ```
+
+This prepares `tank/backups` as a persistent `first` or `all` container. For
+`off`, leave the configured remote root absent and delegate on its existing
+parent instead.
 
 Do not add `boomerangz-replication` to administrative groups, give it source
 dataset permissions, or grant it `sudo` access. Direct mode must execute a
@@ -209,6 +228,10 @@ sudo zfs allow -u boomerangz \
   canmount,create,destroy,mount,receive:append,userprop \
   tank/backups
 ```
+
+This prepares `tank/backups` as a persistent `first` or `all` container. For
+`off`, leave the configured listener root absent and delegate on its existing
+parent instead.
 
 Configure the listener on that receiving host:
 

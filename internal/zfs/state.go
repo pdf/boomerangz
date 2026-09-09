@@ -150,6 +150,28 @@ func (d *Direct) CreateReceiveParent(ctx context.Context, dataset string) error 
 	return err
 }
 
+// AbortReceive discards resumable receive state on one exact dataset.
+func (d *Direct) AbortReceive(ctx context.Context, dataset string) error {
+	if err := validateDataset(dataset); err != nil {
+		return err
+	}
+	_, err := d.runner.Run(ctx, "receive", "-A", dataset)
+	return err
+}
+
+// DestroyDataset destroys one exact dataset and, when requested, descendants.
+func (d *Direct) DestroyDataset(ctx context.Context, dataset string, recursive bool) error {
+	if err := validateDataset(dataset); err != nil {
+		return err
+	}
+	args := []string{"destroy"}
+	if recursive {
+		args = append(args, "-r")
+	}
+	_, err := d.runner.Run(ctx, append(args, dataset)...)
+	return err
+}
+
 // SetProperties sets only boomerangz namespace properties on an exact object.
 func (d *Direct) SetProperties(ctx context.Context, object string, properties map[string]string) error {
 	if err := validateObject(object); err != nil {

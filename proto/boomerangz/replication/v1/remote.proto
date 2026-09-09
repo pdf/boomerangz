@@ -11,6 +11,8 @@ service RemoteService {
   rpc InspectState(InspectStateRequest) returns (InspectStateResponse);
   rpc CheckPermissions(CheckPermissionsRequest) returns (CheckPermissionsResponse);
   rpc CreateReceiveParent(CreateReceiveParentRequest) returns (CreateReceiveParentResponse);
+  rpc AbortReceive(AbortReceiveRequest) returns (AbortReceiveResponse);
+  rpc DestroyDataset(DestroyDatasetRequest) returns (DestroyDatasetResponse);
   rpc SetProperties(SetPropertiesRequest) returns (SetPropertiesResponse);
   rpc InheritProperty(InheritPropertyRequest) returns (InheritPropertyResponse);
   rpc Receive(stream ReceiveRequest) returns (ReceiveResponse);
@@ -97,6 +99,19 @@ message CreateReceiveParentRequest {
 }
 
 message CreateReceiveParentResponse {}
+
+message AbortReceiveRequest {
+  string dataset = 1;
+}
+
+message AbortReceiveResponse {}
+
+message DestroyDatasetRequest {
+  string dataset = 1;
+  bool recursive = 2;
+}
+
+message DestroyDatasetResponse {}
 
 message SetPropertiesRequest {
   string dataset = 1;

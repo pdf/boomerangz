@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -11,7 +13,13 @@ func TestDatasetCleanCommandName(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"clean", "cleanup"} {
 		var output bytes.Buffer
-		args := []string{"dataset", "--config", "testdata/empty.toml", "--config-dir", t.TempDir(), name, "tank/data"}
+		directory := t.TempDir()
+		configPath := filepath.Join(directory, "config.toml")
+		configBody := []byte("[paths]\nsocket_path = \"" + filepath.Join(directory, "control.sock") + "\"\n")
+		if err := os.WriteFile(configPath, configBody, 0600); err != nil {
+			t.Fatal(err)
+		}
+		args := []string{"dataset", "--config", configPath, "--config-dir", filepath.Join(directory, "config.d"), name, "tank/data"}
 		err := runWithReader(t.Context(), args, &output, io.Discard, BuildInfo{}, &cleanExecutor{})
 		if (err == nil) != (name == "clean") {
 			t.Fatalf("command %s: %v", name, err)

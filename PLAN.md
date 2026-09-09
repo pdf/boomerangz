@@ -1008,7 +1008,7 @@ boomerangz pairing create
 boomerangz pairing import
 boomerangz pairing list
 boomerangz pairing revoke
-boomerangz target reseed <dataset> <target>
+boomerangz dataset reseed <dataset> <target>
 boomerangz version
 ```
 

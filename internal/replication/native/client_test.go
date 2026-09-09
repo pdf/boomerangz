@@ -36,6 +36,8 @@ func (testBackend) InspectState(context.Context, string, bool) (zfs.State, error
 func (testBackend) CheckPermissions(context.Context, string, []string) error       { return nil }
 func (testBackend) SetProperties(context.Context, string, map[string]string) error { return nil }
 func (testBackend) InheritProperty(context.Context, string, string) error          { return nil }
+func (testBackend) AbortReceive(context.Context, string) error                     { return nil }
+func (testBackend) DestroyDataset(context.Context, string, bool) error             { return nil }
 
 func testTLSCertificate(t *testing.T) (tls.Certificate, *x509.Certificate) {
 	t.Helper()
@@ -90,6 +92,19 @@ func TestAuthenticatedNativeEndpointNegotiatesSharedService(t *testing.T) {
 	}
 	if err := endpoint.Executor().CheckPermissions(ctx, "tank/a", []string{"receive:append"}); err != nil {
 		t.Fatalf("permission preflight: %v", err)
+	}
+	reseed, ok := endpoint.Executor().(zfs.ReseedExecutor)
+	if !ok {
+		t.Fatal("native endpoint does not expose reseed operations")
+	}
+	if err := reseed.AbortReceive(ctx, "tank/a"); err != nil {
+		t.Fatalf("abort receive: %v", err)
+	}
+	if err := reseed.DestroyDataset(ctx, "tank/a", true); err != nil {
+		t.Fatalf("destroy dataset: %v", err)
+	}
+	if err := reseed.DestroyDataset(ctx, "other/private", true); err == nil {
+		t.Fatal("native endpoint destroyed a dataset outside its configured root")
 	}
 	if got := endpoint.CanonicalTarget(); got != "native://127.0.0.1:"+strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)+"/tank/a" {
 		t.Fatalf("canonical target=%q", got)

@@ -91,8 +91,29 @@ func (b *localBackend) SetProperties(_ context.Context, object string, values ma
 }
 
 func (b *localBackend) InheritProperty(_ context.Context, object, key string) error {
-	b.destination.Properties = slices.DeleteFunc(b.destination.Properties, func(row zfs.Property) bool { return row.Dataset == object && row.Name == key })
+	state := &b.source
+	if strings.HasPrefix(object, "backup") {
+		state = &b.destination
+	}
+	state.Properties = slices.DeleteFunc(state.Properties, func(row zfs.Property) bool { return row.Dataset == object && row.Name == key })
 	b.writes = append(b.writes, "inherit "+object+" "+key)
+	return nil
+}
+
+func (b *localBackend) AbortReceive(_ context.Context, dataset string) error {
+	delete(b.destination.ResumeTokens, dataset)
+	b.writes = append(b.writes, "abort "+dataset)
+	return nil
+}
+
+func (b *localBackend) DestroyDataset(_ context.Context, dataset string, recursive bool) error {
+	if dataset != "backup/data" || !recursive {
+		return fmt.Errorf("unexpected destroy request")
+	}
+	b.destExists = false
+	b.inventory = slices.DeleteFunc(b.inventory, func(item zfs.Dataset) bool { return item.Name == dataset || strings.HasPrefix(item.Name, dataset+"/") })
+	b.destination = zfs.State{}
+	b.writes = append(b.writes, "destroy-dataset "+dataset)
 	return nil
 }
 
