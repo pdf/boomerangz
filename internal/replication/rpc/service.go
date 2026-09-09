@@ -19,12 +19,12 @@ import (
 )
 
 // ProtocolVersion is negotiated by SSH-shell and future native clients.
-const ProtocolVersion = 3
+const ProtocolVersion = 4
 
 // MaxStreamChunk bounds each in-memory ZFS data message.
 const MaxStreamChunk = 256 * 1024
 
-var operations = []string{"capabilities", "permissions", "prepare-receive", "probe", "receive", "resume", "verify", "reconcile"}
+var operations = []string{"abort-receive", "capabilities", "destroy-dataset", "permissions", "prepare-receive", "probe", "receive", "reconcile", "resume", "verify"}
 
 // Server implements the transport-neutral remote endpoint over a typed ZFS
 // executor. AllowedRoot limits every mutation and receive to one configured
@@ -151,6 +151,36 @@ func (s *Server) CreateReceiveParent(ctx context.Context, request *CreateReceive
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return &CreateReceiveParentResponse{}, nil
+}
+
+// AbortReceive discards resumable state within an allowed destination root.
+func (s *Server) AbortReceive(ctx context.Context, request *AbortReceiveRequest) (*AbortReceiveResponse, error) {
+	if !s.inside(request.GetDataset()) {
+		return nil, status.Error(codes.PermissionDenied, "dataset is outside the configured destination scope")
+	}
+	backend, ok := s.backend.(zfs.ReseedExecutor)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "destination reseed operations are unavailable")
+	}
+	if err := backend.AbortReceive(ctx, request.GetDataset()); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &AbortReceiveResponse{}, nil
+}
+
+// DestroyDataset recursively removes an explicitly selected replica subtree.
+func (s *Server) DestroyDataset(ctx context.Context, request *DestroyDatasetRequest) (*DestroyDatasetResponse, error) {
+	if !s.inside(request.GetDataset()) {
+		return nil, status.Error(codes.PermissionDenied, "dataset is outside the configured destination scope")
+	}
+	backend, ok := s.backend.(zfs.ReseedExecutor)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "destination reseed operations are unavailable")
+	}
+	if err := backend.DestroyDataset(ctx, request.GetDataset(), request.GetRecursive()); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &DestroyDatasetResponse{}, nil
 }
 
 // SetProperties applies validated reconciliation properties within scope.

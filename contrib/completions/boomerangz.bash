@@ -6,7 +6,7 @@ _boomerangz() {
     if [[ $COMP_CWORD -eq 2 ]]; then
         case "${COMP_WORDS[1]}" in
             config) commands="check reload show" ;;
-            dataset) commands="adopt clean inspect list" ;;
+            dataset) commands="adopt clean inspect list reseed" ;;
             identity) commands="recover" ;;
             pairing) commands="create import list revoke" ;;
         esac

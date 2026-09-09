@@ -25,6 +25,8 @@ const (
 	RemoteService_InspectState_FullMethodName           = "/boomerangz.replication.v1.RemoteService/InspectState"
 	RemoteService_CheckPermissions_FullMethodName       = "/boomerangz.replication.v1.RemoteService/CheckPermissions"
 	RemoteService_CreateReceiveParent_FullMethodName    = "/boomerangz.replication.v1.RemoteService/CreateReceiveParent"
+	RemoteService_AbortReceive_FullMethodName           = "/boomerangz.replication.v1.RemoteService/AbortReceive"
+	RemoteService_DestroyDataset_FullMethodName         = "/boomerangz.replication.v1.RemoteService/DestroyDataset"
 	RemoteService_SetProperties_FullMethodName          = "/boomerangz.replication.v1.RemoteService/SetProperties"
 	RemoteService_InheritProperty_FullMethodName        = "/boomerangz.replication.v1.RemoteService/InheritProperty"
 	RemoteService_Receive_FullMethodName                = "/boomerangz.replication.v1.RemoteService/Receive"
@@ -40,6 +42,8 @@ type RemoteServiceClient interface {
 	InspectState(ctx context.Context, in *InspectStateRequest, opts ...grpc.CallOption) (*InspectStateResponse, error)
 	CheckPermissions(ctx context.Context, in *CheckPermissionsRequest, opts ...grpc.CallOption) (*CheckPermissionsResponse, error)
 	CreateReceiveParent(ctx context.Context, in *CreateReceiveParentRequest, opts ...grpc.CallOption) (*CreateReceiveParentResponse, error)
+	AbortReceive(ctx context.Context, in *AbortReceiveRequest, opts ...grpc.CallOption) (*AbortReceiveResponse, error)
+	DestroyDataset(ctx context.Context, in *DestroyDatasetRequest, opts ...grpc.CallOption) (*DestroyDatasetResponse, error)
 	SetProperties(ctx context.Context, in *SetPropertiesRequest, opts ...grpc.CallOption) (*SetPropertiesResponse, error)
 	InheritProperty(ctx context.Context, in *InheritPropertyRequest, opts ...grpc.CallOption) (*InheritPropertyResponse, error)
 	Receive(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ReceiveRequest, ReceiveResponse], error)
@@ -113,6 +117,26 @@ func (c *remoteServiceClient) CreateReceiveParent(ctx context.Context, in *Creat
 	return out, nil
 }
 
+func (c *remoteServiceClient) AbortReceive(ctx context.Context, in *AbortReceiveRequest, opts ...grpc.CallOption) (*AbortReceiveResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AbortReceiveResponse)
+	err := c.cc.Invoke(ctx, RemoteService_AbortReceive_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *remoteServiceClient) DestroyDataset(ctx context.Context, in *DestroyDatasetRequest, opts ...grpc.CallOption) (*DestroyDatasetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DestroyDatasetResponse)
+	err := c.cc.Invoke(ctx, RemoteService_DestroyDataset_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *remoteServiceClient) SetProperties(ctx context.Context, in *SetPropertiesRequest, opts ...grpc.CallOption) (*SetPropertiesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetPropertiesResponse)
@@ -156,6 +180,8 @@ type RemoteServiceServer interface {
 	InspectState(context.Context, *InspectStateRequest) (*InspectStateResponse, error)
 	CheckPermissions(context.Context, *CheckPermissionsRequest) (*CheckPermissionsResponse, error)
 	CreateReceiveParent(context.Context, *CreateReceiveParentRequest) (*CreateReceiveParentResponse, error)
+	AbortReceive(context.Context, *AbortReceiveRequest) (*AbortReceiveResponse, error)
+	DestroyDataset(context.Context, *DestroyDatasetRequest) (*DestroyDatasetResponse, error)
 	SetProperties(context.Context, *SetPropertiesRequest) (*SetPropertiesResponse, error)
 	InheritProperty(context.Context, *InheritPropertyRequest) (*InheritPropertyResponse, error)
 	Receive(grpc.ClientStreamingServer[ReceiveRequest, ReceiveResponse]) error
@@ -186,6 +212,12 @@ func (UnimplementedRemoteServiceServer) CheckPermissions(context.Context, *Check
 }
 func (UnimplementedRemoteServiceServer) CreateReceiveParent(context.Context, *CreateReceiveParentRequest) (*CreateReceiveParentResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateReceiveParent not implemented")
+}
+func (UnimplementedRemoteServiceServer) AbortReceive(context.Context, *AbortReceiveRequest) (*AbortReceiveResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AbortReceive not implemented")
+}
+func (UnimplementedRemoteServiceServer) DestroyDataset(context.Context, *DestroyDatasetRequest) (*DestroyDatasetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DestroyDataset not implemented")
 }
 func (UnimplementedRemoteServiceServer) SetProperties(context.Context, *SetPropertiesRequest) (*SetPropertiesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetProperties not implemented")
@@ -325,6 +357,42 @@ func _RemoteService_CreateReceiveParent_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RemoteService_AbortReceive_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AbortReceiveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RemoteServiceServer).AbortReceive(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RemoteService_AbortReceive_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RemoteServiceServer).AbortReceive(ctx, req.(*AbortReceiveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RemoteService_DestroyDataset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DestroyDatasetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RemoteServiceServer).DestroyDataset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RemoteService_DestroyDataset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RemoteServiceServer).DestroyDataset(ctx, req.(*DestroyDatasetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RemoteService_SetProperties_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetPropertiesRequest)
 	if err := dec(in); err != nil {
@@ -398,6 +466,14 @@ var RemoteService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateReceiveParent",
 			Handler:    _RemoteService_CreateReceiveParent_Handler,
+		},
+		{
+			MethodName: "AbortReceive",
+			Handler:    _RemoteService_AbortReceive_Handler,
+		},
+		{
+			MethodName: "DestroyDataset",
+			Handler:    _RemoteService_DestroyDataset_Handler,
 		},
 		{
 			MethodName: "SetProperties",

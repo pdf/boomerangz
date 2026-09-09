@@ -38,6 +38,27 @@ Given source `tank/projects/code` and destination root `backup/archive`:
 It does not append the complete source name. Descendants of a recursive stream
 are preserved relative to that root.
 
+Choose the destination layout and delegation point together:
+
+| `discard` | Recommended layout | Delegate permissions on | Operational consequence |
+| --- | --- | --- | --- |
+| `off` | Reserve one absent dataset path for one source. | Its existing parent. | The full receive creates the configured dataset. Boomerangz treats that dataset as replica-owned, and reseed destroys and recreates it. |
+| `first` | Create a persistent container root. This is the general recommendation. | The container root. | The source path below its pool is preserved beneath the container. Reseed removes only that mapped subtree. |
+| `all` | Create a persistent container root for sources with deliberately unique leaf names. | The container root. | Only the source leaf name is appended. Reseed removes only that leaf subtree; equal leaf names collide. |
+
+For example, with `discard=off`, reserve `backup/archive` but create and
+delegate on `backup`; `backup/archive` must not exist before the first full
+receive. With `first` or `all`, create and delegate on `backup/archive` itself.
+The configured `set_prop:*` and `ignore_prop:*` values change received
+properties, but they do not change this creation and ownership model.
+
+Received filesystems default to `canmount=noauto`. They may be mounted
+explicitly for recovery, preferably read-only. An already mounted destination
+is not remounted by an incremental receive, but do not modify it: Boomerangz
+does not use `zfs receive -F`, and local changes can prevent the next receive.
+Unmount a mapped dataset before reseeding it because reseed destroys that
+dataset.
+
 Preview and verify mappings before the first transfer. Boomerangz binds a
 source to the verified destination identity; replacing a pool or dataset with
 the same name does not silently authorize the replacement.

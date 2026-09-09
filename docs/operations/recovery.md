@@ -18,6 +18,64 @@ Do not manually delete snapshots that appear retained during an interruption.
 They may be needed to continue replication without retransmitting the complete
 dataset.
 
+## Reseed a target
+
+Use a reseed when Boomerangz reports that an existing destination has no common
+base or that its persistent binding no longer matches the mapped destination.
+Stop the daemon first, then preview the exact managed source and target:
+
+```sh
+sudo systemctl stop boomerangz.service
+sudo -u boomerangz -H boomerangz dataset reseed tank/data backup/archive
+```
+
+For a remote target, use its configured remote name instead of its destination
+dataset:
+
+```sh
+sudo -u boomerangz -H boomerangz dataset reseed tank/data home-backup
+```
+
+The preview lists the persistent or currently resolved binding, the surviving
+receive parent, every mapped destination object that will be destroyed,
+resumable receive state that will be abandoned, and source references that will
+be released. Save and review that output before applying it:
+
+```sh
+sudo -u boomerangz -H boomerangz dataset reseed tank/data backup/archive --apply
+sudo systemctl start boomerangz.service
+```
+
+Applying a reseed permanently destroys the mapped replica subtree. When
+`discard=off`, that subtree is the configured destination root itself. Do not
+apply the plan if that root contains data which is not disposable replica data.
+This is required because Boomerangz performs non-forcing full receives: without
+`-d` or `-e`, OpenZFS creates the configured dataset from the full stream and
+will not treat an existing dataset as a fresh seed. Receive property overrides
+and exclusions do not change that rule.
+The effective destination account must have the normal receive permissions on
+the displayed `receive_anchor`; for `discard=off`, delegate those permissions on
+the destination root's parent so that the root can be created again.
+The source dataset and its snapshots are retained; only recovery references for
+the selected target are released. A later daemon reconciliation starts a fresh
+full transfer.
+
+If a replica is mounted for recovery, keep it read-only and avoid modifying it.
+An ordinary incremental receive does not remount an already mounted dataset,
+but local changes can make a non-forcing receive fail. Unmount the mapped
+dataset and its descendants before applying a reseed because they will be
+destroyed.
+
+The command operates on one managed source dataset. If the status output lists
+blocked descendant source datasets separately, reseed each listed source for
+the same target. Destroying an ancestor replica may leave no destination objects
+for the later commands, but those commands are still required to release each
+source dataset's independent recovery state and binding.
+
+Reseed is retryable after partial failure. It refuses to proceed if the bound
+pool identity, configured mapping, source authority, or effective target has
+changed during preflight.
+
 ## Deactivation and automatic retirement
 
 Disable management by setting `enabled=off`:

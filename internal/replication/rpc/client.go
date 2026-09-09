@@ -90,6 +90,16 @@ func (e *clientExecutor) CreateReceiveParent(ctx context.Context, dataset string
 	return e.client.mapError(err)
 }
 
+func (e *clientExecutor) AbortReceive(ctx context.Context, dataset string) error {
+	_, err := e.client.remote.AbortReceive(ctx, &AbortReceiveRequest{Dataset: dataset})
+	return e.client.mapError(err)
+}
+
+func (e *clientExecutor) DestroyDataset(ctx context.Context, dataset string, recursive bool) error {
+	_, err := e.client.remote.DestroyDataset(ctx, &DestroyDatasetRequest{Dataset: dataset, Recursive: recursive})
+	return e.client.mapError(err)
+}
+
 func (e *clientExecutor) SetProperties(ctx context.Context, dataset string, properties map[string]string) error {
 	_, err := e.client.remote.SetProperties(ctx, &SetPropertiesRequest{Dataset: dataset, Properties: maps.Clone(properties)})
 	return e.client.mapError(err)

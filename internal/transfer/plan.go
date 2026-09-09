@@ -277,7 +277,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 			return plan, err
 		}
 		if *storedBinding != wantedBinding {
-			return plan, fmt.Errorf("target identity or mapping differs from persistent binding; explicit rebind or reseed required")
+			return plan, fmt.Errorf("target identity or mapping differs from persistent binding; run boomerangz dataset reseed for this source and target")
 		}
 		plan.TargetBinding = *storedBinding
 	}
@@ -382,7 +382,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 			}
 		}
 		if latest.Name == "" {
-			return plan, fmt.Errorf("existing destination has no common base; explicit reseed required")
+			return plan, fmt.Errorf("existing destination has no common base; run boomerangz dataset reseed for this source and target")
 		}
 		for _, o := range view.Source.Objects {
 			if datasetOf(o.Name) != request.Source || o.GUID != latest.GUID || o.CreateTXG >= endpoint.CreateTXG || o.Type != "snapshot" {
@@ -412,7 +412,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 			}
 		}
 		if plan.Base == "" {
-			return plan, fmt.Errorf("destination latest snapshot has no eligible common source base; refusing rollback or reseed")
+			return plan, fmt.Errorf("destination latest snapshot has no eligible common source base; run boomerangz dataset reseed for this source and target")
 		}
 		plan.Mode = "incremental-latest"
 		if p.Incremental == "all" {

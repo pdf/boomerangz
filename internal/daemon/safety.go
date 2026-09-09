@@ -27,6 +27,24 @@ type TargetChecker struct {
 	settings map[string]config.RemoteConfig
 }
 
+// TargetEndpoint is one configured remote destination opened for an explicit
+// standalone administrative operation.
+type TargetEndpoint struct {
+	Executor        zfs.Executor
+	Transport       string
+	CanonicalTarget string
+	Root            string
+	close           func() error
+}
+
+// Close releases the remote endpoint.
+func (e *TargetEndpoint) Close() error {
+	if e == nil || e.close == nil {
+		return nil
+	}
+	return e.close()
+}
+
 func newSafety(gate *lifecycle.Gate, local zfs.Executor, remotes map[string]remoteClient, settings map[string]config.RemoteConfig) *Safety {
 	return &Safety{gate: gate, targets: &TargetChecker{local: local, remotes: remotes, settings: settings}}
 }
@@ -132,4 +150,22 @@ func (s *TargetChecker) CheckTarget(ctx context.Context, source, target string) 
 		return checkErr
 	}
 	return fmt.Errorf("recorded target is not configured")
+}
+
+// OpenConfigured opens one named remote using the same transport construction
+// as the daemon.
+func (s *TargetChecker) OpenConfigured(ctx context.Context, name string) (*TargetEndpoint, error) {
+	if s == nil {
+		return nil, fmt.Errorf("target verification is unavailable")
+	}
+	client, exists := s.remotes[name]
+	if !exists {
+		return nil, fmt.Errorf("remote target %q is not configured", name)
+	}
+	setting := s.settings[name]
+	opened, err := client.Open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &TargetEndpoint{Executor: opened.executor, Transport: client.Transport(), CanonicalTarget: client.CanonicalTarget(), Root: setting.Root, close: opened.close}, nil
 }

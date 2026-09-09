@@ -174,3 +174,21 @@ func TestRejectsArgumentInjection(t *testing.T) {
 		t.Fatalf("runner invoked with %#v", runner.args)
 	}
 }
+
+func TestReseedOperationsUseBoundedArguments(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{}
+	direct := &Direct{runner: runner}
+	if err := direct.AbortReceive(t.Context(), "backup/data"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(runner.args, []string{"receive", "-A", "backup/data"}) {
+		t.Fatalf("abort args=%v", runner.args)
+	}
+	if err := direct.DestroyDataset(t.Context(), "backup/data", true); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(runner.args, []string{"destroy", "-r", "backup/data"}) {
+		t.Fatalf("destroy args=%v", runner.args)
+	}
+}

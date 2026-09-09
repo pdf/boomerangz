@@ -39,6 +39,7 @@ one JSON object; redirected watch output is newline-delimited JSON.
 | `boomerangz dataset list` | Print a readable inventory with each dataset's management status. Add `--json` for structured output. |
 | `boomerangz dataset inspect DATASET` | Print readable effective policy, provenance, activation, coverage, warnings, and errors for one exact dataset. Add `--json` for structured output. |
 | `boomerangz dataset adopt DATASET` | Preview adoption; `--apply` performs the revalidated plan. |
+| `boomerangz dataset reseed DATASET TARGET` | Preview destruction and fresh seeding of one configured local destination root or named remote; `--apply` performs the revalidated plan. |
 | `boomerangz dataset clean [DATASET...]` | Preview decommissioning. Use `--recursive`, `--all`, `--destroy-owned-snapshots`, and `--apply` as needed. |
 | `boomerangz identity recover` | Preview recovery. `--owner UUID` resolves multiple candidates; `--apply` performs the revalidated plan. |
 

@@ -17,6 +17,9 @@ sudo zfs allow -u boomerangz \
 
 ### Destination datasets
 
+This example assumes the recommended `discard=first` layout, where
+`backup/boomerangz` is a persistent container:
+
 ```sh
 sudo zfs allow -u boomerangz \
   canmount,create,destroy,mount,receive:append,userprop \
@@ -26,6 +29,9 @@ sudo zfs allow -u boomerangz \
 Add receive-property permissions only for properties you explicitly configure.
 Boomerangz uses `receive:append`, not the broader `receive` permission, because
 it never requests a forced rollback with `zfs receive -F`.
+For `discard=off`, the configured receive dataset starts absent and can be
+destroyed by reseed, so grant the same permissions on its existing parent. See
+[Receive path mapping](/reference/properties#receive-path-mapping).
 Do not compensate for a delegation error with unrestricted `sudo` or by running
 the network-facing daemon as root.
 

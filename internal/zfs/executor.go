@@ -68,6 +68,14 @@ type Executor interface {
 	Release(context.Context, string, string) error
 }
 
+// ReseedExecutor exposes the destructive destination operations used only by
+// the explicit, preview-first reseed workflow.
+type ReseedExecutor interface {
+	Executor
+	AbortReceive(context.Context, string) error
+	DestroyDataset(context.Context, string, bool) error
+}
+
 // Object is a filesystem, volume, snapshot, or bookmark in a lifecycle query.
 type Object struct {
 	Name      string

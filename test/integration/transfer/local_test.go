@@ -204,6 +204,31 @@ func TestGuestLocalTransfer(t *testing.T) {
 	if _, err := engine.Preview(t.Context(), request(latest, "")); err == nil {
 		t.Fatal("accepted unrelated latest destination snapshot")
 	}
+	// Model an initial receive that created the exact destination before the
+	// source-side binding could be persisted. The explicit reseed path must
+	// recover this otherwise-blocked target without disturbing the source or the
+	// other configured destination.
+	command("inherit", policy.StateNamespace+"target:"+lifecycle.TargetID("local:"+latest), source)
+	reseed, err := transfer.NewReseedService(direct, direct, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reseedRequest := request(latest, "")
+	reseedPreview, err := reseed.Plan(t.Context(), reseedRequest)
+	if err != nil || reseedPreview.BindingStored || !reseedPreview.DestinationExists || len(reseedPreview.DestinationObjects) == 0 {
+		t.Fatalf("reseed preview=%+v err=%v", reseedPreview, err)
+	}
+	reseedResult, err := reseed.Apply(t.Context(), reseedRequest)
+	if err != nil || !reseedResult.Applied {
+		t.Fatalf("reseed result=%+v err=%v", reseedResult, err)
+	}
+	if err := exec.CommandContext(t.Context(), "zfs", "list", "-H", latest).Run(); err == nil {
+		t.Fatal("reseed retained mapped destination")
+	}
+	result, err = engine.Apply(t.Context(), request(latest, ""), nil)
+	if err != nil || !result.Verified || result.Plan.Mode != "full" {
+		t.Fatalf("post-reseed full transfer=%+v err=%v", result, err)
+	}
 	// Full recursive package with both native path mapping modes.
 	for _, discard := range []string{"first", "all"} {
 		// Mapping is part of the persistent target binding. Exercise each mapping

@@ -289,6 +289,7 @@ type datasetCommand struct {
 	List          datasetListCommand    `cmd:"" help:"List datasets and their management status."`
 	Inspect       datasetInspectCommand `cmd:"" help:"Inspect effective policy and property sources."`
 	Adopt         datasetAdoptCommand   `cmd:"" help:"Preview transfer of an existing lineage to this installation."`
+	Reseed        datasetReseedCommand  `cmd:"" help:"Preview destructive reset of one configured replication target."`
 	Clean         datasetCleanCommand   `cmd:"" help:"Preview explicit local decommissioning; preserve snapshots by default."`
 }
 
@@ -373,6 +374,24 @@ func (c *datasetInspectCommand) Run(env *commandEnvironment) error {
 type datasetAdoptCommand struct {
 	Dataset string `arg:"" required:"" help:"Exact ZFS dataset name."`
 	Apply   bool   `help:"Apply the adoption after revalidation."`
+}
+
+type datasetReseedCommand struct {
+	Dataset string `arg:"" required:"" help:"Exact managed source dataset name."`
+	Target  string `arg:"" required:"" help:"Configured local destination root or remote name."`
+	Apply   bool   `help:"Apply the reseed after revalidation."`
+}
+
+func (c *datasetReseedCommand) Run(env *commandEnvironment) error {
+	loaded, err := env.Root.Dataset.load()
+	if err != nil {
+		return err
+	}
+	reader, executor, err := datasetExecutor(env)
+	if err != nil {
+		return err
+	}
+	return runReseed(env.Context, env.Stdout, loaded.Config, reader, executor, c.Dataset, c.Target, c.Apply)
 }
 
 func (c *datasetAdoptCommand) Run(env *commandEnvironment) error {
