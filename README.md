@@ -36,9 +36,10 @@ boomerangz dataset --config /etc/boomerangz/config.toml list
 boomerangz dataset --config /etc/boomerangz/config.toml inspect pool/data
 ```
 
-Both commands emit JSON. Inspection includes property provenance, requested and
-effective send behavior, retained received properties, errors, and replication
-coverage. See [docs/dataset-policy.md](docs/dataset-policy.md) for the policy contract.
+Both commands produce readable output by default; add `--json` for structured
+output. Inspection includes property provenance, requested and effective send
+behavior, retained received properties, errors, and replication coverage. See
+[docs/dataset-policy.md](docs/dataset-policy.md) for the policy contract.
 Adoption, clean behavior, ownership checks, and current safety boundaries are documented
 in [docs/snapshot-lifecycle.md](docs/snapshot-lifecycle.md).
 

@@ -29,10 +29,14 @@ Queue an immediate snapshot for selected active roots, or all active roots when
 no dataset is named.
 .TP
 .B dataset list
-List discovered datasets and effective policy as JSON.
+List discovered datasets and their management status. Use
+.B --json
+for structured output.
 .TP
 .B dataset inspect DATASET
-Inspect one dataset's resolved policy and property provenance as JSON.
+Inspect one dataset's resolved policy and property provenance. Use
+.B --json
+for structured output.
 .TP
 .B dataset adopt DATASET
 Preview adoption of an existing lineage. Add

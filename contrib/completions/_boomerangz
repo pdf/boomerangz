@@ -5,6 +5,7 @@ _boomerangz() {
   typeset -A opt_args
   _arguments -C \
     '(-h --help)'{-h,--help}'[show help]' \
+    '--json[emit JSON]' \
     '1:command:->command' \
     '*::argument:->argument'
   case $state in

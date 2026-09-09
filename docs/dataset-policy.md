@@ -1,10 +1,11 @@
 # Dataset discovery and policy
 
 `boomerangz dataset list` and `boomerangz dataset inspect <dataset>` are read-only
-commands that emit JSON. The `dataset` command accepts `--config` and
-`--config-dir` with the same defaults as `config check`. An explicit inspection
-includes inactive datasets. A policy error is reported in the dataset's
-`policy.errors`; a failed inventory or query fails the command.
+commands with readable output by default. Add `--json` for the stable structured
+representation. The `dataset` command accepts `--config` and `--config-dir` with
+the same defaults as `config check`. An explicit inspection includes inactive
+datasets. Invalid policies show their errors in readable inspection output (or
+in `policy.errors` with `--json`); a failed inventory or query fails the command.
 
 Only local public `org.boomerangz:*` properties participate in policy.
 Children inherit locally configured ancestor values, and each value records
@@ -14,8 +15,8 @@ after local promotion. Internal `org.boomerangz:state:*` metadata is kept out
 of the policy map. Defaults have no supplying dataset; the default `raw` value
 is computed per dataset from its encryption root.
 
-`org.boomerangz:discard` accepts `none` (the default), `first` (receive `-d`),
-and `all` (receive `-e`). Setting `none` locally masks an ancestor's choice.
+`org.boomerangz:discard` accepts `off` (the default), `first` (receive `-d`),
+and `all` (receive `-e`). Setting `off` locally masks an ancestor's choice.
 The complete property reference is below.
 Unknown public keys, invalid toggles, malformed lists, unknown remotes, invalid
 grids, and reserved receive-property targets invalidate the affected policy.
@@ -69,7 +70,7 @@ transfer behavior; automatic transfers are not available in the current release.
 | `props` | `off` | `on`, `off` | Requests send `-p` to carry dataset properties. Public boomerangz configuration is excluded from receives to avoid activating or rerouting backups. |
 | `incremental` | `all` | `all`, `latest` | `all` uses send `-I` to include intermediate snapshots; `latest` uses `-i` to send directly between base and target. Both use a full send if no common base exists. `all` can include foreign intermediates. |
 | `replicate` | `off` | `on`, `off` | Takes recursive snapshots and requests a replication package (`-R`). Root policy governs covered descendants, suppressing duplicate jobs. Packages can include foreign snapshots and native receive semantics can remove destination snapshots absent from the sender; this is an explicit opt-in, not automatic `-F`. |
-| `discard` | `none` | `none`, `first`, `all` | Controls receive path mapping: `none` uses the specified destination, `first` (`-d`) appends the source path with its pool component removed, `all` (`-e`) appends only the final source component. |
+| `discard` | `off` | `off`, `first`, `all` | Controls receive path mapping: `off` uses the specified destination, `first` (`-d`) appends the source path with its pool component removed, `all` (`-e`) appends only the final source component. |
 | `set_prop:<name>` | Unset | Receive property value | Overrides a receive-side property using `-o name=value`; each dynamic key inherits independently. The resulting target property is not itself boomerangz metadata. |
 | `ignore_prop:<name>` | Unset | `on`, `off` | `on` excludes an incoming property using `-x name`; `off` masks an inherited exclusion. A matching `set_prop` wins with a warning. |
 

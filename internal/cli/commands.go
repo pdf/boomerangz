@@ -286,8 +286,8 @@ func (c *sshShellCommand) Run(env *commandEnvironment) error {
 
 type datasetCommand struct {
 	configOptions `embed:""`
-	List          datasetListCommand    `cmd:"" help:"List sparse inventory and active policies as JSON."`
-	Inspect       datasetInspectCommand `cmd:"" help:"Inspect effective policy and stored properties as JSON."`
+	List          datasetListCommand    `cmd:"" help:"List datasets and their management status."`
+	Inspect       datasetInspectCommand `cmd:"" help:"Inspect effective policy and property sources."`
 	Adopt         datasetAdoptCommand   `cmd:"" help:"Preview transfer of an existing lineage to this installation."`
 	Clean         datasetCleanCommand   `cmd:"" help:"Preview explicit local decommissioning; preserve snapshots by default."`
 }
@@ -331,12 +331,17 @@ func scanDatasets(env *commandEnvironment, options configOptions, inspect []stri
 	return scanner.Scan(env.Context, inspect)
 }
 
-type datasetListCommand struct{}
+type datasetListCommand struct {
+	JSON bool `help:"Emit JSON."`
+}
 
-func (*datasetListCommand) Run(env *commandEnvironment) error {
+func (c *datasetListCommand) Run(env *commandEnvironment) error {
 	generation, err := scanDatasets(env, env.Root.Dataset.configOptions, nil)
 	if err != nil {
 		return err
+	}
+	if !c.JSON {
+		return writeDatasetList(env.Stdout, generation.Entries())
 	}
 	encoder := json.NewEncoder(env.Stdout)
 	encoder.SetIndent("", "  ")
@@ -345,6 +350,7 @@ func (*datasetListCommand) Run(env *commandEnvironment) error {
 
 type datasetInspectCommand struct {
 	Dataset string `arg:"" required:"" help:"Exact ZFS dataset name."`
+	JSON    bool   `help:"Emit JSON."`
 }
 
 func (c *datasetInspectCommand) Run(env *commandEnvironment) error {
@@ -355,6 +361,9 @@ func (c *datasetInspectCommand) Run(env *commandEnvironment) error {
 	entry, exists := generation.Inspect(c.Dataset)
 	if !exists {
 		return fmt.Errorf("dataset %q was not found", c.Dataset)
+	}
+	if !c.JSON {
+		return writeDatasetInspection(env.Stdout, entry)
 	}
 	encoder := json.NewEncoder(env.Stdout)
 	encoder.SetIndent("", "  ")

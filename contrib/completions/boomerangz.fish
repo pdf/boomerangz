@@ -19,3 +19,4 @@ complete -c boomerangz -l client-cert -r -F
 complete -c boomerangz -l client-key -r -F
 complete -c boomerangz -l scope -r -a 'status trigger replicate prune admin'
 complete -c boomerangz -l expires-in -r
+complete -c boomerangz -n '__fish_seen_subcommand_from list inspect version' -l json -d 'Emit JSON'
