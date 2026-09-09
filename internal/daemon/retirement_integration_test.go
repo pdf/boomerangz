@@ -29,6 +29,7 @@ func (b *targetBackend) ListDatasets(context.Context) ([]zfs.Dataset, error) {
 func (b *targetBackend) InspectDatasetIdentity(_ context.Context, dataset string) (zfs.DatasetIdentity, error) {
 	return b.identities[dataset], nil
 }
+func (*targetBackend) CheckPermissions(context.Context, string, []string) error { return nil }
 func (*targetBackend) GetActivationProperties(context.Context) ([]zfs.Property, error) {
 	return nil, nil
 }

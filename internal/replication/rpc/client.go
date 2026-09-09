@@ -80,6 +80,11 @@ func (e *clientExecutor) InspectState(ctx context.Context, dataset string, recur
 	return decodeClientState(response), nil
 }
 
+func (e *clientExecutor) CheckPermissions(ctx context.Context, dataset string, permissions []string) error {
+	_, err := e.client.remote.CheckPermissions(ctx, &CheckPermissionsRequest{Dataset: dataset, Permissions: slices.Clone(permissions)})
+	return e.client.mapError(err)
+}
+
 func (e *clientExecutor) CreateReceiveParent(ctx context.Context, dataset string) error {
 	_, err := e.client.remote.CreateReceiveParent(ctx, &CreateReceiveParentRequest{Dataset: dataset})
 	return e.client.mapError(err)

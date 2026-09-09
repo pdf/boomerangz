@@ -53,6 +53,7 @@ type Property struct {
 type Executor interface {
 	ListDatasets(context.Context) ([]Dataset, error)
 	InspectDatasetIdentity(context.Context, string) (DatasetIdentity, error)
+	CheckPermissions(context.Context, string, []string) error
 	GetActivationProperties(context.Context) ([]Property, error)
 	GetStoredProperties(context.Context, []string) ([]Property, error)
 	InspectState(context.Context, string, bool) (State, error)

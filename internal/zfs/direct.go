@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -26,11 +27,12 @@ type execRunner struct{ path string }
 
 func (r execRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, r.path, args...)
+	command.Env = append(os.Environ(), "LC_ALL=C")
 	output := &boundedOutput{}
 	command.Stdout, command.Stderr = output, output
 	err := command.Run()
 	if err != nil {
-		return nil, fmt.Errorf("zfs %s: %w: %s", args[0], err, strings.TrimSpace(output.buffer.String()))
+		return nil, fmt.Errorf("%s %s: %w: %s", filepath.Base(r.path), args[0], err, strings.TrimSpace(output.buffer.String()))
 	}
 	return output.buffer.Bytes(), nil
 }
@@ -48,8 +50,9 @@ func (b *boundedOutput) Write(data []byte) (int, error) {
 
 // Direct executes typed operations using a locally installed zfs binary.
 type Direct struct {
-	runner     CommandRunner
-	poolRunner CommandRunner
+	runner         CommandRunner
+	poolRunner     CommandRunner
+	identityRunner CommandRunner
 }
 
 // NewDirect creates a direct executor for an explicit zfs executable path.
@@ -57,16 +60,27 @@ func NewDirect(path string) (*Direct, error) {
 	if path == "" {
 		return nil, errors.New("zfs executable path is required")
 	}
-	return &Direct{runner: execRunner{path: path}, poolRunner: execRunner{path: filepath.Join(filepath.Dir(path), "zpool")}}, nil
+	identityPath, err := exec.LookPath("id")
+	if err != nil {
+		return nil, fmt.Errorf("locate id executable: %w", err)
+	}
+	return &Direct{runner: execRunner{path: path}, poolRunner: execRunner{path: filepath.Join(filepath.Dir(path), "zpool")}, identityRunner: execRunner{path: identityPath}}, nil
 }
 
-// NewDirectWithRunners creates an executor over bounded, transport-owned zfs
-// and zpool runners.
+// NewDirectWithRunners creates an executor over bounded local zfs and zpool
+// runners and obtains identity from the current process environment.
 func NewDirectWithRunners(zfsRunner, zpoolRunner CommandRunner) (*Direct, error) {
-	if zfsRunner == nil || zpoolRunner == nil {
-		return nil, errors.New("zfs and zpool command runners are required")
+	return NewDirectWithRunnersAndIdentity(zfsRunner, zpoolRunner, execRunner{path: "id"})
+}
+
+// NewDirectWithRunnersAndIdentity creates an executor over transport-owned zfs,
+// zpool, and identity runners. The identity runner must execute the same
+// endpoint credential as the ZFS runners.
+func NewDirectWithRunnersAndIdentity(zfsRunner, zpoolRunner, identityRunner CommandRunner) (*Direct, error) {
+	if zfsRunner == nil || zpoolRunner == nil || identityRunner == nil {
+		return nil, errors.New("zfs, zpool, and identity command runners are required")
 	}
-	return &Direct{runner: zfsRunner, poolRunner: zpoolRunner}, nil
+	return &Direct{runner: zfsRunner, poolRunner: zpoolRunner, identityRunner: identityRunner}, nil
 }
 
 // InspectDatasetIdentity resolves an exact dataset GUID and the containing pool

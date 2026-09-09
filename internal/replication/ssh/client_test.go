@@ -30,6 +30,7 @@ func (shellTestBackend) InspectDatasetIdentity(_ context.Context, dataset string
 func (shellTestBackend) InspectState(_ context.Context, dataset string, _ bool) (zfs.State, error) {
 	return zfs.State{Objects: []zfs.Object{{Name: dataset, Type: "filesystem", GUID: 10}}, ResumeTokens: map[string]string{}}, nil
 }
+func (shellTestBackend) CheckPermissions(context.Context, string, []string) error       { return nil }
 func (shellTestBackend) SetProperties(context.Context, string, map[string]string) error { return nil }
 func (shellTestBackend) InheritProperty(context.Context, string, string) error          { return nil }
 
@@ -78,7 +79,7 @@ func TestClientArgumentsAndProbe(t *testing.T) {
 	if err != nil || len(inventory) != 2 {
 		t.Fatalf("inventory=%v err=%v", inventory, err)
 	}
-	want := []string{"-T", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=2", "-p", "2222", "-o", "IdentitiesOnly=yes", "-i", "/keys/backup", "--", "replicator@Backup.EXAMPLE.net", "'zfs' 'list' '-H' '-p' '-t' 'filesystem,volume' '-o' 'name,type,encryptionroot'"}
+	want := []string{"-T", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=2", "-p", "2222", "-o", "IdentitiesOnly=yes", "-i", "/keys/backup", "--", "replicator@Backup.EXAMPLE.net", "LC_ALL=C 'zfs' 'list' '-H' '-p' '-t' 'filesystem,volume' '-o' 'name,type,encryptionroot'"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("SSH args:\n got %#v\nwant %#v", got, want)
 	}
@@ -93,6 +94,36 @@ func TestRemoteCommandQuoting(t *testing.T) {
 	want := "'zfs' 'set' 'comment=it'\"'\"'s safe; $(false)' 'tank/data'"
 	if got != want {
 		t.Fatalf("remote command = %q, want %q", got, want)
+	}
+}
+
+func TestDirectPermissionPreflightUsesRemoteCredential(t *testing.T) {
+	t.Parallel()
+	var commands []string
+	client, err := newClient(Config{Host: "backup.example.net", User: "replicator", Root: "tank/backups"}, func(ctx context.Context, args []string) *exec.Cmd {
+		remote := args[len(args)-1]
+		commands = append(commands, remote)
+		var output string
+		switch {
+		case strings.Contains(remote, "'id' '-u'"):
+			output = "1000\n"
+		case strings.Contains(remote, "'id' '-un'"):
+			output = "replicator\n"
+		case strings.Contains(remote, "'id' '-Gn'"):
+			output = "replicator backup\n"
+		case strings.Contains(remote, "'zfs' 'allow'"):
+			output = "---- Permissions on tank/backups ----\nLocal+Descendent permissions:\n\tgroup backup mount,receive:append\n"
+		}
+		return exec.CommandContext(ctx, "printf", "%s", output)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Executor().CheckPermissions(t.Context(), "tank/backups", []string{"mount", "receive:append"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 4 || slices.ContainsFunc(commands, func(command string) bool { return !strings.HasPrefix(command, "LC_ALL=C ") }) {
+		t.Fatalf("remote permission commands = %v", commands)
 	}
 }
 
@@ -207,6 +238,9 @@ func TestSSHShellGRPCSessionAndStream(t *testing.T) {
 	state, err := shell.Executor().InspectState(ctx, "tank/backups", true)
 	if err != nil || len(state.Objects) != 1 || state.Objects[0].GUID != 10 {
 		t.Fatalf("state=%+v err=%v", state, err)
+	}
+	if err := shell.Executor().CheckPermissions(ctx, "tank/backups", []string{"receive:append"}); err != nil {
+		t.Fatalf("permission preflight: %v", err)
 	}
 	if _, err := shell.Executor().InspectDatasetIdentity(ctx, "other/private"); err == nil {
 		t.Fatal("SSH shell exposed an identity outside its configured root")

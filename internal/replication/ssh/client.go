@@ -72,7 +72,11 @@ func newClient(config Config, command zfs.CommandFactory) (*Client, error) {
 		return nil, err
 	}
 	client := &Client{config: config, command: command}
-	executor, err := zfs.NewDirectWithRunners(remoteRunner{client: client, binary: "zfs"}, remoteRunner{client: client, binary: "zpool"})
+	executor, err := zfs.NewDirectWithRunnersAndIdentity(
+		remoteRunner{client: client, binary: "zfs"},
+		remoteRunner{client: client, binary: "zpool"},
+		remoteRunner{client: client, binary: "id"},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +248,7 @@ type remoteRunner struct {
 }
 
 func (r remoteRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
-	command := r.client.command(ctx, r.client.sshArguments(remoteCommand(r.binary, args)))
+	command := r.client.command(ctx, r.client.sshArguments("LC_ALL=C "+remoteCommand(r.binary, args)))
 	output := &boundedOutput{}
 	command.Stdout, command.Stderr = output, output
 	err := command.Run()

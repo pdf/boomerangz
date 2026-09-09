@@ -42,6 +42,12 @@ func (e *scopedExecutor) InspectState(ctx context.Context, dataset string, recur
 	}
 	return e.backend.InspectState(ctx, dataset, recursive)
 }
+func (e *scopedExecutor) CheckPermissions(ctx context.Context, dataset string, permissions []string) error {
+	if !e.related(dataset) {
+		return fmt.Errorf("dataset is outside configured SSH destination scope")
+	}
+	return e.backend.CheckPermissions(ctx, dataset, slices.Clone(permissions))
+}
 func (e *scopedExecutor) CreateReceiveParent(ctx context.Context, dataset string) error {
 	if !e.inside(dataset) || dataset == e.root {
 		return fmt.Errorf("receive ancestor is outside configured SSH destination scope")

@@ -19,13 +19,23 @@ sudo zfs allow -u boomerangz \
 
 ```sh
 sudo zfs allow -u boomerangz \
-  canmount,compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,userprop \
+  canmount,create,destroy,mount,receive:append,userprop \
   backup/boomerangz
 ```
 
 Add receive-property permissions only for properties you explicitly configure.
+Boomerangz uses `receive:append`, not the broader `receive` permission, because
+it never requests a forced rollback with `zfs receive -F`.
 Do not compensate for a delegation error with unrestricted `sudo` or by running
 the network-facing daemon as root.
+
+Before receive preparation or streaming begins, Boomerangz checks the
+permissions effective for the account that will execute the ZFS operations.
+The check includes permissions granted directly to that user, through its
+supplementary groups, or to `everyone`, including applicable ancestor grants
+and named permission sets. Remote checks run on the receiving endpoint, so local,
+restricted-shell, direct-SSH, and native destinations apply the same rules to
+their actual execution account.
 
 ## SSH
 

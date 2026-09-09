@@ -19,12 +19,12 @@ import (
 )
 
 // ProtocolVersion is negotiated by SSH-shell and future native clients.
-const ProtocolVersion = 2
+const ProtocolVersion = 3
 
 // MaxStreamChunk bounds each in-memory ZFS data message.
 const MaxStreamChunk = 256 * 1024
 
-var operations = []string{"capabilities", "prepare-receive", "probe", "receive", "resume", "verify", "reconcile"}
+var operations = []string{"capabilities", "permissions", "prepare-receive", "probe", "receive", "resume", "verify", "reconcile"}
 
 // Server implements the transport-neutral remote endpoint over a typed ZFS
 // executor. AllowedRoot limits every mutation and receive to one configured
@@ -128,6 +128,18 @@ func (s *Server) InspectState(ctx context.Context, request *InspectStateRequest)
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return encodeState(state), nil
+}
+
+// CheckPermissions evaluates delegations using the remote endpoint's effective
+// user and supplementary groups.
+func (s *Server) CheckPermissions(ctx context.Context, request *CheckPermissionsRequest) (*CheckPermissionsResponse, error) {
+	if !s.related(request.GetDataset()) {
+		return nil, status.Error(codes.PermissionDenied, "dataset is outside the configured destination scope")
+	}
+	if err := s.backend.CheckPermissions(ctx, request.GetDataset(), slices.Clone(request.GetPermissions())); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	return &CheckPermissionsResponse{}, nil
 }
 
 // CreateReceiveParent prepares one missing receive ancestor without automatic mounting.
