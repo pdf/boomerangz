@@ -38,7 +38,7 @@ run_as_service "$artifact_dir/delegated-matrix.sh" "$run_id" "$source_device" "$
 run_as_service "$artifact_dir/property-layers.sh" "$run_id" "$source_device" "$destination_device"
 
 sudo chown -R "$service_user:$service_user" "$artifact_dir"
-run_as_service sh -c 'cat >"$1"' sh "$config" <<EOF
+run_as_service tee "$config" >/dev/null <<EOF
 [paths]
 credentials_dir = "$artifact_dir/credentials"
 identity_dir = "$artifact_dir/identity"

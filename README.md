@@ -35,12 +35,14 @@ Do not enable datasets until you have reviewed the
 The project uses Go 1.26.8 and keeps real OpenZFS tests inside disposable
 virtual machines.
 
+Run the same host-safe validation suite as the primary CI workflow:
+
 ```sh
-go test ./...
-go test -race ./...
-go vet ./...
-go tool golangci-lint run
+make test
 ```
+
+The Go module pins its Go-based test tools. Install `shellcheck` separately for
+the integration-harness shell validation.
 
 Run `make integration-test` for the guarded VM integration suite. It requires
 QEMU/KVM, `cloud-image-utils`, OpenSSH, and sufficient local storage.

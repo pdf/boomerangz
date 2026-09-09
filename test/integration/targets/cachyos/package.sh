@@ -138,7 +138,10 @@ exercise_recipe() {
 	sudo grep -Fx '# boomerangz-package-upgrade-marker' /etc/boomerangz/config.toml
 	sudo pacman --noconfirm -R "$package_name"
 	sudo grep -Fx '# boomerangz-package-upgrade-marker' /etc/boomerangz/config.toml.pacsave
-	! grep -Fx '/usr/lib/boomerangz/boomerangz-shell' /etc/shells
+	if grep -Fxq '/usr/lib/boomerangz/boomerangz-shell' /etc/shells; then
+		printf 'removed package left its restricted shell registered\n' >&2
+		exit 1
+	fi
 	sudo rm -f -- /etc/boomerangz/config.toml.pacsave /var/lib/boomerangz/identity/installation-id
 }
 

@@ -20,13 +20,5 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends shellcheck
-      - run: go test ./...
-      - run: go test -race ./...
-      - run: go vet ./...
-      - run: go tool golangci-lint run
-      - run: go tool buf format --diff --exit-code
-      - run: go tool buf lint
-      - run: go tool buf generate
-      - run: go tool actionlint
-      - run: shellcheck test/integration/host/*.sh test/integration/guest/*.sh test/integration/targets/*/*.sh
+      - run: make test
       - run: git diff --exit-code
