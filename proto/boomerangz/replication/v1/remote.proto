@@ -9,6 +9,7 @@ service RemoteService {
   rpc ListDatasets(ListDatasetsRequest) returns (ListDatasetsResponse);
   rpc InspectDatasetIdentity(InspectDatasetIdentityRequest) returns (InspectDatasetIdentityResponse);
   rpc InspectState(InspectStateRequest) returns (InspectStateResponse);
+  rpc CheckPermissions(CheckPermissionsRequest) returns (CheckPermissionsResponse);
   rpc CreateReceiveParent(CreateReceiveParentRequest) returns (CreateReceiveParentResponse);
   rpc SetProperties(SetPropertiesRequest) returns (SetPropertiesResponse);
   rpc InheritProperty(InheritPropertyRequest) returns (InheritPropertyResponse);
@@ -126,3 +127,10 @@ message ReceiveRequest {
 message ReceiveResponse {
   uint64 bytes = 1;
 }
+
+message CheckPermissionsRequest {
+  string dataset = 1;
+  repeated string permissions = 2;
+}
+
+message CheckPermissionsResponse {}

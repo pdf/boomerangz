@@ -34,6 +34,24 @@ type Result struct {
 	ResumeDatasets []string     `json:"resume_datasets,omitempty"`
 }
 
+var sourcePermissions = []string{"bookmark", "destroy", "hold", "mount", "release", "send", "snapshot", "userprop"}
+
+func destinationPermissions(plan Plan) []string {
+	permissions := []string{"create", "destroy", "mount", "receive:append", "userprop"}
+	for property := range plan.Receive.Set {
+		if !strings.Contains(property, ":") {
+			permissions = append(permissions, property)
+		}
+	}
+	for _, property := range plan.Receive.Exclude {
+		if !strings.Contains(property, ":") {
+			permissions = append(permissions, property)
+		}
+	}
+	slices.Sort(permissions)
+	return slices.Compact(permissions)
+}
+
 // DestinationUnavailableError reports that a remote destination has no
 // currently visible anchor. The pool may be temporarily unimported, so remote
 // recovery must retry rather than permanently block the target.
@@ -192,9 +210,34 @@ func (l *Local) Preview(ctx context.Context, request Request) (Plan, error) {
 	}
 	if len(view.Destination.ResumeTokens) > 0 {
 		plan, _, buildErr := BuildResume(request, view, l.installation)
-		return plan, buildErr
+		if buildErr != nil {
+			return plan, buildErr
+		}
+		return plan, l.checkPermissions(ctx, request, view, plan)
 	}
-	return Build(request, view, l.installation)
+	plan, err := Build(request, view, l.installation)
+	if err != nil {
+		return plan, err
+	}
+	return plan, l.checkPermissions(ctx, request, view, plan)
+}
+
+func (l *Local) checkPermissions(ctx context.Context, request Request, view View, plan Plan) error {
+	if err := l.backend.CheckPermissions(ctx, request.Source, slices.Clone(sourcePermissions)); err != nil {
+		return fmt.Errorf("source permission preflight: %w", err)
+	}
+	anchor := request.DestinationRoot
+	found := slices.ContainsFunc(view.DestinationInventory, func(dataset zfs.Dataset) bool { return dataset.Name == anchor })
+	if !found {
+		anchor = view.DestinationIdentity.Name
+	}
+	if anchor == "" {
+		return fmt.Errorf("destination permission preflight: existing destination anchor is missing")
+	}
+	if err := l.target.CheckPermissions(ctx, anchor, destinationPermissions(plan)); err != nil {
+		return fmt.Errorf("destination permission preflight: %w", err)
+	}
+	return nil
 }
 
 func sourceStable(a, b zfs.State) bool {
@@ -306,6 +349,9 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 	}
 	result.Plan = plan
 	if err != nil {
+		return result, err
+	}
+	if err := l.checkPermissions(ctx, request, before, plan); err != nil {
 		return result, err
 	}
 	if !resuming {

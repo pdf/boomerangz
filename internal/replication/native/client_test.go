@@ -33,6 +33,7 @@ func (testBackend) InspectDatasetIdentity(_ context.Context, dataset string) (zf
 func (testBackend) InspectState(context.Context, string, bool) (zfs.State, error) {
 	return zfs.State{Received: map[string]map[string]string{}, ResumeTokens: map[string]string{}}, nil
 }
+func (testBackend) CheckPermissions(context.Context, string, []string) error       { return nil }
 func (testBackend) SetProperties(context.Context, string, map[string]string) error { return nil }
 func (testBackend) InheritProperty(context.Context, string, string) error          { return nil }
 
@@ -86,6 +87,9 @@ func TestAuthenticatedNativeEndpointNegotiatesSharedService(t *testing.T) {
 	}
 	if _, err := endpoint.Executor().InspectDatasetIdentity(ctx, "other/private"); err == nil {
 		t.Fatal("native endpoint exposed identity outside configured roots")
+	}
+	if err := endpoint.Executor().CheckPermissions(ctx, "tank/a", []string{"receive:append"}); err != nil {
+		t.Fatalf("permission preflight: %v", err)
 	}
 	if got := endpoint.CanonicalTarget(); got != "native://127.0.0.1:"+strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)+"/tank/a" {
 		t.Fatalf("canonical target=%q", got)

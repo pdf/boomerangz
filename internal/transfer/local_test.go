@@ -21,6 +21,8 @@ type localBackend struct {
 	destExists  bool
 	identity    *zfs.DatasetIdentity
 	writes      []string
+	checks      map[string][]string
+	checkErr    error
 }
 
 func cloneState(state zfs.State) (zfs.State, error) {
@@ -59,6 +61,14 @@ func (b *localBackend) InspectDatasetIdentity(_ context.Context, dataset string)
 		}
 	}
 	return zfs.DatasetIdentity{}, fmt.Errorf("identity absent")
+}
+
+func (b *localBackend) CheckPermissions(_ context.Context, dataset string, permissions []string) error {
+	if b.checks == nil {
+		b.checks = make(map[string][]string)
+	}
+	b.checks[dataset] = slices.Clone(permissions)
+	return b.checkErr
 }
 
 func (b *localBackend) GetStoredProperties(_ context.Context, _ []string) ([]zfs.Property, error) {
@@ -316,6 +326,35 @@ func TestApplyFailureRetainsBoundRecoveryProof(t *testing.T) {
 	}
 	if len(backend.source.Holds) != 1 {
 		t.Fatal("failed transfer did not retain source hold")
+	}
+}
+
+func TestApplyChecksBothEndpointsBeforeMutation(t *testing.T) {
+	t.Parallel()
+	source, request := newLocalBackend(t)
+	destination := &localBackend{inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem, EncryptionRoot: "-"}}, checkErr: errors.New("missing receive permission")}
+	request.Transport = "ssh"
+	request.RemoteName = "home"
+	request.CanonicalTarget = "ssh://replicator@backup.example.net:22/backup/data"
+	request.Policy.Remote = []string{"home"}
+	request.Policy.SetProperties["readonly"] = "on"
+	engine, err := NewRemote(source, destination, remoteTestStream{source: source, destination: destination}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Apply(t.Context(), request, nil)
+	if err == nil || !strings.Contains(err.Error(), "destination permission preflight: missing receive permission") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(source.writes) != 0 || len(destination.writes) != 0 {
+		t.Fatalf("preflight failure followed by mutation: source=%v destination=%v", source.writes, destination.writes)
+	}
+	if !slices.Equal(source.checks[request.Source], sourcePermissions) {
+		t.Fatalf("source permissions = %v", source.checks[request.Source])
+	}
+	wantDestination := []string{"canmount", "create", "destroy", "mount", "readonly", "receive:append", "userprop"}
+	if !slices.Equal(destination.checks["backup"], wantDestination) {
+		t.Fatalf("destination permissions = %v, want %v", destination.checks["backup"], wantDestination)
 	}
 }
 

@@ -78,6 +78,12 @@ successfully, use the new control-socket path for later commands.
 sudo zfs allow tank/data
 ```
 
+Boomerangz also performs this alignment check before a transfer starts. An
+error beginning with `source permission preflight` or `destination permission
+preflight` lists the permissions missing from the effective endpoint account.
+Correct the delegation on the reported dataset or its appropriate ancestor;
+do not grant the account unrestricted `sudo` access.
+
 Compare the result with the supported
 [source delegation set](/guide/security#zfs-delegation). Do not work around the
 error with unrestricted sudo.
