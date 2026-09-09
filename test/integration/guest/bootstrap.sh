@@ -3,10 +3,8 @@
 set -euo pipefail
 
 readonly marker_path=/run/boomerangz-vmtest/guest-marker
-readonly version_path=/run/boomerangz-vmtest/bootstrap-version
-readonly bootstrap_version=2
 readonly pool_prefix=boomerangz-test-
-readonly test_user=boomerangz
+readonly service_user=boomerangz
 
 fail() {
 	printf 'boomerangz guest bootstrap: %s\n' "$*" >&2
@@ -57,15 +55,15 @@ verify_pool_name() {
 }
 
 setup() {
-	[[ $# -eq 3 ]] || fail "usage: $0 setup RUN_ID SOURCE_DISK DESTINATION_DISK"
+	[[ $# -eq 4 ]] || fail "usage: $0 setup RUN_ID SOURCE_DISK DESTINATION_DISK DIRECT_SSH_USER"
 	local run_id=$1
+	local direct_ssh_user=$4
 	verify_run_id "$run_id"
+	[[ $direct_ssh_user =~ ^[a-z_][a-z0-9_-]*$ ]] || fail "invalid direct SSH user"
 
 	install -d -m 0755 "$(dirname "$marker_path")"
 	printf '%s\n' "$run_id" >"$marker_path"
-	printf '%s\n' "$bootstrap_version" >"$version_path"
 	chmod 0644 "$marker_path"
-	chmod 0644 "$version_path"
 	verify_marker "$run_id"
 
 	local source_device destination_device source_pool destination_pool
@@ -97,8 +95,13 @@ setup() {
 	# create on the source and snapshot on the destination are fixture-only
 	# permissions used by the integration suites. They are not deployment
 	# requirements. userprop on both sides is required by boomerangz metadata.
-	zfs allow -u "$test_user" bookmark,create,destroy,hold,mount,release,send,snapshot,userprop "$source_pool/data"
-	zfs allow -u "$test_user" compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
+	zfs allow -u "$service_user" bookmark,create,destroy,hold,mount,release,send,snapshot,userprop "$source_pool/data"
+	zfs allow -u "$service_user" compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
+	if [[ $direct_ssh_user != "$service_user" ]]; then
+		# Direct SSH runs ZFS as the remote login identity. Grant that dedicated,
+		# non-administrative account destination permissions only.
+		zfs allow -u "$direct_ssh_user" compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
+	fi
 
 	printf 'source_pool=%s\ndestination_pool=%s\n' "$source_pool" "$destination_pool"
 }
@@ -140,7 +143,6 @@ cleanup() {
 	blockdev --rereadpt "$destination_device"
 	udevadm settle
 	rm -f -- "$marker_path"
-	rm -f -- "$version_path"
 }
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || fail "must run as root"

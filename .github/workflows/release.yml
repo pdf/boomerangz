@@ -48,6 +48,8 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      - name: Stage AUR install script
+        run: cp contrib/arch/boomerangz.install dist/aur/boomerangz.install
       - name: Verify portable release binaries
         run: |
           set -euo pipefail
@@ -132,6 +134,7 @@ jobs:
         with:
           pkgname: boomerangz
           pkgbuild: dist/aur/boomerangz.pkgbuild
+          assets: dist/aur/boomerangz.install
           commit_username: ${{ vars.AUR_COMMIT_USERNAME }}
           commit_email: ${{ vars.AUR_COMMIT_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
@@ -141,6 +144,7 @@ jobs:
         with:
           pkgname: boomerangz-bin
           pkgbuild: dist/aur/boomerangz-bin.pkgbuild
+          assets: dist/aur/boomerangz.install
           commit_username: ${{ vars.AUR_COMMIT_USERNAME }}
           commit_email: ${{ vars.AUR_COMMIT_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}

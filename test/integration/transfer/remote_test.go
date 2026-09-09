@@ -92,9 +92,13 @@ func TestGuestSSHTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	user := os.Getenv("USER")
-	if user == "" {
-		user = "boomerangz"
+	directUser := os.Getenv("BOOMERANGZ_REMOTE_DIRECT_SSH_USER")
+	if directUser == "" {
+		t.Fatal("direct SSH user is required")
+	}
+	restrictedUser := os.Getenv("BOOMERANGZ_REMOTE_GUEST_USER")
+	if restrictedUser == "" {
+		restrictedUser = directUser
 	}
 	type measurement struct {
 		open  time.Duration
@@ -106,6 +110,10 @@ func TestGuestSSHTransfer(t *testing.T) {
 	run := func(mode, root string) (transfer.Result, measurement) {
 		t.Helper()
 		totalStarted := time.Now()
+		user := directUser
+		if mode == "ssh-shell" {
+			user = restrictedUser
+		}
 		client, clientErr := replicationssh.New("ssh", replicationssh.Config{Host: "127.0.0.1", Port: 22, User: user, Root: root, IdentityFile: key, ShellPath: shellPath, ConnectTimeout: 5 * time.Second})
 		if clientErr != nil {
 			t.Fatal(clientErr)
@@ -213,7 +221,7 @@ func TestGuestSSHTransfer(t *testing.T) {
 	// Keep a short connection check separate from the data transfer diagnostics.
 	probeCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if err := exec.CommandContext(probeCtx, "ssh", "-T", "-o", "BatchMode=yes", "-i", key, user+"@127.0.0.1", "true").Run(); err != nil {
+	if err := exec.CommandContext(probeCtx, "ssh", "-T", "-o", "BatchMode=yes", "-i", key, directUser+"@127.0.0.1", "true").Run(); err != nil {
 		t.Fatal(err)
 	}
 }

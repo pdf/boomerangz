@@ -38,6 +38,11 @@ func (c Config) Validate() error {
 			problems = append(problems, fmt.Errorf("%s must be an absolute path", field))
 		}
 	}
+	for _, root := range c.SSHShell.ReplicationRoots {
+		if root == "" || strings.ContainsAny(root, "@#\t\r\n ") || strings.HasPrefix(root, "/") {
+			problems = append(problems, fmt.Errorf("ssh_shell: replication root must be a ZFS dataset name"))
+		}
+	}
 	for name, remote := range c.Remotes {
 		if !namePattern.MatchString(name) {
 			problems = append(problems, fmt.Errorf("remote %q has an invalid name", name))

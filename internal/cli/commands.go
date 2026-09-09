@@ -240,15 +240,23 @@ func (c *pairingRevokeCommand) Run(env *commandEnvironment) error {
 }
 
 type sshShellCommand struct {
-	Root string `required:"" help:"Allowed destination ZFS root."`
+	configOptions `embed:""`
 }
 
 func (c *sshShellCommand) Run(env *commandEnvironment) error {
+	loaded, err := c.load()
+	if err != nil {
+		return err
+	}
+	roots := loaded.Config.SSHShell.ReplicationRoots
+	if len(roots) == 0 {
+		return fmt.Errorf("ssh_shell.replication_roots must configure at least one destination root")
+	}
 	executor, err := zfs.NewDirect("zfs")
 	if err != nil {
 		return err
 	}
-	service, err := remoterpc.NewServer(executor, c.Root, "zfs")
+	service, err := remoterpc.NewServerForRoots(executor, roots, "zfs")
 	if err != nil {
 		return err
 	}

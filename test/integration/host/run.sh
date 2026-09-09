@@ -34,6 +34,7 @@ readonly system_image=$run_root/system.img
 readonly source_image=$run_root/source.qcow2
 readonly destination_image=$run_root/destination.qcow2
 readonly seed_image=$run_root/seed.img
+readonly guest_artifacts=/var/tmp/boomerangz-integration-$run_id
 
 qemu_pid=
 boot_index=0
@@ -217,6 +218,7 @@ cp "$repository/test/integration/guest/delegated-matrix.sh" "$artifacts/"
 cp "$repository/test/integration/guest/property-layers.sh" "$artifacts/"
 cp "$repository/test/integration/guest/run-common.sh" "$artifacts/"
 cp "$repository/contrib/systemd/boomerangz.service" "$artifacts/"
+cp "$repository/contrib/boomerangz-shell" "$artifacts/"
 cp "$repository/contrib/sysusers.d/boomerangz.conf" "$artifacts/boomerangz.sysusers"
 cp "$repository/contrib/tmpfiles.d/boomerangz.conf" "$artifacts/boomerangz.tmpfiles"
 if [[ -n $release_dir ]]; then
@@ -226,7 +228,8 @@ if [[ -n $release_dir ]]; then
 fi
 copy_to_guest "$artifacts" "$target_dir/run.sh"
 ssh_guest "mv /home/$target_guest_user/integration/run.sh /home/$target_guest_user/integration/target/run.sh"
-ssh_guest "BOOMERANGZ_INTEGRATION_RUN=$run_id /home/$target_guest_user/integration/target/run.sh /home/$target_guest_user/integration/artifacts $run_id $target_source_device $target_destination_device" | tee "$diagnostics/test-output.txt"
+ssh_guest "sudo mv /home/$target_guest_user/integration/artifacts $guest_artifacts"
+ssh_guest "BOOMERANGZ_INTEGRATION_RUN=$run_id /home/$target_guest_user/integration/target/run.sh $guest_artifacts $run_id $target_source_device $target_destination_device" | tee "$diagnostics/test-output.txt"
 
 ssh_guest "$target_poweroff_command" || true
 for _ in {1..60}; do

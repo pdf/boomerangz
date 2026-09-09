@@ -22,6 +22,7 @@ const (
 type Config struct {
 	Daemon    DaemonConfig              `toml:"daemon" json:"daemon"`
 	Paths     PathsConfig               `toml:"paths" json:"paths"`
+	SSHShell  SSHShellConfig            `toml:"ssh_shell" json:"ssh_shell"`
 	Remotes   map[string]RemoteConfig   `toml:"remotes" json:"remotes"`
 	Listeners map[string]ListenerConfig `toml:"listeners" json:"listeners"`
 }
@@ -49,6 +50,12 @@ type PathsConfig struct {
 	CredentialsDir string `toml:"credentials_dir" json:"credentials_dir"`
 	IdentityDir    string `toml:"identity_dir" json:"identity_dir"`
 	SocketPath     string `toml:"socket_path" json:"socket_path"`
+}
+
+// SSHShellConfig bounds the replication service exposed by the restricted
+// SSH login shell.
+type SSHShellConfig struct {
+	ReplicationRoots []string `toml:"replication_roots" json:"replication_roots,omitempty"`
 }
 
 // RemoteConfig defines an SSH or native replication destination.

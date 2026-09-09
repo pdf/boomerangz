@@ -81,9 +81,12 @@ List issued and imported pairings.
 .B pairing revoke ID
 Revoke a Boomerangz-managed pairing.
 .TP
-.B ssh-shell --root DATASET
-Serve the restricted replication protocol over standard input and output. This
-command is intended for a forced OpenSSH command, not interactive use.
+.B ssh-shell
+Serve the restricted replication protocol over standard input and output,
+bounded by the
+.B ssh_shell.replication_roots
+configuration. This command is intended for the packaged restricted login
+shell, not interactive use.
 .TP
 .B version
 Show build version, commit, and date. Use

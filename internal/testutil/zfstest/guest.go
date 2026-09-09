@@ -3,12 +3,9 @@ package zfstest
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 )
-
-const guestBootstrapVersion = "2"
 
 // VerifyGuestPool validates a role-specific serial and the pool's actual vdevs.
 // The marker is checked before invoking even read-only guest commands.
@@ -20,10 +17,6 @@ func VerifyGuestPool(ctx context.Context, runID string, role DiskRole, device st
 	marker := "/run/boomerangz-vmtest/guest-marker"
 	if err := VerifyGuestGuard(marker, runID, pool, []Vdev{{Path: device, Serial: DiskSerial(runID, role)}}); err != nil {
 		return "", err
-	}
-	version, err := os.ReadFile("/run/boomerangz-vmtest/bootstrap-version")
-	if err != nil || strings.TrimSpace(string(version)) != guestBootstrapVersion {
-		return "", fmt.Errorf("guest bootstrap version mismatch; refresh the integration harness")
 	}
 	query := func(name string, args ...string) (string, error) {
 		out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()

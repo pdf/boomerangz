@@ -178,6 +178,23 @@ func TestNativeRemoteAndManagedTLSValidation(t *testing.T) {
 	}
 }
 
+func TestSSHShellReplicationRoots(t *testing.T) {
+	t.Parallel()
+	cfg := Defaults()
+	cfg.SSHShell.ReplicationRoots = []string{"tank/backups", "archive/replicas"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, root := range []string{"", "/tank/backups", "tank/backups@snapshot", "tank/back ups"} {
+		invalid := cfg
+		invalid.SSHShell.ReplicationRoots = []string{root}
+		if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "ssh_shell") {
+			t.Fatalf("root %q error = %v, want ssh_shell validation error", root, err)
+		}
+	}
+}
+
 func writeTestFile(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {

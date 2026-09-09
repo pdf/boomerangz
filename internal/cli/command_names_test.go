@@ -31,3 +31,11 @@ func TestPairingIsTopLevelAndScopesAreEnumerated(t *testing.T) {
 		}
 	}
 }
+
+func TestSSHShellRequiresServerConfiguredRoots(t *testing.T) {
+	t.Parallel()
+	err := runWithReader(t.Context(), []string{"ssh-shell", "--config", "testdata/empty.toml", "--config-dir", t.TempDir()}, io.Discard, io.Discard, BuildInfo{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "ssh_shell.replication_roots") {
+		t.Fatalf("ssh-shell error = %v, want missing server-side roots", err)
+	}
+}

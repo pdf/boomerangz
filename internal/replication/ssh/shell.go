@@ -75,7 +75,7 @@ func NewShell(ctx context.Context, client *Client) (*Shell, error) {
 		return nil, fmt.Errorf("SSH client is required")
 	}
 	processCtx, cancel := context.WithCancel(context.Background())
-	remote := remoteCommand(client.shellPath(), []string{"ssh-shell", "--root", client.config.Root})
+	remote := remoteCommand(client.shellPath(), []string{"ssh-shell"})
 	command := client.command(processCtx, client.sshArguments(remote))
 	stdout, err := command.StdoutPipe()
 	if err != nil {

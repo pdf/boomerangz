@@ -41,9 +41,12 @@ trap 'rm -rf -- "$work"' EXIT
 install -d "$work/packages"
 
 build_recipe() {
-	local recipe=$1 directory=$2
+	local recipe=$1 directory=$2 install_script
 	install -d "$directory"
 	install -m 0644 "$release_dir/$recipe" "$directory/PKGBUILD"
+	install_script=$(sed -n 's/^install=//p' "$directory/PKGBUILD")
+	[[ $install_script =~ ^[A-Za-z0-9._+-]+$ ]]
+	install -m 0644 "$release_dir/aur/$install_script" "$directory/$install_script"
 	(
 		cd "$directory"
 		makepkg --printsrcinfo >.SRCINFO
@@ -88,18 +91,23 @@ verify_install() {
 		;;
 	esac
 	pacman -Q "$package_name"
-	[[ $(stat -c '%U:%G:%a' /etc/boomerangz) == root:boomerangz:750 ]]
-	[[ $(stat -c '%U:%G:%a' /etc/boomerangz/config.toml) == root:boomerangz:640 ]]
-	[[ $(stat -c '%U:%G:%a' /var/lib/boomerangz) == boomerangz:boomerangz:750 ]]
-	[[ $(stat -c '%U:%G:%a' /etc/boomerangz/credentials.d) == root:boomerangz:750 ]]
-	[[ ! -e /var/lib/boomerangz/identity/installation-id ]]
+	[[ $(sudo stat -c '%U:%G:%a' /etc/boomerangz) == root:boomerangz:750 ]]
+	[[ $(sudo stat -c '%U:%G:%a' /etc/boomerangz/config.toml) == root:boomerangz:640 ]]
+	[[ $(sudo stat -c '%U:%G:%a' /var/lib/boomerangz) == boomerangz:boomerangz:750 ]]
+	[[ $(sudo stat -c '%U:%G:%a' /etc/boomerangz/credentials.d) == root:boomerangz:750 ]]
+	[[ -x /usr/lib/boomerangz/boomerangz-shell ]]
+	[[ $(getent passwd boomerangz | cut -d: -f7) == /usr/lib/boomerangz/boomerangz-shell ]]
+	grep -Fx '/usr/lib/boomerangz/boomerangz-shell' /etc/shells
+	sudo test ! -e /var/lib/boomerangz/identity/installation-id
 	if systemctl is-enabled boomerangz.service >/dev/null 2>&1; then
 		printf 'package unexpectedly enabled boomerangz.service\n' >&2
 		exit 1
 	fi
 	sudo systemctl start boomerangz.service
 	for _ in {1..100}; do
-		[[ -s /var/lib/boomerangz/identity/installation-id ]] && break
+		if sudo test -s /var/lib/boomerangz/identity/installation-id; then
+			break
+		fi
 		if ! sudo systemctl is-active --quiet boomerangz.service; then
 			sudo systemctl status --no-pager boomerangz.service || true
 			sudo journalctl --no-pager -u boomerangz.service || true
@@ -107,7 +115,7 @@ verify_install() {
 		fi
 		sleep 0.1
 	done
-	if [[ ! -s /var/lib/boomerangz/identity/installation-id ]]; then
+	if ! sudo test -s /var/lib/boomerangz/identity/installation-id; then
 		sudo systemctl status --no-pager boomerangz.service || true
 		sudo journalctl --no-pager -u boomerangz.service || true
 		return 1
@@ -127,9 +135,10 @@ exercise_recipe() {
 		SRCDEST="$release_dir" PKGDEST="$work/packages" makepkg --cleanbuild --force --noconfirm --syncdeps
 	)
 	sudo pacman --noconfirm -U "$(package_path "$package_name" 2)"
-	grep -Fx '# boomerangz-package-upgrade-marker' /etc/boomerangz/config.toml
+	sudo grep -Fx '# boomerangz-package-upgrade-marker' /etc/boomerangz/config.toml
 	sudo pacman --noconfirm -R "$package_name"
-	grep -Fx '# boomerangz-package-upgrade-marker' /etc/boomerangz/config.toml.pacsave
+	sudo grep -Fx '# boomerangz-package-upgrade-marker' /etc/boomerangz/config.toml.pacsave
+	! grep -Fx '/usr/lib/boomerangz/boomerangz-shell' /etc/shells
 	sudo rm -f -- /etc/boomerangz/config.toml.pacsave /var/lib/boomerangz/identity/installation-id
 }
 

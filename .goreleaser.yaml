@@ -31,6 +31,7 @@ archives:
     files:
       - LICENSE
       - contrib/config.toml
+      - contrib/boomerangz-shell
       - contrib/completions/*
       - contrib/man/*
       - contrib/systemd/*
@@ -76,6 +77,7 @@ aurs:
       - "openssh: SSH replication destinations"
     backup:
       - etc/boomerangz/config.toml
+    install: ./contrib/arch/boomerangz.install
     package: |-
       case "${CARCH}" in
         x86_64) goarch=amd64 ;;
@@ -84,6 +86,7 @@ aurs:
       release_version=${pkgver//_/-}
       cd "boomerangz-v${release_version}-linux-${goarch}"
       install -Dm755 boomerangz "${pkgdir}/usr/bin/boomerangz"
+      install -Dm755 contrib/boomerangz-shell "${pkgdir}/usr/lib/boomerangz/boomerangz-shell"
       install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/boomerangz/LICENSE"
       install -dm750 "${pkgdir}/etc/boomerangz"
       install -Dm644 contrib/config.toml "${pkgdir}/etc/boomerangz/config.toml"
@@ -115,6 +118,7 @@ aur_sources:
       - "openssh: SSH replication destinations"
     backup:
       - etc/boomerangz/config.toml
+    install: ./contrib/arch/boomerangz.install
     build: |-
       release_version=${pkgver//_/-}
       cd "boomerangz-v${release_version}-source"
@@ -125,6 +129,7 @@ aur_sources:
       release_version=${pkgver//_/-}
       cd "boomerangz-v${release_version}-source"
       install -Dm755 boomerangz "${pkgdir}/usr/bin/boomerangz"
+      install -Dm755 contrib/boomerangz-shell "${pkgdir}/usr/lib/boomerangz/boomerangz-shell"
       install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/boomerangz/LICENSE"
       install -dm750 "${pkgdir}/etc/boomerangz"
       install -Dm644 contrib/config.toml "${pkgdir}/etc/boomerangz/config.toml"

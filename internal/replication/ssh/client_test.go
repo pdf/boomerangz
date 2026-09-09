@@ -256,7 +256,7 @@ func TestEndpointSelectionAndExplicitFallback(t *testing.T) {
 	client, err := newClient(Config{Host: "backup.example.net", Root: "tank/backups"}, func(ctx context.Context, args []string) *exec.Cmd {
 		remote := args[len(args)-1]
 		commands = append(commands, remote)
-		if strings.Contains(remote, "'boomerangz' 'ssh-shell'") {
+		if remote == "'boomerangz' 'ssh-shell'" {
 			return exec.CommandContext(ctx, "false")
 		}
 		return helperCommand(ctx, "inventory")

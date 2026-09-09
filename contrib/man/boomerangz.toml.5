@@ -60,6 +60,22 @@ Native transport uses an imported pairing named by
 .B credential
 and does not accept SSH connection fields.
 Strict host-key checking is always enabled.
+The default
+.B ssh_shell_path
+is
+.BR boomerangz ,
+which must resolve through the remote account's command path. Set an absolute
+path when the remote executable is installed elsewhere or the account uses a
+restricted command path.
+.SH SSH SHELL
+The optional
+.B [ssh_shell]
+table configures the replication service exposed by the packaged
+.BR boomerangz-shell
+login shell.
+.B replication_roots
+is an array of ZFS destination roots. Every request is checked against this
+server-side allow-list. An empty list disables the SSH shell service.
 .SH LISTENERS
 Each
 .B [listeners.NAME]
