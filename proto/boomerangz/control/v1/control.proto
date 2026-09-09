@@ -13,6 +13,7 @@ service StatusService {
 service ControlService {
   rpc Trigger(TriggerRequest) returns (TriggerResponse);
   rpc Reconcile(ReconcileRequest) returns (ReconcileResponse);
+  rpc Reload(ReloadRequest) returns (ReloadResponse);
   rpc Clean(CleanRequest) returns (CleanResponse);
 }
 
@@ -68,6 +69,7 @@ message StatusSnapshot {
   repeated DatasetStatus datasets = 4;
   repeated QueueStatus queues = 5;
   repeated JobStatus jobs = 6;
+  uint64 config_generation = 7;
 }
 
 message ListDatasetsRequest {}
@@ -89,6 +91,14 @@ message TriggerResponse {
 
 message ReconcileResponse {
   bool accepted = 1;
+}
+
+message ReloadRequest {}
+
+message ReloadResponse {
+  uint64 generation = 1;
+  repeated string applied = 2;
+  repeated string restart_required = 3;
 }
 
 message CleanRequest {

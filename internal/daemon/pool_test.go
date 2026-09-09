@@ -77,3 +77,41 @@ func TestPoolSerializesLockKeyAcrossWorkers(t *testing.T) {
 		t.Fatal("same target overlapped")
 	}
 }
+
+func TestPoolResizeDoesNotCancelRunningJob(t *testing.T) {
+	t.Parallel()
+	pool, err := NewPool("transfer", 1, 4, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := pool.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan error, 1)
+	_, err = pool.Submit(Job{ID: "active", Group: "active", Scope: "active", Run: func(ctx context.Context) Outcome {
+		close(started)
+		<-release
+		finished <- ctx.Err()
+		return Outcome{}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := pool.Resize(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Resize(1); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-finished; err != nil {
+		t.Fatalf("resize cancelled active job: %v", err)
+	}
+	pool.Close()
+	pool.Wait()
+}

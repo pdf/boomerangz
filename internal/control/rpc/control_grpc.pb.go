@@ -203,6 +203,7 @@ var StatusService_ServiceDesc = grpc.ServiceDesc{
 const (
 	ControlService_Trigger_FullMethodName   = "/boomerangz.control.v1.ControlService/Trigger"
 	ControlService_Reconcile_FullMethodName = "/boomerangz.control.v1.ControlService/Reconcile"
+	ControlService_Reload_FullMethodName    = "/boomerangz.control.v1.ControlService/Reload"
 	ControlService_Clean_FullMethodName     = "/boomerangz.control.v1.ControlService/Clean"
 )
 
@@ -212,6 +213,7 @@ const (
 type ControlServiceClient interface {
 	Trigger(ctx context.Context, in *TriggerRequest, opts ...grpc.CallOption) (*TriggerResponse, error)
 	Reconcile(ctx context.Context, in *ReconcileRequest, opts ...grpc.CallOption) (*ReconcileResponse, error)
+	Reload(ctx context.Context, in *ReloadRequest, opts ...grpc.CallOption) (*ReloadResponse, error)
 	Clean(ctx context.Context, in *CleanRequest, opts ...grpc.CallOption) (*CleanResponse, error)
 }
 
@@ -243,6 +245,16 @@ func (c *controlServiceClient) Reconcile(ctx context.Context, in *ReconcileReque
 	return out, nil
 }
 
+func (c *controlServiceClient) Reload(ctx context.Context, in *ReloadRequest, opts ...grpc.CallOption) (*ReloadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReloadResponse)
+	err := c.cc.Invoke(ctx, ControlService_Reload_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *controlServiceClient) Clean(ctx context.Context, in *CleanRequest, opts ...grpc.CallOption) (*CleanResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CleanResponse)
@@ -259,6 +271,7 @@ func (c *controlServiceClient) Clean(ctx context.Context, in *CleanRequest, opts
 type ControlServiceServer interface {
 	Trigger(context.Context, *TriggerRequest) (*TriggerResponse, error)
 	Reconcile(context.Context, *ReconcileRequest) (*ReconcileResponse, error)
+	Reload(context.Context, *ReloadRequest) (*ReloadResponse, error)
 	Clean(context.Context, *CleanRequest) (*CleanResponse, error)
 	mustEmbedUnimplementedControlServiceServer()
 }
@@ -275,6 +288,9 @@ func (UnimplementedControlServiceServer) Trigger(context.Context, *TriggerReques
 }
 func (UnimplementedControlServiceServer) Reconcile(context.Context, *ReconcileRequest) (*ReconcileResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Reconcile not implemented")
+}
+func (UnimplementedControlServiceServer) Reload(context.Context, *ReloadRequest) (*ReloadResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Reload not implemented")
 }
 func (UnimplementedControlServiceServer) Clean(context.Context, *CleanRequest) (*CleanResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Clean not implemented")
@@ -336,6 +352,24 @@ func _ControlService_Reconcile_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlService_Reload_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReloadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServiceServer).Reload(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlService_Reload_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServiceServer).Reload(ctx, req.(*ReloadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ControlService_Clean_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CleanRequest)
 	if err := dec(in); err != nil {
@@ -368,6 +402,10 @@ var ControlService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Reconcile",
 			Handler:    _ControlService_Reconcile_Handler,
+		},
+		{
+			MethodName: "Reload",
+			Handler:    _ControlService_Reload_Handler,
 		},
 		{
 			MethodName: "Clean",

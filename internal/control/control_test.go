@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"log/slog"
 	"math/big"
 	"net"
@@ -96,6 +97,9 @@ func TestUnixControlAPI(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	server.SetReloadHandler(func(context.Context) (daemonstate.ReloadResult, error) {
+		return daemonstate.ReloadResult{Generation: 2, Applied: []string{"remotes"}, RestartRequired: []string{"paths.identity_dir"}}, nil
+	})
 	client, err := DialLocal(t.Context(), cfg.Paths.SocketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -113,9 +117,121 @@ func TestUnixControlAPI(t *testing.T) {
 	if err != nil || clean.GetPlans()[0].GetApplied() != 1 {
 		t.Fatalf("clean=%v err=%v", clean, err)
 	}
+	reload, err := client.Control.Reload(t.Context(), &controlrpc.ReloadRequest{})
+	if err != nil || reload.GetGeneration() != 2 || !reflect.DeepEqual(reload.GetApplied(), []string{"remotes"}) || !reflect.DeepEqual(reload.GetRestartRequired(), []string{"paths.identity_dir"}) {
+		t.Fatalf("reload=%v err=%v", reload, err)
+	}
 	info, err := os.Stat(cfg.Paths.SocketPath)
 	if err != nil || info.Mode().Perm() != 0o660 {
 		t.Fatalf("socket mode=%v err=%v", info.Mode(), err)
+	}
+}
+
+func TestServerReloadMovesDefaultUnixSocket(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "before.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	server, err := StartServer(cfg, &fakeRuntime{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	next := cfg.Clone()
+	next.Paths.SocketPath = filepath.Join(dir, "after.sock")
+	if err := server.Reload(next); err != nil {
+		t.Fatal(err)
+	}
+	client, err := DialLocal(t.Context(), next.Paths.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Connection.Close() }()
+	if _, err := client.Status.GetStatus(t.Context(), &controlrpc.GetStatusRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Lstat(cfg.Paths.SocketPath); errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("previous control socket was not retired")
+}
+
+func TestServerReloadFailureRetainsActiveListeners(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	server, err := StartServer(cfg, &fakeRuntime{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	blocked := filepath.Join(dir, "not-a-socket")
+	if err := os.WriteFile(blocked, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next := cfg.Clone()
+	next.Listeners["blocked"] = config.ListenerConfig{Network: "unix", Address: blocked}
+	if err := server.Reload(next); err == nil {
+		t.Fatal("listener collision was accepted")
+	}
+	client, err := DialLocal(t.Context(), cfg.Paths.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Connection.Close() }()
+	if _, err := client.Status.GetStatus(t.Context(), &controlrpc.GetStatusRequest{}); err != nil {
+		t.Fatalf("active listener was lost after rollback: %v", err)
+	}
+}
+
+func TestServerReloadReplacesSameAddressAuthentication(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ca, certificate, key, clientCertificate, clientKey := writeMTLSPKI(t, dir)
+	reservation, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	cfg.Listeners["network"] = config.ListenerConfig{Network: "tcp", Address: address, AuthMode: "token", TLSCert: certificate, TLSKey: key}
+	server, err := StartServer(cfg, &fakeRuntime{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	next := cfg.Clone()
+	listener := next.Listeners["network"]
+	listener.AuthMode = "mtls"
+	listener.ClientCA = ca
+	next.Listeners["network"] = listener
+	if err := server.Reload(next); err != nil {
+		t.Fatal(err)
+	}
+	caPEM, err := os.ReadFile(ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := PairingBundle{Version: 1, Endpoint: address, TrustMode: "ca", CAPEM: string(caPEM), ServerName: "localhost", ClientCert: string(clientCertificate), ClientKey: string(clientKey)}
+	client, err := DialBundle(t.Context(), bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Connection.Close() }()
+	if _, err := client.Status.GetStatus(t.Context(), &controlrpc.GetStatusRequest{}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -249,6 +365,18 @@ func TestTLSScopedTokenAndPairing(t *testing.T) {
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("trigger error=%v", err)
 	}
+	adminBundle, err := CreatePairingBundle(store, endpoint, certificate, "", "localhost", false, "", "", []string{"admin"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminClient, err := DialBundle(t.Context(), adminBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminClient.Control.Reload(t.Context(), &controlrpc.ReloadRequest{}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("remote reload error=%v", err)
+	}
+	_ = adminClient.Connection.Close()
 	encoded, err := json.Marshal(bundle)
 	if err != nil {
 		t.Fatal(err)

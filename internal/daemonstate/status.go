@@ -39,10 +39,19 @@ type DatasetStatus struct {
 
 // ControlSnapshot is one coherent-enough operational view.
 type ControlSnapshot struct {
-	Revision   uint64
-	Observed   time.Time
-	Generation uint64
-	Datasets   []DatasetStatus
-	Queues     map[string]QueueSnapshot
-	Jobs       []Event
+	Revision         uint64
+	Observed         time.Time
+	Generation       uint64
+	ConfigGeneration uint64
+	Datasets         []DatasetStatus
+	Queues           map[string]QueueSnapshot
+	Jobs             []Event
+}
+
+// ReloadResult describes one successfully validated configuration generation.
+// RestartRequired contains settings retained from the previous generation.
+type ReloadResult struct {
+	Generation      uint64
+	Applied         []string
+	RestartRequired []string
 }

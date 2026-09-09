@@ -15,6 +15,7 @@ import (
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/control"
 	"github.com/pdf/boomerangz/internal/daemon"
+	"github.com/pdf/boomerangz/internal/daemonstate"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 )
 
@@ -54,6 +55,9 @@ func TestControlCommandsUseRunningDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = server.Close() }()
+	server.SetReloadHandler(func(context.Context) (daemonstate.ReloadResult, error) {
+		return daemonstate.ReloadResult{Generation: 4, Applied: []string{"daemon.reconcile_interval"}}, nil
+	})
 	configPath := filepath.Join(dir, "config.toml")
 	document := fmt.Sprintf("[paths]\nsocket_path=%q\nidentity_dir=%q\ncredentials_dir=%q\n", cfg.Paths.SocketPath, cfg.Paths.IdentityDir, cfg.Paths.CredentialsDir)
 	if err := os.WriteFile(configPath, []byte(document), 0o600); err != nil {
@@ -83,5 +87,13 @@ func TestControlCommandsUseRunningDaemon(t *testing.T) {
 	}
 	if !bytes.Contains(cleanOutput.Bytes(), []byte(`"applied": 1`)) {
 		t.Fatalf("clean=%s", cleanOutput.String())
+	}
+	var reloadOutput bytes.Buffer
+	reloadArgs := []string{"config", "reload", "--socket", cfg.Paths.SocketPath}
+	if err := runWithReader(t.Context(), reloadArgs, &reloadOutput, io.Discard, BuildInfo{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(reloadOutput.Bytes(), []byte(`"generation": 4`)) || !bytes.Contains(reloadOutput.Bytes(), []byte(`"daemon.reconcile_interval"`)) {
+		t.Fatalf("reload=%s", reloadOutput.String())
 	}
 }

@@ -26,11 +26,13 @@ func (r *Runtime) retirementEndpoint(ctx context.Context, source string, effecti
 		}
 	}
 	for _, name := range effective.Remote {
+		r.mu.Lock()
 		client := r.remotes[name]
+		setting := r.config.Remotes[name]
+		r.mu.Unlock()
 		if client == nil || client.CanonicalTarget() != canonical {
 			continue
 		}
-		setting := r.config.Remotes[name]
 		endpoint, err := client.Open(ctx)
 		if err != nil {
 			return retirementEndpoint{}, err

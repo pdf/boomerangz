@@ -71,22 +71,24 @@ type Runtime struct {
 	status       *StatusStore
 	logger       *slog.Logger
 	now          func() time.Time
+	reloadMu     sync.Mutex
 
-	mu             sync.Mutex
-	known          map[string]bool
-	active         map[string]bool
-	recursive      map[string]bool
-	policies       map[string]policy.Effective
-	generation     *discovery.Generation
-	roads          map[string]roadState
-	retireFailures map[string]int
-	delayed        map[string]time.Time
-	dirty          map[string]bool
-	delayContext   context.Context
-	delayCancel    context.CancelFunc
-	delayWait      sync.WaitGroup
-	shuttingDown   bool
-	lifecycleAdmin sync.Mutex
+	mu               sync.Mutex
+	known            map[string]bool
+	active           map[string]bool
+	recursive        map[string]bool
+	policies         map[string]policy.Effective
+	generation       *discovery.Generation
+	roads            map[string]roadState
+	retireFailures   map[string]int
+	delayed          map[string]time.Time
+	dirty            map[string]bool
+	delayContext     context.Context
+	delayCancel      context.CancelFunc
+	delayWait        sync.WaitGroup
+	shuttingDown     bool
+	configGeneration uint64
+	lifecycleAdmin   sync.Mutex
 }
 
 // New constructs an operational daemon around typed local ZFS execution.
@@ -137,16 +139,187 @@ func New(cfg config.Config, source backend, installation string, logger *slog.Lo
 	sharedLocks := &keyLocks{}
 	management.locks, local.locks, remote.locks = sharedLocks, sharedLocks, sharedLocks
 	gate := &lifecycle.Gate{}
+	liveConfig := cfg.Clone()
 	runtime := &Runtime{
-		config: cfg, backend: source, installation: installation,
+		config: liveConfig, backend: source, installation: installation,
 		gate: gate, scanner: scanner, scheduler: NewScheduler(), management: management,
 		local: local, remote: remote, localStream: stream, pending: &transfer.PendingSet{},
 		remotes: clients, logger: logger, status: status, locks: sharedLocks, now: time.Now, known: make(map[string]bool), active: make(map[string]bool),
 		recursive: make(map[string]bool), policies: make(map[string]policy.Effective),
-		roads: make(map[string]roadState), retireFailures: make(map[string]int), delayed: make(map[string]time.Time), dirty: make(map[string]bool),
+		roads: make(map[string]roadState), retireFailures: make(map[string]int), delayed: make(map[string]time.Time), dirty: make(map[string]bool), configGeneration: 1,
 	}
-	runtime.safety = newSafety(gate, source, clients, cfg.Remotes)
+	runtime.safety = newSafety(gate, source, clients, liveConfig.Remotes)
 	return runtime, nil
+}
+
+// CurrentConfig returns a detached snapshot of the live configuration.
+func (r *Runtime) CurrentConfig() config.Config {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.config.Clone()
+}
+
+func (r *Runtime) daemonConfig() config.DaemonConfig {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.config.Daemon
+}
+
+func configChanges(previous, next config.Config) (applied, restart []string) {
+	fields := []struct {
+		name    string
+		old     any
+		new     any
+		restart bool
+	}{
+		{"daemon.reconcile_interval", previous.Daemon.ReconcileInterval, next.Daemon.ReconcileInterval, false},
+		{"daemon.inactive_grace_period", previous.Daemon.InactiveGracePeriod, next.Daemon.InactiveGracePeriod, false},
+		{"daemon.management_workers", previous.Daemon.ManagementWorkers, next.Daemon.ManagementWorkers, false},
+		{"daemon.local_transfer_workers", previous.Daemon.LocalTransferWorkers, next.Daemon.LocalTransferWorkers, false},
+		{"daemon.remote_transfer_workers", previous.Daemon.RemoteTransferWorkers, next.Daemon.RemoteTransferWorkers, false},
+		{"paths.credentials_dir", previous.Paths.CredentialsDir, next.Paths.CredentialsDir, false},
+		{"paths.identity_dir", previous.Paths.IdentityDir, next.Paths.IdentityDir, true},
+		{"paths.socket_path", previous.Paths.SocketPath, next.Paths.SocketPath, false},
+		{"ssh_shell.replication_roots", previous.SSHShell.ReplicationRoots, next.SSHShell.ReplicationRoots, false},
+		{"remotes", previous.Remotes, next.Remotes, false},
+		{"listeners", previous.Listeners, next.Listeners, false},
+	}
+	for _, field := range fields {
+		if reflect.DeepEqual(field.old, field.new) {
+			continue
+		}
+		if field.restart {
+			restart = append(restart, field.name)
+		} else {
+			applied = append(applied, field.name)
+		}
+	}
+	return applied, restart
+}
+
+// preparedConfig contains all fallible daemon-side reload work. Its contents
+// are immutable after preparation and safe to commit after listeners are ready.
+type preparedConfig struct {
+	effective      config.Config
+	clients        map[string]remoteClient
+	remotes        []string
+	applied        []string
+	restart        []string
+	refreshRemotes bool
+}
+
+// prepareConfig validates a candidate and constructs every remote client before
+// any live daemon state changes.
+func (r *Runtime) prepareConfig(next config.Config) (*preparedConfig, error) {
+	if err := next.Validate(); err != nil {
+		return nil, err
+	}
+	previous := r.CurrentConfig()
+	applied, restart := configChanges(previous, next)
+	effective := next.Clone()
+	effective.Paths.IdentityDir = previous.Paths.IdentityDir
+	clients, err := buildRemoteClients(effective.Remotes, effective.Paths.CredentialsDir)
+	if err != nil {
+		return nil, err
+	}
+	remoteNames := make([]string, 0, len(effective.Remotes))
+	for name := range effective.Remotes {
+		remoteNames = append(remoteNames, name)
+	}
+	slices.Sort(remoteNames)
+	return &preparedConfig{
+		effective:      effective,
+		clients:        clients,
+		remotes:        remoteNames,
+		applied:        applied,
+		restart:        restart,
+		refreshRemotes: !reflect.DeepEqual(previous.Remotes, effective.Remotes) || previous.Paths.CredentialsDir != effective.Paths.CredentialsDir,
+	}, nil
+}
+
+// commitConfig publishes a fully prepared configuration without fallible I/O.
+func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResult {
+	effective := prepared.effective
+	_ = r.management.Resize(effective.Daemon.EffectiveManagementWorkers())
+	_ = r.local.Resize(effective.Daemon.LocalTransferWorkers)
+	_ = r.remote.Resize(effective.Daemon.RemoteTransferWorkers)
+	_ = r.scanner.Reconfigure(effective.Daemon.ReconcileInterval.Duration, prepared.remotes)
+	r.remote.DiscardPending()
+	type remoteReconcile struct {
+		dataset string
+		remote  string
+		policy  policy.Effective
+	}
+	var reconciles []remoteReconcile
+	r.mu.Lock()
+	r.config = effective.Clone()
+	r.remotes = prepared.clients
+	r.roads = make(map[string]roadState)
+	if prepared.refreshRemotes {
+		for key := range r.delayed {
+			if strings.HasPrefix(key, "remote:") {
+				delete(r.delayed, key)
+			}
+		}
+		for key := range r.dirty {
+			if strings.HasPrefix(key, "remote:") {
+				delete(r.dirty, key)
+			}
+		}
+		for dataset := range r.active {
+			effectivePolicy := r.policies[dataset].Clone()
+			for _, remote := range effectivePolicy.Remote {
+				if prepared.clients[remote] == nil {
+					continue
+				}
+				reconciles = append(reconciles, remoteReconcile{dataset: dataset, remote: remote, policy: effectivePolicy})
+			}
+		}
+	}
+	r.safety.setTargets(&TargetChecker{local: r.backend, remotes: prepared.clients, settings: effective.Remotes})
+	r.configGeneration++
+	generation := r.configGeneration
+	r.mu.Unlock()
+	for _, reconcile := range reconciles {
+		jobID := "remote:" + reconcile.dataset + ":" + reconcile.remote
+		r.markDirty(jobID)
+		if !r.enqueueRemote(reconcile.dataset, reconcile.remote, reconcile.policy, "") {
+			r.clearDirty(jobID)
+		}
+	}
+	r.scanner.Request()
+	r.status.Record(Event{Pool: "configuration", Job: "config:reload", State: "succeeded", At: r.now().UTC()})
+	return daemonstate.ReloadResult{Generation: generation, Applied: slices.Clone(prepared.applied), RestartRequired: slices.Clone(prepared.restart)}
+}
+
+// ReloadConfig serializes preparation, listener replacement, and publication
+// as one live configuration transaction.
+func (r *Runtime) ReloadConfig(next config.Config, reloadListeners func(config.Config) error) (daemonstate.ReloadResult, error) {
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
+	r.mu.Lock()
+	shuttingDown := r.shuttingDown
+	r.mu.Unlock()
+	if shuttingDown {
+		return daemonstate.ReloadResult{}, fmt.Errorf("daemon is shutting down")
+	}
+	prepared, err := r.prepareConfig(next)
+	if err != nil {
+		return daemonstate.ReloadResult{}, err
+	}
+	if reloadListeners != nil {
+		if err := reloadListeners(prepared.effective.Clone()); err != nil {
+			return daemonstate.ReloadResult{}, err
+		}
+	}
+	return r.commitConfig(prepared), nil
+}
+
+// ApplyConfig validates and atomically publishes daemon-owned live settings.
+// identity_dir is retained and reported because changing the installation and
+// authorization identity is an administrative migration, not a live reload.
+func (r *Runtime) ApplyConfig(next config.Config) (daemonstate.ReloadResult, error) {
+	return r.ReloadConfig(next, nil)
 }
 
 func (r *Runtime) service() (*lifecycle.Service, error) {
@@ -306,7 +479,7 @@ func (r *Runtime) enqueueInactive(dataset string, active bool) {
 		if serviceErr != nil {
 			return Outcome{State: "failed", Reason: serviceErr.Error()}
 		}
-		plan, reconcileErr := service.ReconcileInactive(ctx, dataset, active, r.now(), r.config.Daemon.InactiveGracePeriod.Duration, true)
+		plan, reconcileErr := service.ReconcileInactive(ctx, dataset, active, r.now(), r.daemonConfig().InactiveGracePeriod.Duration, true)
 		if reconcileErr != nil {
 			return Outcome{State: "blocked", Reason: reconcileErr.Error()}
 		}
@@ -334,13 +507,14 @@ func (r *Runtime) enqueueRetirement(dataset string) {
 		if serviceErr != nil {
 			return Outcome{State: "failed", Reason: serviceErr.Error()}
 		}
-		preview, retireErr := service.Retire(ctx, dataset, recursive, r.now(), r.config.Daemon.InactiveGracePeriod.Duration, false, r.safety)
+		grace := r.daemonConfig().InactiveGracePeriod.Duration
+		preview, retireErr := service.Retire(ctx, dataset, recursive, r.now(), grace, false, r.safety)
 		if retireErr == nil && preview.Eligible && len(preview.Clean.Blockers) == 0 {
 			retireErr = r.retireTargets(ctx, dataset, recursive, effective)
 		}
 		plan := preview
 		if retireErr == nil && preview.Eligible && len(preview.Clean.Blockers) == 0 {
-			plan, retireErr = service.Retire(ctx, dataset, recursive, r.now(), r.config.Daemon.InactiveGracePeriod.Duration, true, r.safety)
+			plan, retireErr = service.Retire(ctx, dataset, recursive, r.now(), grace, true, r.safety)
 		}
 		if retireErr == nil && plan.Eligible && len(plan.Clean.Blockers) == 0 {
 			r.mu.Lock()
@@ -378,7 +552,7 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 	ticket, err := r.gate.Queue(context.Background(), schedule.Dataset, lifecycle.Management)
 	if err != nil {
 		if !schedule.Force {
-			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.config.Daemon.ReconcileInterval.Duration))
+			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
 		}
 		return false
 	}
@@ -396,7 +570,7 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 		}
 		deadline, deadlineErr := r.nextOwnedSnapshot(schedule.Dataset, schedule.Policy.Grid.Cadence())
 		if deadlineErr != nil {
-			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.config.Daemon.ReconcileInterval.Duration))
+			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
 			return Outcome{State: "failed", Reason: deadlineErr.Error()}
 		}
 		if !schedule.Force && !deadline.IsZero() && r.now().Before(deadline) {
@@ -409,7 +583,7 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 		}
 		metadata, createErr := service.CreateSnapshot(ticket.Context(), schedule.Dataset, schedule.Policy.Send.Replicate, r.now(), schedule.Policy)
 		if createErr != nil {
-			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.config.Daemon.ReconcileInterval.Duration))
+			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
 			return Outcome{State: "failed", Reason: createErr.Error()}
 		}
 		completed := r.now()
@@ -788,13 +962,14 @@ func (r *Runtime) Run(ctx context.Context) error {
 	if err := r.remote.Start(transferCtx); err != nil {
 		return err
 	}
-	r.logger.Info("daemon started", "management_workers", r.config.Daemon.EffectiveManagementWorkers(), "local_transfer_workers", r.config.Daemon.LocalTransferWorkers, "remote_transfer_workers", r.config.Daemon.RemoteTransferWorkers)
+	settings := r.daemonConfig()
+	r.logger.Info("daemon started", "management_workers", settings.EffectiveManagementWorkers(), "local_transfer_workers", settings.LocalTransferWorkers, "remote_transfer_workers", settings.RemoteTransferWorkers)
 	runCtx, runCancel := context.WithCancel(ctx)
 	var loops sync.WaitGroup
 	loops.Add(2)
 	go func() {
 		defer loops.Done()
-		_ = r.scanner.Run(runCtx, r.config.Daemon.ReconcileInterval.Duration, r.retained, func(generation *discovery.Generation, scanErr error) {
+		_ = r.scanner.Run(runCtx, settings.ReconcileInterval.Duration, r.retained, func(generation *discovery.Generation, scanErr error) {
 			if scanErr != nil {
 				if !errors.Is(scanErr, context.Canceled) {
 					r.logger.Error("discovery failed", "error", scanErr)
@@ -894,7 +1069,7 @@ func (r *Runtime) ControlStatus() ControlSnapshot {
 	r.mu.Lock()
 	names := mapsKeys(r.known)
 	slices.Sort(names)
-	result := ControlSnapshot{Revision: revision, Observed: r.now().UTC(), Queues: r.QueueStatus(), Jobs: jobs}
+	result := ControlSnapshot{Revision: revision, Observed: r.now().UTC(), Queues: r.QueueStatus(), Jobs: jobs, ConfigGeneration: r.configGeneration}
 	if r.generation != nil {
 		result.Generation = r.generation.ID()
 	}

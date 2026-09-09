@@ -105,6 +105,25 @@ func runTrigger(ctx context.Context, out io.Writer, cfg config.Config, credentia
 	}{response.GetAccepted()})
 }
 
+func runConfigReload(ctx context.Context, out io.Writer, socket string) error {
+	client, err := control.DialLocal(ctx, socket)
+	if err != nil {
+		return fmt.Errorf("connect to daemon control socket: %w", err)
+	}
+	defer func() { _ = client.Connection.Close() }()
+	response, err := client.Control.Reload(ctx, &controlrpc.ReloadRequest{})
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(struct {
+		Generation      uint64   `json:"generation"`
+		Applied         []string `json:"applied"`
+		RestartRequired []string `json:"restart_required"`
+	}{Generation: response.GetGeneration(), Applied: response.GetApplied(), RestartRequired: response.GetRestartRequired()})
+}
+
 func runDaemonClean(ctx context.Context, out io.Writer, cfg config.Config, names []string, recursive, all, destroy, apply bool) (bool, error) {
 	_, err := os.Lstat(cfg.Paths.SocketPath)
 	if errors.Is(err, os.ErrNotExist) {

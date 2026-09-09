@@ -2,7 +2,9 @@
 package config
 
 import (
+	"maps"
 	"runtime"
+	"slices"
 	"time"
 )
 
@@ -25,6 +27,21 @@ type Config struct {
 	SSHShell  SSHShellConfig            `toml:"ssh_shell" json:"ssh_shell"`
 	Remotes   map[string]RemoteConfig   `toml:"remotes" json:"remotes"`
 	Listeners map[string]ListenerConfig `toml:"listeners" json:"listeners"`
+}
+
+// Clone detaches all mutable maps and slices from a configuration value.
+func (c Config) Clone() Config {
+	result := c
+	result.SSHShell.ReplicationRoots = slices.Clone(c.SSHShell.ReplicationRoots)
+	result.Remotes = maps.Clone(c.Remotes)
+	if c.Listeners != nil {
+		result.Listeners = make(map[string]ListenerConfig, len(c.Listeners))
+		for name, listener := range c.Listeners {
+			listener.ReplicationRoots = slices.Clone(listener.ReplicationRoots)
+			result.Listeners[name] = listener
+		}
+	}
+	return result
 }
 
 // DaemonConfig controls reconciliation and worker concurrency.

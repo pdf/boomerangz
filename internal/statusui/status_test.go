@@ -11,7 +11,7 @@ import (
 
 func TestTerminalNarrowAndJSON(t *testing.T) {
 	t.Parallel()
-	snapshot := &controlrpc.StatusSnapshot{Generation: 2, Datasets: []*controlrpc.DatasetStatus{{Name: "tank/data", Active: true}}, Queues: []*controlrpc.QueueStatus{{Name: "management", Capacity: 10, Pending: 2}}}
+	snapshot := &controlrpc.StatusSnapshot{Generation: 2, ConfigGeneration: 3, Datasets: []*controlrpc.DatasetStatus{{Name: "tank/data", Active: true}}, Queues: []*controlrpc.QueueStatus{{Name: "management", Capacity: 10, Pending: 2}}}
 	var terminal bytes.Buffer
 	if err := Terminal(&terminal, snapshot, 24); err != nil {
 		t.Fatal(err)
@@ -23,7 +23,7 @@ func TestTerminalNarrowAndJSON(t *testing.T) {
 	if err := JSON(&structured, snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(structured.String(), `"generation":2`) {
+	if !strings.Contains(structured.String(), `"generation":2`) || !strings.Contains(structured.String(), `"config_generation":3`) {
 		t.Fatalf("JSON=%s", structured.String())
 	}
 }

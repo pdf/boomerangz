@@ -8,11 +8,13 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/control"
 	"github.com/pdf/boomerangz/internal/daemon"
+	"github.com/pdf/boomerangz/internal/daemonstate"
 	"github.com/pdf/boomerangz/internal/discovery"
 	"github.com/pdf/boomerangz/internal/identity"
 	remoterpc "github.com/pdf/boomerangz/internal/replication/rpc"
@@ -48,8 +50,17 @@ type configOptions struct {
 func (o configOptions) load() (config.Loaded, error) { return config.Load(o.Path, o.DropIns) }
 
 type configCommand struct {
-	Check configCheckCommand `cmd:"" help:"Validate configuration and all drop-ins."`
-	Show  configShowCommand  `cmd:"" help:"Show merged, effective configuration."`
+	Check  configCheckCommand  `cmd:"" help:"Validate configuration and all drop-ins."`
+	Show   configShowCommand   `cmd:"" help:"Show merged, effective configuration."`
+	Reload configReloadCommand `cmd:"" help:"Validate and apply the running daemon configuration."`
+}
+
+type configReloadCommand struct {
+	Socket string `default:"/run/boomerangz/boomerangz.sock" help:"Running daemon control socket."`
+}
+
+func (c *configReloadCommand) Run(env *commandEnvironment) error {
+	return runConfigReload(env.Context, env.Stdout, c.Socket)
 }
 
 type configCheckCommand struct {
@@ -131,6 +142,16 @@ func (c *daemonCommand) Run(env *commandEnvironment) error {
 	if err != nil {
 		return err
 	}
+	var reloadMu sync.Mutex
+	server.SetReloadHandler(func(_ context.Context) (daemonstate.ReloadResult, error) {
+		reloadMu.Lock()
+		defer reloadMu.Unlock()
+		candidate, loadErr := c.load()
+		if loadErr != nil {
+			return daemonstate.ReloadResult{}, loadErr
+		}
+		return runtime.ReloadConfig(candidate.Config, server.Reload)
+	})
 	finished := make(chan struct{})
 	go func() {
 		select {

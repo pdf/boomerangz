@@ -106,9 +106,11 @@ type Scanner struct {
 	reader   Reader
 	options  Options
 	remotes  map[string]struct{}
+	interval time.Duration
 	mu       sync.Mutex
 	current  atomic.Pointer[Generation]
 	requests chan struct{}
+	changed  chan struct{}
 }
 
 // New creates a scanner with bounded defaults. Reader must not be nil.
@@ -125,11 +127,33 @@ func New(reader Reader, options Options) (*Scanner, error) {
 	if options.BatchSize < 1 || options.MaxArgumentBytes < 1 {
 		return nil, fmt.Errorf("discovery batch limits must be positive")
 	}
-	s := &Scanner{reader: reader, options: options, remotes: make(map[string]struct{}), requests: make(chan struct{}, 1)}
+	s := &Scanner{reader: reader, options: options, remotes: make(map[string]struct{}), requests: make(chan struct{}, 1), changed: make(chan struct{}, 1)}
 	for _, remote := range options.Remotes {
 		s.remotes[remote] = struct{}{}
 	}
 	return s, nil
+}
+
+// Reconfigure atomically updates the periodic interval and known remote names.
+// It wakes Run so the new configuration is reflected without waiting for the
+// previous interval to expire.
+func (s *Scanner) Reconfigure(interval time.Duration, remotes []string) error {
+	if interval <= 0 {
+		return fmt.Errorf("reconciliation interval must be positive")
+	}
+	next := make(map[string]struct{}, len(remotes))
+	for _, remote := range remotes {
+		next[remote] = struct{}{}
+	}
+	s.mu.Lock()
+	s.interval = interval
+	s.remotes = next
+	s.mu.Unlock()
+	select {
+	case s.changed <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 // Current returns the last complete generation, or nil before the first success.
@@ -149,6 +173,9 @@ func (s *Scanner) Run(ctx context.Context, interval time.Duration, retained func
 	if interval <= 0 {
 		return fmt.Errorf("reconciliation interval must be positive")
 	}
+	s.mu.Lock()
+	s.interval = interval
+	s.mu.Unlock()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -165,6 +192,11 @@ func (s *Scanner) Run(ctx context.Context, interval time.Duration, retained func
 			return ctx.Err()
 		case <-ticker.C:
 		case <-s.requests:
+		case <-s.changed:
+			s.mu.Lock()
+			interval = s.interval
+			s.mu.Unlock()
+			ticker.Reset(interval)
 		}
 	}
 }

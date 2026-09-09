@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -133,5 +135,77 @@ func TestStandaloneTargetCheckerUsesSameLocalResumeCheck(t *testing.T) {
 	}
 	if err := checker.CheckTarget(t.Context(), "tank/data", canonical); err == nil {
 		t.Fatal("resumable target was accepted")
+	}
+}
+
+func TestApplyConfigPublishesGenerationAndRetainsIdentityDirectory(t *testing.T) {
+	t.Parallel()
+	cfg := config.Defaults()
+	backend := &runtimeBackend{scanned: make(chan struct{}, 1)}
+	runtime, err := New(cfg, backend, "11111111-1111-4111-8111-111111111111", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := cfg.Clone()
+	next.Daemon.LocalTransferWorkers = 3
+	next.Paths.IdentityDir = "/different/identity"
+	next.Paths.SocketPath = "/run/boomerangz/reloaded.sock"
+	result, err := runtime.ApplyConfig(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Generation != 2 || !reflect.DeepEqual(result.RestartRequired, []string{"paths.identity_dir"}) {
+		t.Fatalf("result=%#v", result)
+	}
+	if got := runtime.CurrentConfig(); got.Paths.IdentityDir != cfg.Paths.IdentityDir || got.Paths.SocketPath != next.Paths.SocketPath {
+		t.Fatalf("live config=%#v", got.Paths)
+	}
+	if runtime.local.workers != 3 || runtime.ControlStatus().ConfigGeneration != 2 {
+		t.Fatalf("workers=%d status=%#v", runtime.local.workers, runtime.ControlStatus())
+	}
+}
+
+func TestPrepareConfigFailureLeavesRuntimeUnchanged(t *testing.T) {
+	t.Parallel()
+	cfg := config.Defaults()
+	backend := &runtimeBackend{scanned: make(chan struct{}, 1)}
+	runtime, err := New(cfg, backend, "11111111-1111-4111-8111-111111111111", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := cfg.Clone()
+	next.Remotes["missing"] = config.RemoteConfig{Transport: "native", Credential: "absent", Root: "tank/backups"}
+	if _, err := runtime.ApplyConfig(next); err == nil {
+		t.Fatal("missing native credential was accepted")
+	}
+	if got := runtime.CurrentConfig(); !reflect.DeepEqual(got, cfg) {
+		t.Fatalf("failed preparation changed config: %#v", got)
+	}
+	if runtime.ControlStatus().ConfigGeneration != 1 {
+		t.Fatal("failed preparation advanced generation")
+	}
+}
+
+func TestListenerReloadFailureRollsBackDaemonConfiguration(t *testing.T) {
+	t.Parallel()
+	cfg := config.Defaults()
+	backend := &runtimeBackend{scanned: make(chan struct{}, 1)}
+	runtime, err := New(cfg, backend, "11111111-1111-4111-8111-111111111111", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := cfg.Clone()
+	next.Daemon.LocalTransferWorkers = 4
+	next.Paths.SocketPath = "/run/boomerangz/replacement.sock"
+	wantErr := errors.New("listener unavailable")
+	_, err = runtime.ReloadConfig(next, func(config.Config) error { return wantErr })
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("reload error=%v", err)
+	}
+	if got := runtime.CurrentConfig(); !reflect.DeepEqual(got, cfg) {
+		t.Fatalf("listener failure changed config: %#v", got)
+	}
+	if runtime.local.workers != cfg.Daemon.LocalTransferWorkers || runtime.ControlStatus().ConfigGeneration != 1 {
+		t.Fatal("listener failure changed live runtime state")
 	}
 }

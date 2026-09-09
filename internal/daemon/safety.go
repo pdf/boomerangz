@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/lifecycle"
@@ -15,6 +16,7 @@ import (
 // Safety combines live daemon quiescence with reusable target verification.
 type Safety struct {
 	gate    *lifecycle.Gate
+	mu      sync.RWMutex
 	targets *TargetChecker
 }
 
@@ -73,10 +75,22 @@ func checkResumeState(ctx context.Context, executor zfs.Executor, root string) e
 // inaccessible, identity-mismatched, or resumable destinations without changing
 // either endpoint.
 func (s *Safety) CheckTarget(ctx context.Context, source, target string) error {
-	if s == nil || s.targets == nil {
+	if s == nil {
 		return fmt.Errorf("live target verification is unavailable")
 	}
-	return s.targets.CheckTarget(ctx, source, target)
+	s.mu.RLock()
+	targets := s.targets
+	s.mu.RUnlock()
+	if targets == nil {
+		return fmt.Errorf("live target verification is unavailable")
+	}
+	return targets.CheckTarget(ctx, source, target)
+}
+
+func (s *Safety) setTargets(targets *TargetChecker) {
+	s.mu.Lock()
+	s.targets = targets
+	s.mu.Unlock()
 }
 
 // CheckTarget verifies one recorded target without changing either endpoint.

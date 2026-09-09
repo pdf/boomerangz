@@ -53,6 +53,8 @@ type Pool struct {
 	mu      sync.Mutex
 	known   map[string]bool
 	started bool
+	ctx     context.Context
+	stops   []context.CancelFunc
 	wait    sync.WaitGroup
 }
 
@@ -76,10 +78,41 @@ func (p *Pool) Start(ctx context.Context) error {
 		return fmt.Errorf("pool already started")
 	}
 	p.started = true
+	p.ctx = ctx
 	for range p.workers {
-		p.wait.Add(1)
-		go p.worker(ctx)
+		p.startWorkerLocked()
 	}
+	return nil
+}
+
+func (p *Pool) startWorkerLocked() {
+	workerCtx, stop := context.WithCancel(p.ctx)
+	p.stops = append(p.stops, stop)
+	p.wait.Add(1)
+	go p.worker(p.ctx, workerCtx)
+}
+
+// Resize changes the number of workers. Retiring workers finish an active job
+// before exiting; newly added workers begin consuming queued work immediately.
+func (p *Pool) Resize(workers int) error {
+	if workers < 1 {
+		return fmt.Errorf("positive worker count is required")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.started {
+		p.workers = workers
+		return nil
+	}
+	for len(p.stops) < workers {
+		p.startWorkerLocked()
+	}
+	for len(p.stops) > workers {
+		last := len(p.stops) - 1
+		p.stops[last]()
+		p.stops = p.stops[:last]
+	}
+	p.workers = workers
 	return nil
 }
 
@@ -121,20 +154,20 @@ func (p *Pool) emit(job Job, state, reason string) {
 	}
 }
 
-func (p *Pool) worker(ctx context.Context) {
+func (p *Pool) worker(runCtx, workerCtx context.Context) {
 	defer p.wait.Done()
 	for {
-		job, ok := p.queue.Pop(ctx)
+		job, ok := p.queue.Pop(workerCtx)
 		if !ok {
 			return
 		}
-		if err := ctx.Err(); err != nil {
+		if err := runCtx.Err(); err != nil {
 			if job.Drop != nil {
 				job.Drop()
 			}
 			continue
 		}
-		release, err := p.locks.acquire(ctx, job.LockKey)
+		release, err := p.locks.acquire(runCtx, job.LockKey)
 		if err != nil {
 			outcome := Outcome{State: "failed", Reason: err.Error()}
 			p.emit(job, outcome.State, outcome.Reason)
@@ -149,7 +182,7 @@ func (p *Pool) worker(ctx context.Context) {
 			state = "running"
 		}
 		p.emit(job, state, "")
-		outcome := job.Run(ctx)
+		outcome := job.Run(runCtx)
 		release()
 		if outcome.State == "" {
 			outcome.State = "succeeded"
@@ -158,6 +191,9 @@ func (p *Pool) worker(ctx context.Context) {
 		p.complete(job.ID)
 		if job.After != nil {
 			job.After(outcome)
+		}
+		if workerCtx.Err() != nil {
+			return
 		}
 	}
 }

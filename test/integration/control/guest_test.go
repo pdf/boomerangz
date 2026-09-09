@@ -97,6 +97,39 @@ func TestGuestDaemonControl(t *testing.T) {
 		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
 		return statusErr == nil && bytes.Contains(output, []byte(source))
 	})
+	configFile, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := configFile.WriteString("\n[daemon]\nlocal_transfer_workers = 3\n"); err != nil {
+		_ = configFile.Close()
+		t.Fatal(err)
+	}
+	if err := configFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reloadOutput := command(binary, "config", "reload", "--socket", socket)
+	var reload struct {
+		Generation      uint64   `json:"generation"`
+		Applied         []string `json:"applied"`
+		RestartRequired []string `json:"restart_required"`
+	}
+	if err := json.Unmarshal([]byte(reloadOutput), &reload); err != nil {
+		t.Fatalf("decode reload result: %v: %s", err, reloadOutput)
+	}
+	if reload.Generation != 2 || !slices.Contains(reload.Applied, "daemon.local_transfer_workers") || len(reload.RestartRequired) != 0 {
+		t.Fatalf("unexpected reload result: %#v", reload)
+	}
+	waitFor("reloaded configuration generation", func() bool {
+		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
+		if statusErr != nil {
+			return false
+		}
+		var status struct {
+			ConfigGeneration uint64 `json:"config_generation"`
+		}
+		return json.Unmarshal(output, &status) == nil && status.ConfigGeneration == 2
+	})
 	initialSnapshots := 0
 	waitFor("initial owned snapshot", func() bool {
 		state, inspectErr := direct.InspectState(t.Context(), source, false)

@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/pdf/boomerangz/internal/config"
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
+	"github.com/pdf/boomerangz/internal/daemonstate"
 	remoterpc "github.com/pdf/boomerangz/internal/replication/rpc"
 	"github.com/pdf/boomerangz/internal/zfs"
 	"golang.org/x/sys/unix"
@@ -30,13 +32,30 @@ import (
 
 // Server owns all configured local-control listeners.
 type Server struct {
-	servers   []*grpc.Server
-	listeners []net.Listener
-	sockets   []socketFile
-	wait      sync.WaitGroup
-	logger    *slog.Logger
-	closeOnce sync.Once
-	closeErr  error
+	servers     []*grpc.Server
+	listeners   []net.Listener
+	sockets     []socketFile
+	mu          sync.Mutex
+	config      config.Config
+	backend     runtime
+	replication zfs.Executor
+	zfsPath     string
+	store       *TokenStore
+	endpoints   map[string]*serverEndpoint
+	wait        sync.WaitGroup
+	logger      *slog.Logger
+	reloader    *reloadHandler
+	closeOnce   sync.Once
+	closeErr    error
+	closed      bool
+}
+
+type serverEndpoint struct {
+	name       string
+	definition config.ListenerConfig
+	server     *grpc.Server
+	listener   net.Listener
+	socket     *socketFile
 }
 
 type socketFile struct {
@@ -50,6 +69,8 @@ func (s *Server) Addresses(network string) []string {
 	if s == nil {
 		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var result []string
 	for _, listener := range s.listeners {
 		if network == "" || listener.Addr().Network() == network {
@@ -277,11 +298,8 @@ func startServer(cfg config.Config, backend runtime, replication zfs.Executor, z
 	if err != nil {
 		return nil, err
 	}
-	result := &Server{logger: logger}
-	definitions := map[string]config.ListenerConfig{"@default": {Network: "unix", Address: cfg.Paths.SocketPath}}
-	for name, listener := range cfg.Listeners {
-		definitions[name] = listener
-	}
+	result := &Server{logger: logger, reloader: &reloadHandler{}, config: cfg.Clone(), backend: backend, replication: replication, zfsPath: zfsPath, store: store, endpoints: make(map[string]*serverEndpoint)}
+	definitions := listenerDefinitions(cfg)
 	names := make([]string, 0, len(definitions))
 	for name := range definitions {
 		names = append(names, name)
@@ -295,57 +313,329 @@ func startServer(cfg config.Config, backend runtime, replication zfs.Executor, z
 			continue
 		}
 		seen[key] = true
-		var listener net.Listener
-		var tlsConfig *tls.Config
-		switch definition.Network {
-		case "unix":
-			listener, err = listenUnix(definition.Address)
-			if err == nil {
-				var socket socketFile
-				socket, err = identifySocket(definition.Address)
-				if err == nil {
-					result.sockets = append(result.sockets, socket)
-				}
-			}
-		case "tcp":
-			tlsConfig, err = tlsServerConfig(name, definition, cfg.Paths.IdentityDir, logger)
-			if err == nil {
-				listener, err = (&net.ListenConfig{}).Listen(context.Background(), "tcp", definition.Address)
-			}
-		default:
-			err = fmt.Errorf("unsupported listener network %s", definition.Network)
-		}
+		var endpoint *serverEndpoint
+		endpoint, err = result.buildEndpoint(name, definition, cfg.Paths.IdentityDir)
 		if err != nil {
 			_ = result.Close()
 			return nil, fmt.Errorf("listener %s: %w", name, err)
 		}
-		var remote remoterpc.RemoteServiceServer
-		if len(definition.ReplicationRoots) != 0 {
-			if replication == nil {
+		result.startEndpoint(endpoint)
+		result.endpoints[name] = endpoint
+	}
+	result.refreshViewsLocked()
+	return result, nil
+}
+
+func listenerDefinitions(cfg config.Config) map[string]config.ListenerConfig {
+	definitions := map[string]config.ListenerConfig{"@default": {Network: "unix", Address: cfg.Paths.SocketPath}}
+	for name, listener := range cfg.Listeners {
+		definitions[name] = listener
+	}
+	return definitions
+}
+
+func (s *Server) buildEndpoint(name string, definition config.ListenerConfig, identityDir string) (*serverEndpoint, error) {
+	var listener net.Listener
+	var tlsConfig *tls.Config
+	var err error
+	endpoint := &serverEndpoint{name: name, definition: definition}
+	switch definition.Network {
+	case "unix":
+		listener, err = listenUnix(definition.Address)
+		if err == nil {
+			socket, identifyErr := identifySocket(definition.Address)
+			if identifyErr != nil {
 				_ = listener.Close()
-				_ = result.Close()
-				return nil, fmt.Errorf("listener %s: replication backend is required", name)
+				return nil, identifyErr
 			}
-			remote, err = remoterpc.NewServerForRoots(replication, definition.ReplicationRoots, zfsPath)
-			if err != nil {
-				_ = listener.Close()
-				_ = result.Close()
-				return nil, fmt.Errorf("listener %s: %w", name, err)
+			endpoint.socket = &socket
+		}
+	case "tcp":
+		tlsConfig, err = tlsServerConfig(name, definition, identityDir, s.logger)
+		if err == nil {
+			listener, err = (&net.ListenConfig{}).Listen(context.Background(), "tcp", definition.Address)
+		}
+	default:
+		err = fmt.Errorf("unsupported listener network %s", definition.Network)
+	}
+	if err != nil {
+		return nil, err
+	}
+	endpoint.listener = listener
+	var remote remoterpc.RemoteServiceServer
+	if len(definition.ReplicationRoots) != 0 {
+		if s.replication == nil {
+			_ = closeEndpoint(endpoint)
+			return nil, fmt.Errorf("replication backend is required")
+		}
+		remote, err = remoterpc.NewServerForRoots(s.replication, definition.ReplicationRoots, s.zfsPath)
+		if err != nil {
+			_ = closeEndpoint(endpoint)
+			return nil, err
+		}
+	}
+	server := grpcServer(&service{runtime: s.backend, reloader: s.reloader, reloadAllowed: name == "@default"}, remote, definition.Network == "tcp" && strings.Contains(definition.AuthMode, "token"), s.store, tlsConfig)
+	endpoint.server = server
+	return endpoint, nil
+}
+
+func (s *Server) startEndpoint(endpoint *serverEndpoint) {
+	s.wait.Add(1)
+	go func() {
+		defer s.wait.Done()
+		if serveErr := endpoint.server.Serve(endpoint.listener); serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
+			s.logger.Error("control listener stopped", "name", endpoint.name, "error", serveErr)
+		}
+	}()
+	s.logger.Info("control listener started", "name", endpoint.name, "network", endpoint.definition.Network, "address", endpoint.definition.Address)
+}
+
+func (s *Server) refreshViewsLocked() {
+	names := make([]string, 0, len(s.endpoints))
+	for name := range s.endpoints {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	s.servers = s.servers[:0]
+	s.listeners = s.listeners[:0]
+	s.sockets = s.sockets[:0]
+	for _, name := range names {
+		endpoint := s.endpoints[name]
+		s.servers = append(s.servers, endpoint.server)
+		s.listeners = append(s.listeners, endpoint.listener)
+		if endpoint.socket != nil {
+			s.sockets = append(s.sockets, *endpoint.socket)
+		}
+	}
+}
+
+func closeEndpoint(endpoint *serverEndpoint) error {
+	if endpoint == nil {
+		return nil
+	}
+	if endpoint.server != nil {
+		endpoint.server.Stop()
+	}
+	var result error
+	if endpoint.listener != nil {
+		if err := endpoint.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			result = errors.Join(result, err)
+		}
+	}
+	if endpoint.socket != nil {
+		current, err := identifySocket(endpoint.socket.path)
+		if errors.Is(err, os.ErrNotExist) {
+			return result
+		}
+		if err != nil {
+			return errors.Join(result, err)
+		}
+		if current.device == endpoint.socket.device && current.inode == endpoint.socket.inode {
+			if err := os.Remove(endpoint.socket.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				result = errors.Join(result, err)
 			}
 		}
-		server := grpcServer(&service{runtime: backend}, remote, definition.Network == "tcp" && strings.Contains(definition.AuthMode, "token"), store, tlsConfig)
-		result.listeners = append(result.listeners, listener)
-		result.servers = append(result.servers, server)
-		result.wait.Add(1)
-		go func() {
-			defer result.wait.Done()
-			if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
-				logger.Error("control listener stopped", "name", name, "error", serveErr)
-			}
-		}()
-		logger.Info("control listener started", "name", name, "network", definition.Network, "address", definition.Address)
 	}
-	return result, nil
+	return result
+}
+
+func retireEndpoint(endpoint *serverEndpoint) error {
+	if endpoint == nil || endpoint.server == nil {
+		return closeEndpoint(endpoint)
+	}
+	done := make(chan struct{})
+	go func() {
+		endpoint.server.GracefulStop()
+		close(done)
+	}()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		endpoint.server.Stop()
+		<-done
+	}
+	return closeEndpoint(endpoint)
+}
+
+func endpointAddress(definition config.ListenerConfig) string {
+	return definition.Network + "\x00" + definition.Address
+}
+
+func endpointUnchanged(previous, next config.ListenerConfig) bool {
+	if !reflect.DeepEqual(previous, next) {
+		return false
+	}
+	// The server certificate is loaded for each handshake, while client CA
+	// pools are immutable once constructed and therefore need a fresh server.
+	return next.Network != "tcp" || (next.AuthMode != "mtls" && next.AuthMode != "mtls+token")
+}
+
+func normalizedDefinitions(cfg config.Config) map[string]config.ListenerConfig {
+	definitions := listenerDefinitions(cfg)
+	names := make([]string, 0, len(definitions))
+	for name := range definitions {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	seen := make(map[string]bool)
+	result := make(map[string]config.ListenerConfig)
+	for _, name := range names {
+		definition := definitions[name]
+		key := endpointAddress(definition)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result[name] = definition
+	}
+	return result
+}
+
+func (s *Server) validateEndpoint(name string, definition config.ListenerConfig, identityDir string) error {
+	if definition.Network == "tcp" {
+		if _, err := tlsServerConfig(name, definition, identityDir, s.logger); err != nil {
+			return err
+		}
+	}
+	if len(definition.ReplicationRoots) != 0 {
+		if s.replication == nil {
+			return fmt.Errorf("replication backend is required")
+		}
+		if _, err := remoterpc.NewServerForRoots(s.replication, definition.ReplicationRoots, s.zfsPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Reload validates and replaces listener definitions. New addresses are bound
+// before the active set changes. Same-address replacements are fully validated,
+// then rebound with rollback to the previous definition on failure.
+func (s *Server) Reload(cfg config.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return net.ErrClosed
+	}
+	if cfg.Paths.IdentityDir != s.config.Paths.IdentityDir {
+		return fmt.Errorf("identity_dir must remain unchanged during listener reload")
+	}
+	nextDefinitions := normalizedDefinitions(cfg)
+	staged := make(map[string]*serverEndpoint)
+	for name, definition := range nextDefinitions {
+		previous, exists := s.endpoints[name]
+		if exists && endpointUnchanged(previous.definition, definition) {
+			continue
+		}
+		if exists && endpointAddress(previous.definition) == endpointAddress(definition) {
+			if err := s.validateEndpoint(name, definition, cfg.Paths.IdentityDir); err != nil {
+				return fmt.Errorf("listener %s: %w", name, err)
+			}
+			continue
+		}
+		endpoint, err := s.buildEndpoint(name, definition, cfg.Paths.IdentityDir)
+		if err != nil {
+			for _, candidate := range staged {
+				_ = closeEndpoint(candidate)
+			}
+			return fmt.Errorf("listener %s: %w", name, err)
+		}
+		staged[name] = endpoint
+	}
+
+	replaced := make(map[string]*serverEndpoint)
+	for name, definition := range nextDefinitions {
+		previous, exists := s.endpoints[name]
+		if !exists || endpointUnchanged(previous.definition, definition) || endpointAddress(previous.definition) != endpointAddress(definition) {
+			continue
+		}
+		if err := retireEndpoint(previous); err != nil {
+			for _, candidate := range staged {
+				_ = closeEndpoint(candidate)
+			}
+			return fmt.Errorf("stop listener %s: %w", name, err)
+		}
+		endpoint, err := s.buildEndpoint(name, definition, cfg.Paths.IdentityDir)
+		if err != nil {
+			rollback, rollbackErr := s.buildEndpoint(name, previous.definition, s.config.Paths.IdentityDir)
+			if rollbackErr == nil {
+				s.startEndpoint(rollback)
+				s.endpoints[name] = rollback
+			}
+			for replacedName, old := range replaced {
+				_ = closeEndpoint(s.endpoints[replacedName])
+				restored, restoreErr := s.buildEndpoint(replacedName, old.definition, s.config.Paths.IdentityDir)
+				if restoreErr == nil {
+					s.startEndpoint(restored)
+					s.endpoints[replacedName] = restored
+				}
+				rollbackErr = errors.Join(rollbackErr, restoreErr)
+			}
+			for _, candidate := range staged {
+				_ = closeEndpoint(candidate)
+			}
+			s.refreshViewsLocked()
+			return errors.Join(fmt.Errorf("listener %s: %w", name, err), rollbackErr)
+		}
+		replaced[name] = previous
+		s.endpoints[name] = endpoint
+	}
+	for name := range replaced {
+		s.startEndpoint(s.endpoints[name])
+	}
+	for _, endpoint := range staged {
+		s.startEndpoint(endpoint)
+	}
+
+	var retired []*serverEndpoint
+	for name, endpoint := range s.endpoints {
+		definition, exists := nextDefinitions[name]
+		if exists && reflect.DeepEqual(endpoint.definition, definition) {
+			continue
+		}
+		if replacement := staged[name]; replacement != nil {
+			s.endpoints[name] = replacement
+			retired = append(retired, endpoint)
+			continue
+		}
+		if _, wasReplaced := replaced[name]; wasReplaced {
+			continue
+		}
+		if !exists {
+			delete(s.endpoints, name)
+			retired = append(retired, endpoint)
+		}
+	}
+	for name, endpoint := range staged {
+		if _, exists := s.endpoints[name]; !exists {
+			s.endpoints[name] = endpoint
+		}
+	}
+	s.config = cfg.Clone()
+	s.refreshViewsLocked()
+	if len(retired) != 0 {
+		go func(endpoints []*serverEndpoint) {
+			time.Sleep(100 * time.Millisecond)
+			for _, endpoint := range endpoints {
+				if err := retireEndpoint(endpoint); err != nil {
+					s.logger.Error("retire reconfigured control listener", "name", endpoint.name, "error", err)
+				}
+			}
+		}(retired)
+	}
+	return nil
+}
+
+// SetReloadHandler installs the transaction invoked by the Reload RPC.
+func (s *Server) SetReloadHandler(handler func(context.Context) (daemonstate.ReloadResult, error)) {
+	s.reloader.mu.Lock()
+	s.reloader.fn = handler
+	s.reloader.mu.Unlock()
 }
 
 // Close stops all RPCs and removes only sockets created by this server.
@@ -354,31 +644,19 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closeOnce.Do(func() {
-		for _, server := range s.servers {
-			server.Stop()
+		s.mu.Lock()
+		s.closed = true
+		endpoints := make([]*serverEndpoint, 0, len(s.endpoints))
+		for _, endpoint := range s.endpoints {
+			endpoints = append(endpoints, endpoint)
 		}
-		for _, listener := range s.listeners {
-			if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-				s.closeErr = errors.Join(s.closeErr, err)
-			}
+		s.endpoints = make(map[string]*serverEndpoint)
+		s.refreshViewsLocked()
+		s.mu.Unlock()
+		for _, endpoint := range endpoints {
+			s.closeErr = errors.Join(s.closeErr, closeEndpoint(endpoint))
 		}
 		s.wait.Wait()
-		for _, socket := range s.sockets {
-			current, err := identifySocket(socket.path)
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				s.closeErr = errors.Join(s.closeErr, err)
-				continue
-			}
-			if current.device != socket.device || current.inode != socket.inode {
-				continue
-			}
-			if err := os.Remove(socket.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				s.closeErr = errors.Join(s.closeErr, err)
-			}
-		}
 	})
 	return s.closeErr
 }

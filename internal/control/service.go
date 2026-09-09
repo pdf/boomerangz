@@ -3,6 +3,7 @@ package control
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
@@ -20,14 +21,31 @@ type runtime interface {
 	Clean(context.Context, []string, bool, bool, bool, bool) ([]lifecycle.CleanPlan, error)
 }
 
+type reloadHandler struct {
+	mu sync.RWMutex
+	fn func(context.Context) (daemonstate.ReloadResult, error)
+}
+
+func (h *reloadHandler) call(ctx context.Context) (daemonstate.ReloadResult, error) {
+	h.mu.RLock()
+	fn := h.fn
+	h.mu.RUnlock()
+	if fn == nil {
+		return daemonstate.ReloadResult{}, status.Error(codes.Unimplemented, "configuration reload is unavailable")
+	}
+	return fn(ctx)
+}
+
 type service struct {
 	controlrpc.UnimplementedStatusServiceServer
 	controlrpc.UnimplementedControlServiceServer
-	runtime runtime
+	runtime       runtime
+	reloader      *reloadHandler
+	reloadAllowed bool
 }
 
 func toSnapshot(snapshot daemonstate.ControlSnapshot) *controlrpc.StatusSnapshot {
-	result := &controlrpc.StatusSnapshot{Revision: snapshot.Revision, ObservedUnixNano: snapshot.Observed.UnixNano(), Generation: snapshot.Generation}
+	result := &controlrpc.StatusSnapshot{Revision: snapshot.Revision, ObservedUnixNano: snapshot.Observed.UnixNano(), Generation: snapshot.Generation, ConfigGeneration: snapshot.ConfigGeneration}
 	for _, dataset := range snapshot.Datasets {
 		item := &controlrpc.DatasetStatus{Name: dataset.Name, Active: dataset.Active, Recursive: dataset.Recursive}
 		if !dataset.NextSnapshot.IsZero() {
@@ -94,6 +112,20 @@ func (s *service) Trigger(_ context.Context, request *controlrpc.TriggerRequest)
 func (s *service) Reconcile(context.Context, *controlrpc.ReconcileRequest) (*controlrpc.ReconcileResponse, error) {
 	s.runtime.Reconcile()
 	return &controlrpc.ReconcileResponse{Accepted: true}, nil
+}
+
+func (s *service) Reload(ctx context.Context, _ *controlrpc.ReloadRequest) (*controlrpc.ReloadResponse, error) {
+	if !s.reloadAllowed {
+		return nil, status.Error(codes.PermissionDenied, "configuration reload is available only on a local listener")
+	}
+	result, err := s.reloader.call(ctx)
+	if err != nil {
+		if status.Code(err) != codes.Unknown {
+			return nil, err
+		}
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	return &controlrpc.ReloadResponse{Generation: result.Generation, Applied: result.Applied, RestartRequired: result.RestartRequired}, nil
 }
 
 func (s *service) Clean(ctx context.Context, request *controlrpc.CleanRequest) (*controlrpc.CleanResponse, error) {

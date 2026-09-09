@@ -13,16 +13,17 @@ import (
 )
 
 type output struct {
-	Revision   uint64                      `json:"revision"`
-	Observed   time.Time                   `json:"observed"`
-	Generation uint64                      `json:"generation"`
-	Datasets   []*controlrpc.DatasetStatus `json:"datasets"`
-	Queues     []*controlrpc.QueueStatus   `json:"queues"`
-	Jobs       []*controlrpc.JobStatus     `json:"jobs"`
+	Revision         uint64                      `json:"revision"`
+	Observed         time.Time                   `json:"observed"`
+	Generation       uint64                      `json:"generation"`
+	ConfigGeneration uint64                      `json:"config_generation"`
+	Datasets         []*controlrpc.DatasetStatus `json:"datasets"`
+	Queues           []*controlrpc.QueueStatus   `json:"queues"`
+	Jobs             []*controlrpc.JobStatus     `json:"jobs"`
 }
 
 func normalized(snapshot *controlrpc.StatusSnapshot) output {
-	result := output{Revision: snapshot.GetRevision(), Generation: snapshot.GetGeneration(), Datasets: slices.Clone(snapshot.GetDatasets()), Queues: slices.Clone(snapshot.GetQueues()), Jobs: slices.Clone(snapshot.GetJobs())}
+	result := output{Revision: snapshot.GetRevision(), Generation: snapshot.GetGeneration(), ConfigGeneration: snapshot.GetConfigGeneration(), Datasets: slices.Clone(snapshot.GetDatasets()), Queues: slices.Clone(snapshot.GetQueues()), Jobs: slices.Clone(snapshot.GetJobs())}
 	if snapshot.GetObservedUnixNano() != 0 {
 		result.Observed = time.Unix(0, snapshot.GetObservedUnixNano()).UTC()
 	}
@@ -80,7 +81,7 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) 
 	if width <= 0 {
 		width = 80
 	}
-	if _, err := fmt.Fprintf(writer, "boomerangz  generation %d  %s\n", view.Generation, view.Observed.Format(time.RFC3339)); err != nil {
+	if _, err := fmt.Fprintf(writer, "boomerangz  dataset generation %d  config generation %d  %s\n", view.Generation, view.ConfigGeneration, view.Observed.Format(time.RFC3339)); err != nil {
 		return err
 	}
 	if len(view.Datasets) == 0 {

@@ -63,3 +63,39 @@ func TestRunOverrunCoalescesTicks(t *testing.T) {
 		})
 	}
 }
+
+func TestRunReconfigureWakesImmediatelyAndUsesNewInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		scanner, err := New(fixture(), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		started := time.Now()
+		var completed []time.Duration
+		err = scanner.Run(ctx, time.Hour, nil, func(g *Generation, err error) {
+			if err != nil || g == nil {
+				t.Fatalf("scan: %v", err)
+			}
+			completed = append(completed, time.Since(started))
+			switch len(completed) {
+			case 1:
+				if err := scanner.Reconfigure(time.Second, []string{"archive"}); err != nil {
+					t.Fatal(err)
+				}
+			case 3:
+				cancel()
+			}
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+		want := []time.Duration{0, 0, time.Second}
+		for i, got := range completed {
+			if got != want[i] {
+				t.Fatalf("times=%v want=%v", completed, want)
+			}
+		}
+	})
+}
