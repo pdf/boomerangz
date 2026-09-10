@@ -79,7 +79,7 @@ override so future `systemctl reload` operations select it.
 | `reconcile_interval` | `1m` | How often the daemon discovers new or changed dataset policy. This is not the snapshot interval. |
 | `inactive_grace_period` | `24h` | How long an inactive owned dataset remains recoverable before automatic retirement. `0s` disables automatic retirement. |
 | `management_workers` | `0` | Concurrent short management tasks. Zero uses the logical CPU count available to the process. |
-| `local_transfer_workers` | `2` | Concurrent transfers between datasets on this host. |
+| `local_transfer_workers` | `2` | Concurrent transfers between non-overlapping mapped destination datasets on this host. Initial receive hierarchy setup may serialize transfers. |
 | `remote_transfer_workers` | `1` | Concurrent network transfers across all remote destinations. |
 
 Worker counts limit concurrency, not bandwidth. Increase them only after

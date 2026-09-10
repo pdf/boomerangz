@@ -49,6 +49,30 @@ func TestBlockedOrCancelledOutcome(t *testing.T) {
 	}
 }
 
+func TestNearestReceiveLockScope(t *testing.T) {
+	t.Parallel()
+	inventory := []zfs.Dataset{
+		{Name: "backup/root", Type: zfs.Filesystem},
+		{Name: "backup/root/data", Type: zfs.Filesystem},
+		{Name: "backup/root/data/existing", Type: zfs.Filesystem},
+	}
+	for _, test := range []struct {
+		mapped string
+		want   string
+	}{
+		{mapped: "backup/root/data/existing", want: "backup/root/data/existing"},
+		{mapped: "backup/root/data/new", want: "backup/root/data"},
+		{mapped: "backup/root/other/new", want: "backup/root"},
+	} {
+		if got := nearestReceiveLockScope("backup/root", test.mapped, inventory); got != test.want {
+			t.Errorf("nearestReceiveLockScope(%q) = %q, want %q", test.mapped, got, test.want)
+		}
+	}
+	if got := nearestReceiveLockScope("missing/root", "missing/root/data", inventory); got != "" {
+		t.Fatalf("missing receive root lock scope = %q, want exclusive target lock", got)
+	}
+}
+
 type runtimeBackend struct {
 	scanned  chan struct{}
 	state    zfs.State

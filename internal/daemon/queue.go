@@ -17,13 +17,15 @@ type Outcome struct {
 }
 
 // Job is typed daemon work. ID deduplicates equivalent queued work, Group is
-// the fairness key, Scope is removed on deactivation, and LockKey serializes
-// operations that must never overlap.
+// the fairness key, Scope is removed on deactivation, LockKey identifies the
+// shared resource, and an optional LockScope permits non-overlapping hierarchy
+// members to run concurrently.
 type Job struct {
 	ID         string
 	Group      string
 	Scope      string
 	LockKey    string
+	LockScope  string
 	StartState string
 	Run        func(context.Context) Outcome
 	After      func(Outcome)

@@ -15,7 +15,7 @@ previous value until the daemon restarts.
 | `reconcile_interval` | `"1m"` | Positive duration. |
 | `inactive_grace_period` | `"24h"` | Non-negative duration; `"0s"` disables automatic retirement. |
 | `management_workers` | `0` | Non-negative integer; zero selects automatic sizing. |
-| `local_transfer_workers` | `2` | Integer of at least one. |
+| `local_transfer_workers` | `2` | Integer of at least one; concurrency applies to non-overlapping mapped destination datasets. |
 | `remote_transfer_workers` | `1` | Integer of at least one. |
 
 ## `[paths]`
