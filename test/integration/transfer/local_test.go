@@ -141,6 +141,58 @@ func TestGuestLocalTransfer(t *testing.T) {
 		}
 		t.Logf("full bootstrap verified: %s, %d bytes", root, bytes)
 	}
+	// incremental=all must retain its verified snapshot base across pruning,
+	// then rotate that protection only after a newer receive is verified.
+	retentionSource := sourcePool + "/data/retention-" + suffix
+	retentionDestination := destinationPool + "/data/retention-" + suffix
+	command("create", "-u", retentionSource)
+	command("set", policy.Namespace+"enabled=on", policy.Namespace+"local="+retentionDestination, policy.Namespace+"policy=1x5m", retentionSource)
+	retentionRequest := func() transfer.Request {
+		t.Helper()
+		rows, err := direct.GetStoredProperties(t.Context(), []string{retentionSource})
+		if err != nil {
+			t.Fatal(err)
+		}
+		effective := policy.Resolve(zfs.Dataset{Name: retentionSource, Type: zfs.Filesystem, EncryptionRoot: "-"}, nil, rows, nil)
+		return transfer.Request{Source: retentionSource, DestinationRoot: retentionDestination, Policy: effective}
+	}
+	retentionPolicy := retentionRequest().Policy
+	retentionBase, err := snapshots.CreateSnapshot(t.Context(), retentionSource, false, now.Add(-time.Hour), retentionPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retentionResult, err := engine.Apply(t.Context(), retentionRequest(), nil)
+	if err != nil || !retentionResult.Verified || retentionResult.Plan.Mode != "full" {
+		t.Fatalf("retention bootstrap=%+v err=%v", retentionResult, err)
+	}
+	retentionNext, err := snapshots.CreateSnapshot(t.Context(), retentionSource, false, now, retentionPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshots.Prune(t.Context(), retentionSource, retentionPolicy, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.CommandContext(t.Context(), "zfs", "list", "-H", "-t", "snapshot", retentionSource+"@"+retentionBase.Name()).Run(); err != nil {
+		t.Fatal("pruning removed the retained incremental-all base")
+	}
+	retentionResult, err = engine.Apply(t.Context(), retentionRequest(), nil)
+	if err != nil || !retentionResult.Verified || retentionResult.Plan.Mode != "incremental-all" {
+		t.Fatalf("retained-base incremental=%+v err=%v", retentionResult, err)
+	}
+	retentionState, err := direct.InspectState(t.Context(), retentionSource, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retentionState.Holds[retentionSource+"@"+retentionBase.Name()]) != 0 || len(retentionState.Holds[retentionSource+"@"+retentionNext.Name()]) == 0 {
+		t.Fatalf("incremental-all hold did not rotate: %v", retentionState.Holds)
+	}
+	if _, err := snapshots.Prune(t.Context(), retentionSource, retentionPolicy, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.CommandContext(t.Context(), "zfs", "list", "-H", "-t", "snapshot", retentionSource+"@"+retentionBase.Name()).Run(); err == nil {
+		t.Fatal("retired incremental-all base remained protected from pruning")
+	}
+	t.Log("incremental-all base retention and rotation verified across pruning")
 	middle, err := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-3*time.Hour), request(latest, "").Policy)
 	if err != nil {
 		t.Fatal(err)
@@ -183,11 +235,17 @@ func TestGuestLocalTransfer(t *testing.T) {
 		t.Fatal("receive override missing")
 	}
 	t.Logf("-i/-I, foreign intermediate, namespace isolation and receive override verified; middle=%s", middle.Name())
-	// A source bookmark must remain usable after its protected snapshot is pruned.
-	if err := direct.DestroySnapshot(t.Context(), source+"@"+last.Name()); err != nil {
+	// Advance the incremental-all target so it no longer protects last. The
+	// latest-only target must then remain able to use its bookmark after that
+	// source snapshot is pruned.
+	if _, err := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-time.Hour), request(all, "").Policy); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-time.Hour), request(latest, "").Policy); err != nil {
+	result, err = engine.Apply(t.Context(), request(all, ""), nil)
+	if err != nil || !result.Verified || result.Plan.Mode != "incremental-all" {
+		t.Fatalf("all base rotation=%+v err=%v", result, err)
+	}
+	if err := direct.DestroySnapshot(t.Context(), source+"@"+last.Name()); err != nil {
 		t.Fatal(err)
 	}
 	command("set", policy.Namespace+"incremental=latest", policy.Namespace+"props=off", source)
@@ -400,8 +458,8 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sourceState.Holds) != 0 {
-		t.Fatalf("successful recovery retained source holds: %v", sourceState.Holds)
+	if len(sourceState.Holds) != 1 || len(sourceState.Holds[recovered.Plan.Snapshot]) == 0 {
+		t.Fatalf("successful recovery did not retain its incremental-all base: %v", sourceState.Holds)
 	}
 	t.Logf("interrupted receive resumed from durable state on %s", destination)
 }

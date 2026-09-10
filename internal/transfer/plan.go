@@ -59,6 +59,10 @@ func canonicalTarget(request Request) string {
 	return request.CanonicalTarget
 }
 
+func canResumeFromBookmark(effective policy.Effective) bool {
+	return effective.Incremental == "latest" && !effective.Send.Replicate
+}
+
 // Expected records the exact received snapshot and source GUID to verify.
 type Expected struct {
 	Source      string              `json:"source"`
@@ -404,7 +408,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 				break
 			}
 		}
-		if plan.Base == "" && p.Incremental == "latest" && !p.Send.Replicate {
+		if plan.Base == "" && canResumeFromBookmark(p) {
 			refs, err := lifecycle.References(view.Source, request.Source, lineage)
 			if err != nil {
 				return plan, err

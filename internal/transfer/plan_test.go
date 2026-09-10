@@ -302,6 +302,11 @@ func TestBookmarkBaseRequiresRecordedTargetProof(t *testing.T) {
 	if _, err := Build(request, view, fixtureInstallation); err == nil {
 		t.Fatal("used bookmark for -I")
 	}
+	request.Policy.Incremental = "latest"
+	request.Policy.Send.Replicate = true
+	if _, err := Build(request, view, fixtureInstallation); err == nil {
+		t.Fatal("used bookmark for recursive replication")
+	}
 }
 
 func TestBuildRecursiveEndpointsAndNamespaceExclusions(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
@@ -219,6 +220,7 @@ func (s localTestStream) Run(_ context.Context, send zfs.SendOptions, receive zf
 func TestApplyResumesHeldReceiveAfterRestart(t *testing.T) {
 	t.Parallel()
 	backend, request := newLocalBackend(t)
+	request.Policy.Incremental = "latest"
 	failed, err := NewLocal(backend, localTestStream{backend: backend, fail: true}, fixtureInstallation)
 	if err != nil {
 		t.Fatal(err)
@@ -485,6 +487,7 @@ func TestInspectTargetRetainsVerifiedBootstrapAnchor(t *testing.T) {
 func TestApplyPromotesBindingAfterGUIDVerification(t *testing.T) {
 	t.Parallel()
 	backend, request := newLocalBackend(t)
+	request.Policy.Incremental = "latest"
 	engine, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
 	if err != nil {
 		t.Fatal(err)
@@ -498,6 +501,47 @@ func TestApplyPromotesBindingAfterGUIDVerification(t *testing.T) {
 	}
 	if len(backend.source.Holds[result.Plan.Snapshot]) != 0 {
 		t.Fatal("verified transfer retained endpoint hold")
+	}
+}
+
+func TestApplyRotatesProtectedIncrementalAllBase(t *testing.T) {
+	t.Parallel()
+	backend, request := newLocalBackend(t)
+	engine, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := engine.Apply(t.Context(), request, nil)
+	if err != nil || !first.Verified || first.Plan.Mode != "full" {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	if len(backend.source.Holds[first.Plan.Snapshot]) != 1 {
+		t.Fatalf("verified incremental-all base was not retained: %v", backend.source.Holds)
+	}
+
+	metadata, err := lifecycle.NewMetadata(fixtureLineage, time.Date(2026, 9, 6, 12, 10, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := request.Source + "@" + metadata.Name()
+	backend.source.Objects = append(backend.source.Objects, zfs.Object{Name: next, Type: "snapshot", GUID: 110, CreateTXG: 10})
+	for key, value := range metadata.Properties() {
+		backend.source.Properties = append(backend.source.Properties, zfs.Property{Dataset: next, Name: key, Value: value, Source: zfs.SourceLocal})
+	}
+	second, err := engine.Apply(t.Context(), request, nil)
+	if err != nil || !second.Verified || second.Plan.Mode != "incremental-all" {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+	if len(backend.source.Holds[first.Plan.Snapshot]) != 0 || len(backend.source.Holds[next]) != 1 {
+		t.Fatalf("incremental-all base hold was not rotated: %v", backend.source.Holds)
+	}
+	state, err := backend.InspectState(t.Context(), request.Source, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	references, err := lifecycle.References(state, request.Source, fixtureLineage)
+	if err != nil || len(references) != 1 || references[0].SnapshotName(request.Source) != next {
+		t.Fatalf("references=%+v err=%v", references, err)
 	}
 }
 

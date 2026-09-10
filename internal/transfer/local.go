@@ -568,8 +568,14 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 	if err := l.lifecycle.CheckpointSet(ctx, request.Source, ref, verifiedGUIDs); err != nil {
 		return result, err
 	}
-	if err := l.lifecycle.ReleaseCompletedHold(ctx, request.Source, ref); err != nil {
-		return result, err
+	// An intermediary send requires its base to remain a snapshot. Keep the
+	// latest verified endpoint protected until a newer transfer succeeds;
+	// ReleaseReference below then retires the previous endpoint. Latest-only
+	// sends can recover from the verified bookmark and do not need this hold.
+	if canResumeFromBookmark(request.Policy) {
+		if err := l.lifecycle.ReleaseCompletedHold(ctx, request.Source, ref); err != nil {
+			return result, err
+		}
 	}
 	current, err := l.backend.InspectState(ctx, request.Source, true)
 	if err != nil {
