@@ -13,10 +13,18 @@ repo is held to - `go test`, a `CGO_ENABLED=1 -race` build, `go vet`,
 and `shellcheck`. A bare `go test ./...` is a narrower bar; do not report
 work as verified against it.
 
-Integration tests under `test/integration/` need the `integration` build tag,
-a real ZFS pool, and a disposable QEMU guest. They are never part of
-`go test ./...`. Use `make integration-test-compile` to check they still
-build without running them.
+Integration tests under `test/integration/` carry the `integration` build tag
+and are never part of `go test ./...`. Run them with `make integration-test`,
+which builds a disposable QEMU guest, creates real pools inside it, and
+destroys them on the way out - it needs QEMU and `/dev/kvm`, but not root on
+the host and not a pool on the host. `make integration-package-test` and
+`make integration-benchmark` drive the same harness in their other modes.
+
+Run the suite for any change under `test/integration/`, and for changes to
+replication, transfer, or lifecycle behavior that a real kernel module would
+exercise. It takes a guest boot per run, so `make integration-test-compile`
+is the quick check that they still build - it is a compile gate, not
+verification, and work is not verified against it.
 
 Generated protobuf `.pb.go` files are committed. Regenerate with
 `go tool buf generate` (covered by `make test`'s diff-check) rather than
