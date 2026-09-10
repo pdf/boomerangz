@@ -6,6 +6,7 @@ on:
       - 'v*'
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -13,22 +14,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: 1.26.8
-          cache: true
-      - run: go test ./...
-      - run: go vet ./...
-      - run: go tool buf lint
-      - run: go tool buf generate
-      - run: git diff --exit-code
+  quality:
+    uses: ./.github/workflows/require-quality.yml
+    with:
+      sha: ${{ github.sha }}
 
   draft:
-    needs: verify
+    needs: quality
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -96,10 +88,10 @@ jobs:
             qemu-system-x86 \
             qemu-utils
           sudo chmod 0666 /dev/kvm
-      - name: Validate release packages in the supported guest matrix
+      - name: Validate release packages in the supported guest
         env:
           BOOMERANGZ_RELEASE_DIR: ${{ github.workspace }}/dist
-        run: make integration-test INTEGRATION_TARGET=cachyos
+        run: make integration-package-test INTEGRATION_TARGET=cachyos
       - name: Publish diagnostics
         if: always()
         uses: actions/upload-artifact@v7

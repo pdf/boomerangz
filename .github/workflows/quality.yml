@@ -1,0 +1,108 @@
+name: Quality
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Host validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.8
+          cache: true
+      - name: Install shell workflow linter
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck
+      - run: make test
+      - run: git diff --exit-code
+
+  integration:
+    name: ${{ matrix.target }} / OpenZFS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - cachyos
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.8
+          cache: true
+      - name: Install host virtualization tools
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            cloud-image-utils \
+            openssh-client \
+            qemu-system-x86 \
+            qemu-utils
+          sudo chmod 0666 /dev/kvm
+      - name: Run guarded integration suite
+        run: make integration-test INTEGRATION_TARGET=${{ matrix.target }}
+      - name: Publish diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/boomerangz-integration/*/diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+
+  documentation:
+    name: Documentation build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - run: npm ci
+        working-directory: docs
+      - run: npm run build
+        working-directory: docs
+
+  gate:
+    name: Quality gate
+    if: always()
+    needs:
+      - test
+      - integration
+      - documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every quality job to pass
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          DOCUMENTATION_RESULT: ${{ needs.documentation.result }}
+        run: |
+          failures=0
+          for result in "$TEST_RESULT" "$INTEGRATION_RESULT" "$DOCUMENTATION_RESULT"; do
+            if [[ $result != success ]]; then
+              failures=1
+            fi
+          done
+          exit "$failures"

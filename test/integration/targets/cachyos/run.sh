@@ -17,6 +17,10 @@ if [[ -d $artifact_dir/release ]]; then
 	"$artifact_dir/target/package.sh" "$artifact_dir/release" "$run_id" "$source_device" "$destination_device"
 fi
 
+if [[ ${BOOMERANGZ_INTEGRATION_MODE:-test} == package ]]; then
+	exit 0
+fi
+
 # Direct SSH intentionally uses a distinct, non-administrative login account.
 # Its shell is needed only to execute the bounded ZFS commands sent by the
 # fallback transport; the key itself disables forwarding, PTY allocation, and

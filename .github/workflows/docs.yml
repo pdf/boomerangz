@@ -1,4 +1,4 @@
-name: Documentation
+name: Documentation publication
 
 on:
   push:
@@ -6,126 +6,63 @@ on:
       - main
     tags:
       - 'v*.*.*'
+    # GitHub does not evaluate path filters for tag pushes, so every matching
+    # release tag is published even when its commit contains no docs changes.
     paths:
       - 'docs/**'
-      - '.github/workflows/docs.yml'
-  pull_request:
-    paths:
-      - 'docs/**'
+      - '.github/scripts/publish-docs.sh'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  actions: read
+  contents: write
 
 concurrency:
-  group: pages
+  group: documentation-publication
   cancel-in-progress: false
 
 jobs:
-  check:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: docs/package-lock.json
-      - run: npm ci
-        working-directory: docs
-      - run: npm run build
-        working-directory: docs
+  quality:
+    uses: ./.github/workflows/require-quality.yml
+    with:
+      sha: ${{ github.sha }}
 
-  build:
-    if: github.event_name != 'pull_request'
+  publish:
+    name: Publish documentation tree
+    needs: quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
           fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: docs/package-lock.json
-      - name: Find released documentation versions
+      - name: Prepare durable documentation branch
         shell: bash
         run: |
-          versions="$(git tag --list --sort=-version:refname | jq -R -s -c 'split("\n") | map(select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))')"
-          echo "DOCS_VERSIONS=${versions}" >> "$GITHUB_ENV"
-          echo "LATEST_DOCS_VERSION=$(jq -r '.[0] // empty' <<< "${versions}")" >> "$GITHUB_ENV"
-      - name: Build default documentation
-        shell: bash
-        run: |
-          if [[ -z "${LATEST_DOCS_VERSION}" ]]; then
-            (
-              cd docs
-              npm ci
-              DOCS_VERSION=Development \
-                DOCS_REF=main \
-                DOCS_BASE=/ \
-                DOCS_VERSIONS="${DOCS_VERSIONS}" \
-                npm run build -- --outDir ../site
-            )
-          else
-            worktree="${RUNNER_TEMP}/boomerangz-docs-default"
-            git worktree add --detach "${worktree}" "${LATEST_DOCS_VERSION}"
-            (
-              cd "${worktree}/docs"
-              npm ci
-              DOCS_VERSION="${LATEST_DOCS_VERSION}" \
-                DOCS_REF="${LATEST_DOCS_VERSION}" \
-                DOCS_BASE=/ \
-                DOCS_CANONICAL_BASE="/${LATEST_DOCS_VERSION}/" \
-                DOCS_VERSIONS="${DOCS_VERSIONS}" \
-                npm run build -- --outDir "${GITHUB_WORKSPACE}/site"
-            )
-          fi
-      - name: Build development documentation
-        if: env.LATEST_DOCS_VERSION != ''
-        working-directory: docs
+          published_dir="${RUNNER_TEMP}/boomerangz-docs-published"
+          git fetch origin gh-pages:refs/remotes/origin/gh-pages
+          git worktree add -B gh-pages "$published_dir" origin/gh-pages
+          echo "PUBLISHED_DIR=$published_dir" >> "$GITHUB_ENV"
+      - name: Build changed and missing documentation
         env:
-          DOCS_VERSION: Development
-          DOCS_REF: main
-          DOCS_BASE: /development/
-        run: |
-          npm ci
-          npm run build -- --outDir ../site/development
-      - name: Build released documentation
+          DOCS_EVENT: ${{ github.ref_type }}
+          DOCS_REF_NAME: ${{ github.ref_name }}
+        run: bash .github/scripts/publish-docs.sh "$PWD" "$PUBLISHED_DIR"
+      - name: Commit durable documentation
         shell: bash
         run: |
-          while IFS= read -r version; do
-            worktree="${RUNNER_TEMP}/boomerangz-docs-${version}"
-            git worktree add --detach "${worktree}" "${version}"
-            (
-              cd "${worktree}/docs"
-              npm ci
-              DOCS_VERSION="${version}" \
-                DOCS_REF="${version}" \
-                DOCS_BASE="/${version}/" \
-                DOCS_VERSIONS="${DOCS_VERSIONS}" \
-                npm run build -- --outDir "${GITHUB_WORKSPACE}/site/${version}"
-            )
-          done < <(jq -r '.[]' <<< "${DOCS_VERSIONS}")
-      - uses: actions/configure-pages@v6
-      - uses: actions/upload-pages-artifact@v5
-        with:
-          path: site
-
-  deploy:
-    if: github.event_name != 'pull_request'
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    permissions:
-      pages: write
-      id-token: write
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
+          touch "$PUBLISHED_DIR/.nojekyll"
+          git -C "$PUBLISHED_DIR" config user.name github-actions
+          git -C "$PUBLISHED_DIR" config user.email github-actions@github.com
+          git -C "$PUBLISHED_DIR" add --all
+          if git -C "$PUBLISHED_DIR" diff --cached --quiet; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git -C "$PUBLISHED_DIR" commit -m "docs: publish $GITHUB_REF_NAME"
+          git -C "$PUBLISHED_DIR" push origin HEAD:gh-pages
