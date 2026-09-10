@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: proposed. No code changes yet.
+Status: in progress. Chunk 0 has landed; chunks 1-3 and A-F are outstanding.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -151,7 +151,7 @@ decision is a valid outcome for a chunk.
 
 Each chunk is one sitting and lands independently. Chunks 0-3 first.
 
-### Chunk 0 - make the runner honest
+### Chunk 0 - make the runner honest (done)
 
 - Replace the `-test.run '^TestGuest(A|B)$'` allowlists in
   `guest/run-common.sh` with package-wide runs, keeping the existing
@@ -168,6 +168,39 @@ Each chunk is one sitting and lands independently. Chunks 0-3 first.
 
 Done when: a test added to any integration package runs without editing a
 runner script, and deliberately breaking one causes a red run.
+
+**How it landed.** Every stage is now `run_stage <name> <min-passes> ENV=...
+<binary>`, with no `-test.run`; the environment guards are the only opt-in.
+The benchmark stage keeps its `-test.run '^$'` because it is deliberately
+excluding tests rather than selecting them. `run_stage` fails when a stage
+reports fewer top-level `--- PASS:` lines than its floor, and prints the
+stage's `--- SKIP:` lines when it does, so a test that goes dormant is named
+rather than merely missed. The floors are lower bounds, so adding a test is
+still a one-line change; only removing or silently skipping one is loud.
+
+The outage is injected as a second `sshd` on port 2222 that does not exist
+until the handshake fires. The daemon's remote is configured against that
+port, so its first attempts get a connection refusal - a real transport
+failure, not a stubbed one - and `restore_outage_link` starts the listener
+when `stage_filter` sees `BOOMERANGZ_REMOTE_OUTAGE_OBSERVED` on the stage's
+stdout. The link therefore starts down and comes up, rather than being severed
+and restored; the test asserts the same thing either way, and this needs no
+firewall manipulation or extra package in the guest. Stage output is streamed
+through `stage_filter` rather than buffered, because the test is still blocked
+waiting for the link when the handshake line is read.
+
+Two consequences worth knowing before the next chunk. The `known_hosts` entry
+for `[127.0.0.1]:2222` is seeded from a keyscan of port 22 (same host key)
+*after* the remote transfer stage, because `TestGuestSSHTransfer` overwrites
+`known_hosts` with the port 22 entry alone - that is an instance of the
+fixture coupling chunk 1 exists to remove, and the seeding should move into
+the test once it does. And the outage remote's root is spelled
+`boomerangz-test-<run-id>-dst/data/outage`, recomputed in the runner from the
+run ID rather than read back from `bootstrap.sh`.
+
+Not yet verified against a real guest: this landed on `make test` (shellcheck
+plus `make integration-test-compile`) only. The first QEMU run on this branch
+is what confirms the handshake timing and the pass floors.
 
 ### Chunk 1 - fixture isolation
 
