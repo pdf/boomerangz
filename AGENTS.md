@@ -189,6 +189,85 @@ consistency, mount behavior, or path remapping) enforced redundantly across
 these properties should carry the corresponding check into all three layers,
 not just the one that happens to be edited first.
 
+## `org.boomerangz:state:*` properties (`internal/lifecycle`, `internal/transfer/binding.go`)
+
+`org.boomerangz:state:*` is a separate namespace from the public policy
+properties above (`policy.StateNamespace`, [internal/policy/resolve.go:16](internal/policy/resolve.go#L16)).
+`policy.IsPublic` explicitly excludes it, so none of these keys ever
+participate in effective policy, are ever received-side authoritative, or
+are ever exposed to `set_prop`/`ignore_prop`. They exist purely as
+ZFS-native recovery/ownership state - there is no separate database.
+
+| Property | Set by | Purpose |
+| --- | --- | --- |
+| `state:owner` | `lifecycle.RootAuthority` callers (adoption, first management) | Installation UUID that owns a source root ([internal/lifecycle/authority.go](internal/lifecycle/authority.go), `OwnerProperty`). |
+| `state:lineage` | Same as above | Per-root lineage UUID, shared by the root's owned snapshots ([internal/lifecycle/ownership.go](internal/lifecycle/ownership.go), `LineageProperty`). |
+| `state:snapshot` | `lifecycle.Metadata.Properties()` at snapshot creation | Per-snapshot UUID embedded on the snapshot itself, not the dataset. |
+| `state:created` | Same as above | RFC3339Nano creation timestamp, also embedded per snapshot. |
+| `state:reference:<target-id>:<snapshot-uuid>` | `Service.ProtectSet` | JSON `Reference` proof binding a hold/bookmark pair to a proven source snapshot for one replication target ([internal/lifecycle/reference.go](internal/lifecycle/reference.go)). |
+| `state:target:<target-id>` | `transfer` binding logic | JSON `TargetBinding` recording a source's persistent identity for one configured destination ([internal/transfer/binding.go](internal/transfer/binding.go)). |
+| `state:target:<target-id>:suspended` | `transfer.SetTargetSuspended` | Marks a target unverified/suspended pending adoption revalidation. |
+| `state:inactive` | `Service.ReconcileInactive` | JSON `InactiveMarker` recording when an owned root first went inactive, for delayed retirement ([internal/lifecycle/inactive.go](internal/lifecycle/inactive.go)). |
+
+Cross-cutting rules that hold across all of these:
+
+- **Ownership (`state:owner`, `state:lineage`) is the authority anchor.**
+  `RootAuthority` (authority.go:32-61) requires both keys to be present,
+  unambiguous, and `Source == local` on the *exact* root; a received or
+  inherited copy is provenance only, never authority. A locally set owner
+  that doesn't match the running installation's UUID is reported as a
+  "dormant foreign lineage" and the daemon performs no snapshot creation,
+  pruning, transfer, or recovery-state mutation for that root - this is how
+  a moved pool (same properties, different host) fails closed instead of
+  auto-adopting.
+- **Per-snapshot metadata (`state:lineage`, `state:snapshot`, `state:created`)
+  proves ownership of one exact snapshot**, independent of the root
+  markers. `Ownership` (ownership.go:74-109) requires all three to be
+  explicitly stored *on the snapshot object itself* (`local` or `received`
+  source - a received snapshot's own metadata is trusted once its parent
+  root's authority checks out), matching lineage, and requires the snapshot
+  name to be the exact deterministic encoding of that metadata
+  (`Metadata.Name()`). A `boomerangz-`-prefixed name alone proves nothing;
+  names and metadata must agree, or the snapshot is treated as foreign.
+- **Reference proofs (`state:reference:*`) gate hold/bookmark lifecycle,
+  not the transfer itself.** `Protect`/`ProtectSet` write the JSON proof
+  *before* placing the corresponding hold (reference.go:125-243), so an
+  interruption between the two leaves a reconstructable, idempotent retry
+  rather than an orphaned hold. `Checkpoint`/`CheckpointSet` only advance a
+  bookmark after the caller supplies a verified destination GUID
+  (reference.go:249-324) - the property never claims verification the
+  daemon hasn't itself confirmed via a completed receive.
+  `ReleaseReference` (reference.go:328-402) is the only path that removes a
+  reference proof, and only after re-confirming the hold/bookmark GUIDs
+  still match; it inherits (clears) the property last, after the ZFS-side
+  hold and bookmark are already gone.
+- **Target bindings (`state:target:*`) pin a source to a specific physical
+  destination, not just a name.** `TargetBinding` records pool GUID, anchor
+  dataset GUID, and relative path (binding.go:23-34); every planned transfer
+  re-resolves and compares against the stored value
+  (`transfer.plan.Build`, plan.go:269-297), and a same-named destination
+  with a different GUID is blocked rather than silently treated as the same
+  target - the operator must explicitly reseed or adopt instead.
+- **All of these reject a "hidden received" value that disagrees with the
+  local one** (`state.Received[dataset][key]` checks in authority.go:55-59,
+  reference.go, inactive.go:94-97, binding.go:191-194, 253-255) - a
+  conflicting received copy of internal state forces an error demanding
+  explicit resolution rather than picking one value silently.
+- **Discovery reads only a narrow, fixed slice of this namespace globally.**
+  `GetLifecycleProperties` ([internal/zfs/direct.go:186-197](internal/zfs/direct.go#L186-L197))
+  fetches only `state:owner`, `state:lineage`, and `state:inactive` across
+  every dataset at startup, to reconstruct responsibility without
+  enumerating arbitrary user properties; reference and target-binding keys
+  are dynamic (per target/snapshot) and are only read per-dataset via
+  `GetStoredProperties`'s `all`-property query when a specific dataset is
+  already in scope for other reasons.
+- **Clean and retirement inherit (never destroy) these properties as the
+  final step**, after the underlying holds/bookmarks/snapshots they
+  describe have already been resolved (`backend.InheritProperty` in
+  clean.go:336, inactive.go:207) - the property is a proof *about* ZFS
+  state, so it is only cleared once nothing depends on being able to
+  reconstruct that proof again.
+
 ## Scheduler behavior (`internal/daemon/scheduler.go`)
 
 `Scheduler` tracks one `deadline{policy, cadence, next, pending}` per
