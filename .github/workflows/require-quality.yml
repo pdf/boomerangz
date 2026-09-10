@@ -1,0 +1,28 @@
+name: Require quality
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: Commit that must have passed Quality on main
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  verify:
+    name: Verify quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Require a tested commit on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALITY_SHA: ${{ inputs.sha }}
+        run: bash .github/scripts/require-quality.sh

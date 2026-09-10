@@ -15,7 +15,7 @@ readonly integration_mode=${BOOMERANGZ_INTEGRATION_MODE:-test}
 	printf 'boomerangz integration: invalid target %q\n' "$target" >&2
 	exit 1
 }
-[[ $integration_mode == test || $integration_mode == benchmark ]] || {
+[[ $integration_mode == test || $integration_mode == package || $integration_mode == benchmark ]] || {
 	printf 'boomerangz integration: invalid mode %q\n' "$integration_mode" >&2
 	exit 1
 }
@@ -177,6 +177,9 @@ done
 if [[ -n $release_dir ]]; then
 	[[ $release_dir == /* && -d $release_dir ]] || fail "BOOMERANGZ_RELEASE_DIR must be an absolute directory"
 fi
+if [[ $integration_mode == package && -z $release_dir ]]; then
+	fail 'package mode requires BOOMERANGZ_RELEASE_DIR'
+fi
 [[ $ssh_port =~ ^[0-9]+$ ]] || fail "invalid SSH port"
 [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]] || fail "/dev/kvm is not usable"
 for tool in curl qemu-img "$target_qemu_binary" scp ssh ssh-keygen; do
@@ -212,20 +215,24 @@ ssh_guest 'uname -a; cat /etc/os-release; lsblk -o NAME,SIZE,TYPE,SERIAL' >"$dia
 
 (
 	cd "$repository"
-	CGO_ENABLED=0 go build -trimpath -o "$artifacts/boomerangz" ./cmd/boomerangz
-	CGO_ENABLED=0 go test -tags=integration -c -o "$artifacts/lifecycle.test" ./test/integration/lifecycle
-	CGO_ENABLED=0 go test -tags=integration -c -o "$artifacts/transfer.test" ./test/integration/transfer
-	CGO_ENABLED=0 go test -tags=integration -c -o "$artifacts/daemon.test" ./test/integration/daemon
-	CGO_ENABLED=0 go test -tags=integration -c -o "$artifacts/control.test" ./test/integration/control
+	if [[ $integration_mode != package ]]; then
+		CGO_ENABLED=0 go build -trimpath -o "$artifacts/boomerangz" ./cmd/boomerangz
+		CGO_ENABLED=0 go test -tags=integration -c -o "$artifacts/lifecycle.test" ./test/integration/lifecycle
+		CGO_ENABLED=0 go test -tags=integration -c -o "$artifacts/transfer.test" ./test/integration/transfer
+		CGO_ENABLED=0 go test -tags=integration -c -o "$artifacts/daemon.test" ./test/integration/daemon
+		CGO_ENABLED=0 go test -tags=integration -c -o "$artifacts/control.test" ./test/integration/control
+	fi
 )
-cp "$repository/test/integration/guest/bootstrap.sh" "$artifacts/"
-cp "$repository/test/integration/guest/delegated-matrix.sh" "$artifacts/"
-cp "$repository/test/integration/guest/property-layers.sh" "$artifacts/"
-cp "$repository/test/integration/guest/run-common.sh" "$artifacts/"
-cp "$repository/contrib/systemd/boomerangz.service" "$artifacts/"
-cp "$repository/contrib/boomerangz-shell" "$artifacts/"
-cp "$repository/contrib/sysusers.d/boomerangz.conf" "$artifacts/boomerangz.sysusers"
-cp "$repository/contrib/tmpfiles.d/boomerangz.conf" "$artifacts/boomerangz.tmpfiles"
+if [[ $integration_mode != package ]]; then
+	cp "$repository/test/integration/guest/bootstrap.sh" "$artifacts/"
+	cp "$repository/test/integration/guest/delegated-matrix.sh" "$artifacts/"
+	cp "$repository/test/integration/guest/property-layers.sh" "$artifacts/"
+	cp "$repository/test/integration/guest/run-common.sh" "$artifacts/"
+	cp "$repository/contrib/systemd/boomerangz.service" "$artifacts/"
+	cp "$repository/contrib/boomerangz-shell" "$artifacts/"
+	cp "$repository/contrib/sysusers.d/boomerangz.conf" "$artifacts/boomerangz.sysusers"
+	cp "$repository/contrib/tmpfiles.d/boomerangz.conf" "$artifacts/boomerangz.tmpfiles"
+fi
 if [[ -n $release_dir ]]; then
 	mkdir -p "$artifacts/target"
 	cp "$target_dir/package.sh" "$artifacts/target/package.sh"

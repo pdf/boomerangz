@@ -5,18 +5,10 @@ const docsRef = process.env.DOCS_REF || 'main'
 const docsBase = process.env.DOCS_BASE || '/'
 const canonicalBase = process.env.DOCS_CANONICAL_BASE || docsBase
 const siteOrigin = 'https://boomerangz.org'
-const releaseVersions: string[] = JSON.parse(process.env.DOCS_VERSIONS || '[]')
-const versionItems = [
-  { text: 'Development', link: 'https://boomerangz.org/', target: '_self' },
-  ...releaseVersions.map((version) => ({
-    text: version,
-    link: `https://boomerangz.org/${version}/`,
-    target: '_self'
-  }))
-]
 
 export default defineConfig({
   base: docsBase,
+  cleanUrls: true,
   lang: 'en-US',
   title: 'boomerangz',
   description: 'A ZFS snapshot/replication manager to help make sure your data comes back to you.',
@@ -35,7 +27,7 @@ export default defineConfig({
   transformHead({ pageData }) {
     const pagePath = pageData.relativePath
       .replace(/(^|\/)index\.md$/, '$1')
-      .replace(/\.md$/, '.html')
+      .replace(/\.md$/, '')
     const canonical = `${siteOrigin}${canonicalBase}${pagePath}`
     return [
       ['link', { rel: 'canonical', href: canonical }],
@@ -56,7 +48,7 @@ export default defineConfig({
       { text: 'Guide', link: '/getting-started/' },
       { text: 'Reference', link: '/reference/cli' },
       { text: 'About', link: '/about' },
-      { text: docsVersion, items: versionItems }
+      { component: 'VersionSelector', props: { current: docsVersion } }
     ],
     sidebar: [
       {
