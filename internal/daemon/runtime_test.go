@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,28 @@ func TestMissingMappedAncestor(t *testing.T) {
 	delete(active, root)
 	if got := missingMappedAncestor(child, target, mapped, []zfs.Dataset{{Name: target, Type: zfs.Filesystem}}, active, policies); got != "" {
 		t.Fatalf("inactive ancestor created dependency: %q", got)
+	}
+}
+
+func TestDiscoveryReferenceChangeDoesNotReconcile(t *testing.T) {
+	t.Parallel()
+	base := discovery.Entry{
+		Dataset: zfs.Dataset{Name: "tank/data", Type: zfs.Filesystem},
+		Policy:  policy.Effective{Enabled: true, Local: []string{"backup/root"}},
+		Stored:  []zfs.Property{{Dataset: "tank/data", Name: lifecycle.OwnerProperty, Value: "owner", Source: zfs.SourceLocal}},
+	}
+	withReference := base
+	withReference.Stored = append(slices.Clone(base.Stored), zfs.Property{Dataset: "tank/data", Name: lifecycle.ReferencePrefix + "target:snapshot", Value: "reference", Source: zfs.SourceLocal})
+	if discoveryChangeRequiresReconcile(withReference, true, base, true) {
+		t.Fatal("recovery-reference-only change requested reconciliation")
+	}
+	changedPolicy := base
+	changedPolicy.Policy.Local = []string{"backup/other"}
+	if !discoveryChangeRequiresReconcile(changedPolicy, true, base, true) {
+		t.Fatal("policy change did not request reconciliation")
+	}
+	if !discoveryChangeRequiresReconcile(base, true, discovery.Entry{}, false) {
+		t.Fatal("new dataset did not request reconciliation")
 	}
 }
 

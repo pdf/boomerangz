@@ -420,6 +420,19 @@ func actionableRoot(entry discovery.Entry, installation string) bool {
 	return owner == "" || owner == installation
 }
 
+func discoveryChangeRequiresReconcile(current discovery.Entry, currentExists bool, previous discovery.Entry, previousExists bool) bool {
+	if !currentExists || !previousExists {
+		return true
+	}
+	stripReferences := func(entry discovery.Entry) discovery.Entry {
+		entry.Stored = slices.DeleteFunc(slices.Clone(entry.Stored), func(property zfs.Property) bool {
+			return strings.HasPrefix(property.Name, lifecycle.ReferencePrefix)
+		})
+		return entry
+	}
+	return !reflect.DeepEqual(stripReferences(current), stripReferences(previous))
+}
+
 func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 	if generation == nil {
 		return
@@ -454,7 +467,15 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 	r.mu.Lock()
 	changed := make(map[string]bool)
 	for _, name := range generation.Changed(r.generation) {
-		changed[name] = true
+		current, currentExists := generation.Inspect(name)
+		var previous discovery.Entry
+		previousExists := false
+		if r.generation != nil {
+			previous, previousExists = r.generation.Inspect(name)
+		}
+		if discoveryChangeRequiresReconcile(current, currentExists, previous, previousExists) {
+			changed[name] = true
+		}
 	}
 	r.generation = generation
 	previousKnown := r.known
