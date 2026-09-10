@@ -109,6 +109,86 @@ Roughly bottom-up, in dependency order:
   destructive ZFS commands only ever touch disposable QEMU-guest disks/pools
   (`VerifyGuestGuard`, `VerifyGuestPool`), never a real host pool.
 
+## Property to send/receive mapping (`internal/policy`, `internal/zfs/stream.go`, `internal/transfer/plan.go`)
+
+`org.boomerangz:*` properties are resolved into `policy.Effective`
+([internal/policy/resolve.go](internal/policy/resolve.go)), translated to ZFS
+argv in [internal/zfs/stream.go](internal/zfs/stream.go), and wired together
+per transfer in [internal/transfer/plan.go](internal/transfer/plan.go).
+
+| Property | Resolves to | ZFS effect |
+| --- | --- | --- |
+| `enabled` | `Effective.Enabled` | Gates participation (`lifecycle.ActiveRoot` check in `plan.Build`), not a send flag. |
+| `policy` (grid) | `Effective.Grid` | Drives which snapshot gets sent (scheduler/pruning), not send flags. |
+| `large_blocks` | `Send.LargeBlocks` | `-L` |
+| `compressed` | `Send.Compressed` | `-c` |
+| `raw` | `Send.Raw` | `-w`; defaults to `on` for encrypted datasets (resolve.go:89-91) |
+| `props` | `Send.Props` | `-p`; forced `on` when `replicate=on` (resolve.go:128-130) |
+| `replicate` | `Send.Replicate` | `-R` |
+| `incremental` | `all`/`latest` | Chooses `-I` vs `-i` in `plan.Build` (plan.go:431-435) |
+| `discard` | `off`/`first`/`all` | Receive-side `-d`/`-e` via `MapReceiveDataset`/`receiveArgs` (stream.go:158-171) |
+| `set_prop:<name>` | `SetProperties[name]` | Receive-side `-o name=value` |
+| `ignore_prop:<name>` | `IgnoreProperties` | Receive-side `-x name` |
+
+`zfs receive` is always invoked as `receive -u -s <root>` (stream.go:162) -
+unmounted and resumable, never `-F` - regardless of any property; that is a
+hard-coded invariant, not a policy toggle.
+
+Implications for correct receive behavior:
+
+- **Raw/encryption coupling is load-bearing.** `replicate=on` on an
+  encrypted dataset without `raw=on` is a hard error (resolve.go:137-139).
+  For a replication root with `raw` left unspecified, an encrypted
+  descendant auto-selects raw for the whole root via `ForReplicationScope`,
+  but only when `raw` was never explicitly set anywhere in the chain; an
+  explicit `raw=off` blocks the auto-selection and fails validation instead
+  of silently sending plaintext.
+- **Raw receive locks key-derivation properties.** When `raw=on` on an
+  encrypted source, `validateRawReceive` forbids `set_prop`/`ignore_prop`
+  from touching `encryption`, `keyformat`, or `pbkdf2iters`
+  (resolve.go:221-231); `keylocation` remains overridable since it is a
+  legitimate per-host choice.
+- **`org.boomerangz:*` namespace isolation is enforced three times**, and
+  each layer covers a gap the others don't:
+  - `policy.Resolve` rejects `set_prop`/`ignore_prop` targeting the reserved
+    namespace at resolution time (resolve.go:199-201).
+  - `zfs.receiveArgs` independently refuses any `-o` key with the
+    `org.boomerangz:` prefix (stream.go:178) as defense in depth.
+  - `transfer.completeReceiveExclusions` walks every `org.boomerangz:*`
+    public key actually present in the send scope and adds an explicit `-x`
+    for each (plan.go:114-127), since OpenZFS has no property-prefix `-x`;
+    it also excludes `state:reference:*` and `state:target:*` keys so
+    per-target recovery metadata never reaches an unrelated destination.
+    `state:lineage`/`state:owner` are deliberately *not* excluded - PLAN.md's
+    ownership model expects those to be reconstructed/verified receive-side.
+- **`set_prop` beats `ignore_prop` on conflict**: a key in both loses its
+  `IgnoreProperties` entry with a warning, and only `set_prop`'s `-o`
+  survives (resolve.go:209-215).
+- **`discard` changes the destination path, not just a flag**, via
+  `MapReceiveDataset` (`first` strips the source's leading component, `all`
+  keeps only the last). `plan.Build` re-derives this mapping from current
+  inventory on every plan rather than trusting a cached value, since a wrong
+  mapping can misroute an entire dataset tree.
+- **`canmount` gets an implicit safety default**: unless
+  `set_prop:canmount` is explicit, filesystem receives get
+  `canmount=noauto` injected (plan.go:360-364), layered on top of `-u`.
+- **`incremental=all` (`-I`) can leak foreign snapshots**: `plan.Build`
+  flags any intermediate snapshot lacking valid ownership metadata as a
+  warning ("stream includes foreign snapshot: ...") instead of silently
+  including it (plan.go:463-467).
+- **`replicate=on` always warns about destination impact**
+  ("recursive replication uses native package semantics and may affect
+  foreign destination snapshots", plan.go:438-440), independent of whether a
+  foreign destination snapshot is known to exist, because OpenZFS's `-R`
+  receive semantics can prune destination snapshots absent from the sender.
+
+Net effect: the property-to-flag mapping is simple, but most properties have
+a receive-side safety interaction (namespace leakage, encryption
+consistency, mount behavior, or path remapping) enforced redundantly across
+`policy`, `zfs`, and `transfer` rather than in one place. Extending any of
+these properties should carry the corresponding check into all three layers,
+not just the one that happens to be edited first.
+
 ## Scheduler behavior (`internal/daemon/scheduler.go`)
 
 `Scheduler` tracks one `deadline{policy, cadence, next, pending}` per
