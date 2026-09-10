@@ -109,6 +109,79 @@ Roughly bottom-up, in dependency order:
   destructive ZFS commands only ever touch disposable QEMU-guest disks/pools
   (`VerifyGuestGuard`, `VerifyGuestPool`), never a real host pool.
 
+## Scheduler behavior (`internal/daemon/scheduler.go`)
+
+`Scheduler` tracks one `deadline{policy, cadence, next, pending}` per
+schedulable root, independent of `discovery`'s periodic scans. It is a plain
+mutex-guarded map plus a broadcast `wake` channel (closed and replaced on
+every mutation - `signal()` - to release whichever goroutine is blocked in
+`Next`).
+
+- **Schedulability** (`isSchedulable`): a discovery entry qualifies only if
+  it is not covered by an ancestor root (`CoveredBy == ""`), was actually
+  inspected, has policy `Enabled` and `Valid()` (no parse errors), has no
+  active lifecycle transition (`lifecycle.ActiveRoot(...) == nil`), and its
+  retention grid has a positive `Cadence()`. Anything else is silently
+  excluded from scheduling, not errored.
+- **`Update(entries, now)`** is called after every completed discovery
+  generation (`Runtime.applyGeneration`, runtime.go:452). It atomically
+  replaces the whole entry set: a root whose cadence is unchanged from the
+  previous generation *keeps* its existing `next`/`pending` state (so a
+  policy edit that doesn't touch the grid never resets or double-fires a
+  deadline); a changed cadence (or a brand-new root) gets `next = now`, i.e.
+  immediately due. Returns sorted `active`/`removed` name lists purely for
+  the caller's own bookkeeping (`Runtime` uses them to diff `known`/`active`
+  state and to fire `deactivate`/`enqueueInactive` for roots that dropped
+  out).
+- **`Next(ctx)`** is the daemon's snapshot-timer loop (run in its own
+  goroutine from `Runtime.Run`, runtime.go:1131-1140). It repeatedly scans
+  all entries for the earliest non-`pending` deadline, blocks on a
+  `time.Timer` for that duration (or on `ctx.Done()`/the `wake` channel,
+  whichever fires first), and re-evaluates from scratch on every wake -
+  there is no per-entry timer, just one shared timer for the global
+  minimum. When a deadline is actually due (`wait <= 0`) it marks that
+  entry `pending = true` and returns a detached `Schedule` snapshot
+  (dataset, cloned policy, deadline). `pending` is a leaky-bucket guard:
+  while true, `Next` will never re-select that dataset, so exactly one
+  snapshot job can be in flight per root at a time. Only `Complete` or
+  `Retry` clear it.
+- **`Complete(dataset, completed)`**: called after a snapshot actually
+  lands (runtime.go:655). Sets `pending = false` and `next = completed +
+  cadence` - deliberately anchored to actual completion time, not the
+  original deadline, so a run that starts late doesn't cause the next one
+  to fire early, and so missed periods (daemon was down, dataset was
+  blocked) are coalesced into a single catch-up snapshot rather than
+  replayed as a backlog burst.
+- **`Retry(dataset, notBefore)`**: called on every non-success path out of
+  `enqueueSnapshot` (gate admission failure, job-queue drop, stale-deadline
+  re-check, `CreateSnapshot` error) to clear `pending` and push `next` out
+  to a backoff time, usually `now + ReconcileInterval` or `now + 1s` for
+  queue drops. This is the mechanism that turns a single missed attempt
+  back into a live, re-selectable entry instead of a stuck root.
+- **`Lookup(dataset)`** (used by `Runtime.Trigger`, runtime.go:1191) returns
+  a `Schedule` without touching `pending`, so manual triggers and the
+  timer-driven path can both produce a `Schedule` for the same dataset
+  concurrently; `Trigger` sets `Schedule.Force = true` on the result.
+  `Force` bypasses the deadline re-check in `enqueueSnapshot` (send the
+  snapshot immediately even if the stored/observed next-due time is in the
+  future) and suppresses the automatic `Retry` call on gate/queue failure,
+  since a manual trigger's caller is expected to retry deliberately rather
+  than have the scheduler silently reschedule it.
+- **Double-checked deadline at execution time**: `enqueueSnapshot`
+  (runtime.go:616) re-derives the true next-due time from ZFS state itself
+  via `nextOwnedSnapshot` (latest owned snapshot's creation time + cadence,
+  or the zero time if the root has no authoritative snapshot yet) and skips
+  creating a snapshot (rescheduling instead) if that still isn't due. This
+  makes the in-memory `Scheduler` an optimization/wakeup mechanism rather
+  than the source of truth - ZFS-recorded snapshot ownership is what
+  actually gates snapshot creation, so drift between the scheduler's `next`
+  and reality (e.g. after a daemon restart, before `Update` has run) fails
+  closed into a reschedule rather than a duplicate/early snapshot.
+- **Concurrency model**: all scheduler state is behind a single
+  `sync.Mutex`; there's no per-dataset locking. `Next`'s O(n) full-map scan
+  on every wake is intentional simplicity over an ordered heap - the entry
+  count is bounded by managed dataset roots, not by scan/event volume.
+
 ## Protobuf / gRPC surface
 
 Two service definitions under `proto/boomerangz/`, built with
