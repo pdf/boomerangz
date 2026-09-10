@@ -4,6 +4,11 @@
 
 > A ZFS snapshot/replication manager to help make sure your data comes back to you.
 
+[![Quality](https://github.com/pdf/boomerangz/actions/workflows/quality.yml/badge.svg?branch=main&event=push)](https://github.com/pdf/boomerangz/actions/workflows/quality.yml)
+[![Release](https://img.shields.io/github/v/release/pdf/boomerangz)](https://github.com/pdf/boomerangz/releases/latest)
+[![License](https://img.shields.io/github/license/pdf/boomerangz)](LICENSE)
+[![AUR](https://img.shields.io/aur/version/boomerangz?logo=archlinux)](https://aur.archlinux.org/packages/boomerangz)
+
 Boomerangz manages OpenZFS snapshots and local or remote replication, including
 systems whose backup destinations are not always online.
 
