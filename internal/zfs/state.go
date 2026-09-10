@@ -2,15 +2,57 @@ package zfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
 	"strings"
 )
 
+const inspectStateAttempts = 3
+
+// InventoryChangedError reports an object that disappeared after ZFS listed it
+// but before its properties or holds could be read. Callers may safely retry the
+// complete inventory; no partial state is returned.
+type InventoryChangedError struct {
+	Object string
+	Err    error
+}
+
+func (e *InventoryChangedError) Error() string {
+	return fmt.Sprintf("zfs inventory changed while inspecting %s: %v", e.Object, e.Err)
+}
+
+func (e *InventoryChangedError) Unwrap() error { return e.Err }
+
+// Temporary identifies bounded inventory churn to transfer coordinators.
+func (*InventoryChangedError) Temporary() bool { return true }
+
+func objectDisappeared(err error) bool {
+	message := err.Error()
+	return strings.Contains(message, "cannot open '") && strings.Contains(message, "dataset does not exist")
+}
+
 // InspectState inventories one exact dataset or a recursive dataset scope.
 // Each subprocess is bounded; a failure never returns a partial state.
 func (d *Direct) InspectState(ctx context.Context, dataset string, recursive bool) (State, error) {
+	var changed *InventoryChangedError
+	for range inspectStateAttempts {
+		state, err := d.inspectState(ctx, dataset, recursive)
+		if err == nil {
+			return state, nil
+		}
+		if !errors.As(err, &changed) {
+			return State{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return State{}, err
+		}
+	}
+	return State{}, changed
+}
+
+func (d *Direct) inspectState(ctx context.Context, dataset string, recursive bool) (State, error) {
 	if err := validateDataset(dataset); err != nil {
 		return State{}, err
 	}
@@ -76,6 +118,9 @@ func (d *Direct) InspectState(ctx context.Context, dataset string, recursive boo
 		for _, keys := range []string{"all", propertyNamespace + "state:lineage," + propertyNamespace + "state:snapshot," + propertyNamespace + "state:created"} {
 			out, err := d.runner.Run(ctx, "get", "-H", "-p", "-o", "name,property,value,received,source", keys, object.Name)
 			if err != nil {
+				if objectDisappeared(err) {
+					return State{}, &InventoryChangedError{Object: object.Name, Err: err}
+				}
 				return State{}, err
 			}
 			err = parseTable(out, 5, func(f []string) error {
@@ -112,6 +157,9 @@ func (d *Direct) InspectState(ctx context.Context, dataset string, recursive boo
 		if object.Type == "snapshot" {
 			out, err := d.runner.Run(ctx, "holds", "-H", object.Name)
 			if err != nil {
+				if objectDisappeared(err) {
+					return State{}, &InventoryChangedError{Object: object.Name, Err: err}
+				}
 				return State{}, err
 			}
 			err = parseTable(out, 3, func(f []string) error {
