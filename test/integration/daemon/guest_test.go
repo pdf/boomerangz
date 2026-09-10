@@ -28,6 +28,7 @@ type sendInterval struct{ start, end int64 }
 type observedLocalStream struct {
 	delegate transfer.Stream
 	delay    time.Duration
+	tracked  map[string]bool
 	mu       sync.Mutex
 	interval []struct {
 		dataset string
@@ -36,6 +37,9 @@ type observedLocalStream struct {
 }
 
 func (s *observedLocalStream) Run(ctx context.Context, send zfs.SendOptions, receive zfs.ReceiveOptions, estimate zfs.Estimate, report func(zfs.Progress)) (zfs.Progress, error) {
+	if !s.tracked[send.Source] {
+		return s.delegate.Run(ctx, send, receive, estimate, report)
+	}
 	started := time.Now().UnixNano()
 	timer := time.NewTimer(s.delay)
 	select {
@@ -271,7 +275,11 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	}
 	// Keep each acquired transfer lock observable without relying on fixture
 	// data volume, while delegating every stream to the real local ZFS pipeline.
-	observed := &observedLocalStream{delegate: localStream, delay: 2 * time.Second}
+	observed := &observedLocalStream{
+		delegate: localStream,
+		delay:    2 * time.Second,
+		tracked:  map[string]bool{root: true, left: true, right: true},
+	}
 	cfg := config.Defaults()
 	cfg.Daemon.ReconcileInterval.Duration = 100 * time.Millisecond
 	cfg.Daemon.ManagementWorkers = 3
