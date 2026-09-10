@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: in progress. Chunks 0, 1 and 3 have landed; chunk 2 and A-F are outstanding.
+Status: in progress. Chunks 0-3 have landed, so the harness repairs are done; A-F are outstanding.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -276,7 +276,7 @@ Chunk 3 finished the isolation: `$src/data/child` moved into
 into a Go test, so `bootstrap.sh` now creates pools and delegates permissions
 and builds no fixtures at all.
 
-### Chunk 2 - split the monoliths
+### Chunk 2 - split the monoliths (done)
 
 Convert `TestGuestLocalTransfer` and `TestGuestLifecycle` into `t.Run`
 subtests along the phase boundaries their existing comments already mark.
@@ -285,6 +285,42 @@ subtest and say why in a comment. No behaviour changes.
 
 Done when: one failing phase reports as one failing subtest and the rest still
 report their own results.
+
+**How it landed.** `TestGuestLocalTransfer` became eight phases,
+`TestGuestLifecycle` six, plus two nested cases under `recursive-mapping`.
+
+The dependent phases took a different shape than the plan suggested. Rather
+than merging them into one subtest, a small `chain` helper runs a dependent
+phase only while its predecessors have passed and marks the remainder
+*skipped*. That keeps each phase individually named and timed, and a failure
+then reports one red phase plus an explicit list of what was not evaluated,
+instead of either one coarse subtest or a cascade of reds that all trace to
+one cause. Phases that build their own fixtures use `t.Run` directly and
+report whatever the chain did:
+`incremental-all-base-retention`, `recursive-mapping` and
+`linux-ancestor-preparation` in the transfer test. The lifecycle test walks a
+single dataset through its whole lifecycle, so all six of its phases are
+chained.
+
+The split forced one fix without which it would have been theatre: `command`
+and `request` closed over the parent's `*testing.T`, so a failure inside
+either would have been reported against the whole test rather than the phase
+that caused it - the same defect chunk 3's first attempt hit. Both now take
+the running `*testing.T`.
+
+No behaviour change, checked rather than asserted: the counts of `t.Fatal`
+(53 and 36) and of every `engine`, `snapshots`, `direct` and `reseed` call are
+identical before and after.
+
+**Verified against the done-when, not just a green run.** A guest run is green
+with all fourteen phases reporting individually. Then a deliberate `t.Fatal`
+in `incremental-modes` - a chained phase in the middle - produced exactly the
+intended report: `full-bootstrap` passed, `incremental-modes` failed alone,
+its three dependents skipped naming the reason, the three independent phases
+still passed on their own merits, and the stage failed its pass floor. The
+skip path had never executed before that run, which given how chunk 0's floors
+and chunk 3's assertions each turned out to be dead on arrival was worth an
+extra boot to establish.
 
 ### Chunk 3 - the property-layers probe (done)
 

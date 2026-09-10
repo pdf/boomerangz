@@ -42,7 +42,9 @@ func TestGuestLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := "/run/boomerangz-vmtest/guest-marker"
-	command := func(name string, args ...string) string {
+	// Takes the running *testing.T rather than closing over the parent's, so a
+	// phase's failure is reported against that phase.
+	command := func(t *testing.T, name string, args ...string) string {
 		t.Helper()
 		out, err := exec.CommandContext(t.Context(), name, args...).CombinedOutput()
 		if err != nil {
@@ -50,14 +52,16 @@ func TestGuestLifecycle(t *testing.T) {
 		}
 		return strings.TrimSpace(string(out))
 	}
-	serial := command("lsblk", "-dn", "-o", "SERIAL", sourceDevice)
+	// Guard and fixture setup stay outside the phases: nothing below is
+	// meaningful if the pool under test is not the disposable one.
+	serial := command(t, "lsblk", "-dn", "-o", "SERIAL", sourceDevice)
 	if err := zfstest.VerifyGuestGuard(marker, runID, pool, []zfstest.Vdev{{Path: sourceDevice, Serial: serial}}); err != nil {
 		t.Fatal(err)
 	}
 	if serial != zfstest.DiskSerial(runID, zfstest.SourceDisk) {
 		t.Fatal("source disk role mismatch")
 	}
-	status := command("zpool", "status", "-LP", pool)
+	status := command(t, "zpool", "status", "-LP", pool)
 	vdevs := 0
 	for _, line := range strings.Split(status, "\n") {
 		fields := strings.Fields(line)
@@ -65,7 +69,7 @@ func TestGuestLifecycle(t *testing.T) {
 			continue
 		}
 		vdevs++
-		parent := command("lsblk", "-dn", "-o", "PKNAME", fields[0])
+		parent := command(t, "lsblk", "-dn", "-o", "PKNAME", fields[0])
 		if parent != filepath.Base(sourceDevice) && (parent != "" || fields[0] != sourceDevice) {
 			t.Fatal("unexpected test-pool vdev")
 		}
@@ -74,9 +78,9 @@ func TestGuestLifecycle(t *testing.T) {
 		t.Fatal("unexpected source pool layout")
 	}
 	root := pool + "/data/lifecycle-" + time.Now().UTC().Format("150405000")
-	command("zfs", "create", "-u", root)
-	command("zfs", "create", "-u", root+"/child")
-	command("zfs", "set", policy.Namespace+"enabled=on", root)
+	command(t, "zfs", "create", "-u", root)
+	command(t, "zfs", "create", "-u", root+"/child")
+	command(t, "zfs", "set", policy.Namespace+"enabled=on", root)
 	// Fixtures are intentionally retained for guarded pool teardown after testing.
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
@@ -89,100 +93,145 @@ func TestGuestLifecycle(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	effective := activePolicy(root)
-	first, err := service.CreateSnapshot(t.Context(), root, true, now.Add(-2*time.Hour), effective)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := service.CreateSnapshot(t.Context(), root, false, now, effective)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, err := direct.InspectState(t.Context(), root, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lifecycle.Snapshots(state, root)) != 2 || len(lifecycle.Snapshots(state, root+"/child")) != 1 {
-		t.Fatal("incorrect recursive/nonrecursive snapshot scope")
-	}
-	old := root + "@" + first.Name()
-	ref, err := service.Protect(t.Context(), root, old, "local:disposable-target")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := service.Checkpoint(t.Context(), root, ref, ref.GUID+1); err == nil {
-		t.Fatal("accepted wrong destination GUID")
-	}
-	// This phase tests the lifecycle hook; actual destination verification is
-	// the responsibility of the transfer implementation in phase 4.
-	if err := service.Checkpoint(t.Context(), root, ref, ref.GUID); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.ReleaseReference(t.Context(), root, ref); err != nil {
-		t.Fatal(err)
-	}
-	if err := direct.Hold(t.Context(), "foreign-test-hold", old); err != nil {
-		t.Fatal(err)
-	}
-	grid, _ := policy.ParseGrid("1x5m")
-	effective.Grid = grid
-	preview, err := service.Prune(t.Context(), root, effective, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, d := range preview {
-		if d.Destroy {
-			t.Fatal("held or newest snapshot marked for destruction")
+
+	// This test walks one dataset through its whole lifecycle, so every phase
+	// consumes the state the previous one left - there is no meaningful way to
+	// run adopt before the snapshots exist. chain therefore skips the remainder
+	// once a phase fails, rather than reporting cascade failures that all trace
+	// back to one cause.
+	chainOK := true
+	chain := func(name string, fn func(*testing.T)) {
+		if !chainOK {
+			t.Run(name, func(t *testing.T) { t.Skip("depends on an earlier phase that failed") })
+			return
 		}
+		chainOK = t.Run(name, fn)
 	}
-	if err := direct.Release(t.Context(), "foreign-test-hold", old); err != nil {
-		t.Fatal(err)
+	// State handed between phases.
+	var (
+		second lifecycle.Metadata
+		old    string
+		ref    lifecycle.Reference
+	)
+
+	chain("snapshot-scope", func(t *testing.T) {
+		first, err := service.CreateSnapshot(t.Context(), root, true, now.Add(-2*time.Hour), effective)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err = service.CreateSnapshot(t.Context(), root, false, now, effective)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, err := direct.InspectState(t.Context(), root, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lifecycle.Snapshots(state, root)) != 2 || len(lifecycle.Snapshots(state, root+"/child")) != 1 {
+			t.Fatal("incorrect recursive/nonrecursive snapshot scope")
+		}
+		old = root + "@" + first.Name()
+	})
+
+	chain("reference-checkpoint", func(t *testing.T) {
+		var err error
+		ref, err = service.Protect(t.Context(), root, old, "local:disposable-target")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID+1); err == nil {
+			t.Fatal("accepted wrong destination GUID")
+		}
+		// This phase tests the lifecycle hook; actual destination verification is
+		// the responsibility of the transfer implementation in phase 4.
+		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.ReleaseReference(t.Context(), root, ref); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	chain("prune-respects-holds", func(t *testing.T) {
+		if err := direct.Hold(t.Context(), "foreign-test-hold", old); err != nil {
+			t.Fatal(err)
+		}
+		grid, _ := policy.ParseGrid("1x5m")
+		effective.Grid = grid
+		preview, err := service.Prune(t.Context(), root, effective, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range preview {
+			if d.Destroy {
+				t.Fatal("held or newest snapshot marked for destruction")
+			}
+		}
+		if err := direct.Release(t.Context(), "foreign-test-hold", old); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.Prune(t.Context(), root, effective, true); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	chain("adopt", func(t *testing.T) {
+		if err := direct.InheritProperty(t.Context(), root, lifecycle.LineageProperty); err != nil {
+			t.Fatal(err)
+		}
+		adopted, err := service.AdoptDataset(t.Context(), root, effective)
+		if err != nil || adopted != second.Lineage {
+			t.Fatalf("adopt=%s err=%v", adopted, err)
+		}
+		state, err := direct.InspectState(t.Context(), root, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lifecycle.Snapshots(state, root)) != 1 || len(lifecycle.Snapshots(state, root+"/child")) != 1 {
+			t.Fatal("pruning changed a descendant snapshot")
+		}
+	})
+
+	chain("clean", func(t *testing.T) {
+		var err error
+		ref, err = service.Protect(t.Context(), root, root+"@"+second.Name(), "local:disposable-target")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID); err != nil {
+			t.Fatal(err)
+		}
+		// No transfer has run against this synthetic target; the test knows it has
+		// no active work or resume dependency. Production callers must probe targets.
+		cleanPreview, err := service.Clean(t.Context(), root, lifecycle.CleanOptions{Recursive: true}, false, cleanSafety{})
+		if err != nil || len(cleanPreview.Blockers) > 0 {
+			t.Fatalf("clean preview=%v err=%v", cleanPreview, err)
+		}
+		applied, err := service.Clean(t.Context(), root, lifecycle.CleanOptions{Recursive: true}, true, cleanSafety{})
+		if err != nil || applied.Applied != len(cleanPreview.Actions) {
+			t.Fatalf("clean apply=%v err=%v", applied, err)
+		}
+		state, err := direct.InspectState(t.Context(), root, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(state.Properties) != 0 || len(lifecycle.Snapshots(state, root)) != 1 || len(lifecycle.Snapshots(state, root+"/child")) != 1 {
+			t.Fatal("clean did not preserve snapshots and clear metadata")
+		}
+	})
+
+	// Optional tail: builds its own dataset under root, so it needs the chain
+	// only to have got as far as creating root.
+	binary := os.Getenv("BOOMERANGZ_LIFECYCLE_GUEST_CLI")
+	if binary == "" {
+		t.Logf("verified lifecycle on %s", root)
+		return
 	}
-	if _, err := service.Prune(t.Context(), root, effective, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := direct.InheritProperty(t.Context(), root, lifecycle.LineageProperty); err != nil {
-		t.Fatal(err)
-	}
-	adopted, err := service.AdoptDataset(t.Context(), root, effective)
-	if err != nil || adopted != second.Lineage {
-		t.Fatalf("adopt=%s err=%v", adopted, err)
-	}
-	state, err = direct.InspectState(t.Context(), root, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lifecycle.Snapshots(state, root)) != 1 || len(lifecycle.Snapshots(state, root+"/child")) != 1 {
-		t.Fatal("pruning changed a descendant snapshot")
-	}
-	ref, err = service.Protect(t.Context(), root, root+"@"+second.Name(), "local:disposable-target")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := service.Checkpoint(t.Context(), root, ref, ref.GUID); err != nil {
-		t.Fatal(err)
-	}
-	// No transfer has run against this synthetic target; the test knows it has
-	// no active work or resume dependency. Production callers must probe targets.
-	cleanPreview, err := service.Clean(t.Context(), root, lifecycle.CleanOptions{Recursive: true}, false, cleanSafety{})
-	if err != nil || len(cleanPreview.Blockers) > 0 {
-		t.Fatalf("clean preview=%v err=%v", cleanPreview, err)
-	}
-	applied, err := service.Clean(t.Context(), root, lifecycle.CleanOptions{Recursive: true}, true, cleanSafety{})
-	if err != nil || applied.Applied != len(cleanPreview.Actions) {
-		t.Fatalf("clean apply=%v err=%v", applied, err)
-	}
-	state, err = direct.InspectState(t.Context(), root, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(state.Properties) != 0 || len(lifecycle.Snapshots(state, root)) != 1 || len(lifecycle.Snapshots(state, root+"/child")) != 1 {
-		t.Fatal("clean did not preserve snapshots and clear metadata")
-	}
-	if binary := os.Getenv("BOOMERANGZ_LIFECYCLE_GUEST_CLI"); binary != "" {
+	chain("cli-adopt-and-clean", func(t *testing.T) {
 		cliRoot := root + "/cli"
-		command("zfs", "create", "-u", cliRoot)
-		command("zfs", "set", policy.Namespace+"enabled=on", cliRoot)
-		command("zfs", "snapshot", cliRoot+"@foreign")
+		command(t, "zfs", "create", "-u", cliRoot)
+		command(t, "zfs", "set", policy.Namespace+"enabled=on", cliRoot)
+		command(t, "zfs", "snapshot", cliRoot+"@foreign")
 		if _, err := service.CreateSnapshot(t.Context(), cliRoot, false, time.Now(), activePolicy(cliRoot)); err != nil {
 			t.Fatal(err)
 		}
@@ -190,10 +239,10 @@ func TestGuestLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		configPath := os.Getenv("BOOMERANGZ_LIFECYCLE_GUEST_CONFIG")
-		command(binary, "dataset", "--config", configPath, "adopt", cliRoot)
-		command(binary, "dataset", "--config", configPath, "adopt", cliRoot, "--apply")
-		command(binary, "dataset", "--config", configPath, "clean", cliRoot, "--destroy-owned-snapshots")
-		command(binary, "dataset", "--config", configPath, "clean", cliRoot, "--destroy-owned-snapshots", "--apply")
+		command(t, binary, "dataset", "--config", configPath, "adopt", cliRoot)
+		command(t, binary, "dataset", "--config", configPath, "adopt", cliRoot, "--apply")
+		command(t, binary, "dataset", "--config", configPath, "clean", cliRoot, "--destroy-owned-snapshots")
+		command(t, binary, "dataset", "--config", configPath, "clean", cliRoot, "--destroy-owned-snapshots", "--apply")
 		state, err := direct.InspectState(t.Context(), cliRoot, false)
 		if err != nil {
 			t.Fatal(err)
@@ -202,6 +251,6 @@ func TestGuestLifecycle(t *testing.T) {
 		if len(remaining) != 1 || remaining[0].Name != cliRoot+"@foreign" || len(state.Properties) != 0 {
 			t.Fatal("CLI clean failed to delete owned snapshot or preserve foreign snapshot")
 		}
-	}
+	})
 	t.Logf("verified lifecycle on %s", root)
 }
