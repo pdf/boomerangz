@@ -85,7 +85,6 @@ setup() {
 	zpool create -m none "$source_pool" "$source_device"
 	zpool create -m none "$destination_pool" "$destination_device"
 	zfs create -o mountpoint=none "$source_pool/data"
-	zfs create -o mountpoint=none "$source_pool/data/child"
 	zfs create -o mountpoint=none "$destination_pool/data"
 	# create on the source and snapshot on the destination are fixture-only
 	# permissions used by the integration suites. They are not deployment

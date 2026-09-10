@@ -108,7 +108,6 @@ chmod 0755 "$artifact_dir"/*.sh "$artifact_dir/boomerangz" "$artifact_dir"/*.tes
 sudo modprobe zfs
 sudo "$artifact_dir/bootstrap.sh" setup "$run_id" "$source_device" "$destination_device" "$direct_ssh_user"
 run_as_service "$artifact_dir/delegated-matrix.sh" "$run_id" "$source_device" "$destination_device"
-run_as_service "$artifact_dir/property-layers.sh" "$run_id" "$source_device" "$destination_device"
 
 sudo chown -R "$service_user:$service_user" "$artifact_dir"
 run_as_service tee "$config" >/dev/null <<EOF
@@ -162,7 +161,7 @@ BOOMERANGZ_LIFECYCLE_GUEST_CLI="$artifact_dir/boomerangz" \
 BOOMERANGZ_LIFECYCLE_GUEST_CONFIG="$config" \
 	"$artifact_dir/lifecycle.test"
 
-run_stage transfer-local 2 \
+run_stage transfer-local 3 \
 BOOMERANGZ_TRANSFER_GUEST_RUN="$run_id" \
 	"$artifact_dir/transfer.test"
 

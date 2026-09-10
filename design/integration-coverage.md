@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: in progress. Chunks 0 and 1 have landed; chunks 2-3 and A-F are outstanding.
+Status: in progress. Chunks 0, 1 and 3 have landed; chunk 2 and A-F are outstanding.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -271,10 +271,10 @@ daemon, transfer-remote, transfer-local, lifecycle - is also green, which is
 the done-when above and would have failed on host key verification before the
 `known_hosts` fix.
 
-Still shared, and left for chunk 3: `$src/data/child`, created by
-`bootstrap.sh` and used by both `delegated-matrix.sh` and
-`property-layers.sh`. The Go stages shuffle freely; those two probes do not
-yet.
+Chunk 3 finished the isolation: `$src/data/child` moved into
+`delegated-matrix.sh` as `matrix-child` when `property-layers.sh` was folded
+into a Go test, so `bootstrap.sh` now creates pools and delegates permissions
+and builds no fixtures at all.
 
 ### Chunk 2 - split the monoliths
 
@@ -286,12 +286,53 @@ subtest and say why in a comment. No behaviour changes.
 Done when: one failing phase reports as one failing subtest and the rest still
 report their own results.
 
-### Chunk 3 - the property-layers probe
+### Chunk 3 - the property-layers probe (done)
 
 Decide what `property-layers.sh` is for. Either give it assertions on the
 `received`/`source` columns it prints - which is the behaviour
 `org.boomerangz:props` handling depends on - or delete it and fold the
 question into a Go test. A probe nobody reads is worse than no probe.
+
+**How it landed.** Folded into `TestGuestReceivedPropertyLayers` in the
+transfer package; the script is gone. It stays integration work under the
+section 4 rule - these are kernel semantics, and a fake `zfs.Executor` would
+only assert what it was told to return - but as a script it sat outside
+everything chunk 0 built: no pass floor counted it, and its output went to a
+diagnostics file nothing read. As a Go test it is picked up by the
+package-wide run, counted by the transfer-local floor (2 to 3), owns its
+fixtures, and reports each of its seven cases as its own subtest.
+
+The assertions came from reading the columns four recorded runs actually
+produced, then tracing why boomerangz cares, and the trace changed the test.
+The contract has two halves. `zfs get all` omits a user property with no
+effective value, but naming that property explicitly still returns it - which
+is why `InspectState` queries twice, once for `all` and once for the three
+fixed ownership keys, and why `State.Received` exists apart from
+`State.Properties`. So a hidden received value behaves differently depending
+on whether boomerangz names the key: `org.boomerangz:state:snapshot` survives
+into `State.Received` once hidden, while a property nothing enumerates leaves
+the inventory entirely, despite identical `value`/`received`/`source` columns.
+The test asserts both, which is what lets boomerangz tell "no value" apart
+from "a received value I must resolve".
+
+The first attempt failed for two reasons worth recording. The assertion helper
+closed over the parent `t`, so failures reported against the parent while every
+subtest printed PASS - the exact miscount chunk 2 exists to prevent, reached
+from the other direction. And the expectation itself was wrong: it used
+property names nothing enumerates and asserted they would reach
+`State.Received`.
+
+**Open question, not a finding.** `targetBindingPrefix` is
+`org.boomerangz:state:target:<canonical>`, a dynamic key, so it is not among
+the three names `InspectState` queries explicitly. If `all` cannot list a
+hidden value, then a hidden received target binding may never reach
+`State.Received`, which would make the guards at
+[binding.go:191](../internal/transfer/binding.go) and
+[binding.go:253](../internal/transfer/binding.go) unreachable for the case
+their message describes. This has not been verified and may be wrong; the
+visible-received path those functions reject earlier may be the only one that
+matters. Worth settling in chunk D or F with a test that plants such a binding
+and looks.
 
 ### Chunk A - encryption and raw sends
 

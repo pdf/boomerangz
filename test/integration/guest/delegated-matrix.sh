@@ -64,10 +64,15 @@ printf 'zfs_module=%s\n' "$(modinfo -F version zfs)"
 # volsize/volblocksize/refreservation permissions before any Go test does.
 readonly payload=$source/matrix-payload
 readonly payload_device=/dev/zvol/$payload
-cleanup_payload() {
+readonly child=$source/matrix-child
+cleanup_fixtures() {
 	zfs destroy -R "$payload" 2>/dev/null || true
+	zfs destroy -R "$child" 2>/dev/null || true
 }
-trap cleanup_payload EXIT
+trap cleanup_fixtures EXIT
+# mountpoint=none is inherited from $source, so this needs no mountpoint
+# permission the service account has not been delegated.
+zfs create -u "$child"
 zfs create -s -V 256M -b 128K "$payload"
 udevadm settle
 for _ in {1..50}; do
@@ -103,7 +108,7 @@ zfs snapshot -r "$source@recursive-a"
 zfs send -R "$source@recursive-a" | zfs receive -u "$destination/recursive"
 [[ $(zfs get -H -o value mountpoint "$destination/recursive") == none ]] ||
 	fail "recursive receive did not retain mountpoint=none"
-zfs list -H -o name "$destination/recursive/child" "$destination/recursive/matrix-payload" >/dev/null
+zfs list -H -o name "$destination/recursive/matrix-child" "$destination/recursive/matrix-payload" >/dev/null
 printf 'recursive=pass\n'
 
 zfs snapshot "$source@properties-a"

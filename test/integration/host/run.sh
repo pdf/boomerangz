@@ -251,7 +251,6 @@ ssh_guest 'uname -a; cat /etc/os-release; lsblk -o NAME,SIZE,TYPE,SERIAL' >"$dia
 if [[ $integration_mode != package ]]; then
 	cp "$repository/test/integration/guest/bootstrap.sh" "$artifacts/"
 	cp "$repository/test/integration/guest/delegated-matrix.sh" "$artifacts/"
-	cp "$repository/test/integration/guest/property-layers.sh" "$artifacts/"
 	cp "$repository/test/integration/guest/run-common.sh" "$artifacts/"
 	cp "$repository/contrib/systemd/boomerangz.service" "$artifacts/"
 	cp "$repository/contrib/boomerangz-shell" "$artifacts/"
