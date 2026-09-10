@@ -145,6 +145,15 @@ func TestRuntimeGracefulShutdownWithoutPolicies(t *testing.T) {
 	}
 }
 
+func TestNewWithLocalStreamRequiresStream(t *testing.T) {
+	t.Parallel()
+	cfg := config.Defaults()
+	backend := &runtimeBackend{}
+	if _, err := NewWithLocalStream(cfg, backend, "11111111-1111-4111-8111-111111111111", nil, nil); err == nil {
+		t.Fatal("nil local transfer stream accepted")
+	}
+}
+
 func TestScheduledSnapshotRetriesWhenActivationGateIsNotReady(t *testing.T) {
 	t.Parallel()
 	cfg := config.Defaults()

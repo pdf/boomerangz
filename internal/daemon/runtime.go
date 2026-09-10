@@ -118,18 +118,28 @@ type Runtime struct {
 
 // New constructs an operational daemon around typed local ZFS execution.
 func New(cfg config.Config, source backend, installation string, logger *slog.Logger) (*Runtime, error) {
+	stream, err := zfs.NewLocalStream("zfs")
+	if err != nil {
+		return nil, err
+	}
+	return NewWithLocalStream(cfg, source, installation, logger, stream)
+}
+
+// NewWithLocalStream constructs a daemon with an explicit local transfer
+// stream. It permits embedders and guarded integration tests to wrap stream
+// execution without changing the typed ZFS query backend.
+func NewWithLocalStream(cfg config.Config, source backend, installation string, logger *slog.Logger, stream transfer.Stream) (*Runtime, error) {
 	if source == nil || !lifecycle.ValidID(installation) {
 		return nil, fmt.Errorf("daemon backend and installation identity are required")
+	}
+	if stream == nil {
+		return nil, fmt.Errorf("daemon local transfer stream is required")
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
-	}
-	stream, err := zfs.NewLocalStream("zfs")
-	if err != nil {
-		return nil, err
 	}
 	lifecycleService, err := lifecycle.NewService(source, installation)
 	if err != nil {
