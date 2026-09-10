@@ -161,7 +161,7 @@ BOOMERANGZ_LIFECYCLE_GUEST_CLI="$artifact_dir/boomerangz" \
 BOOMERANGZ_LIFECYCLE_GUEST_CONFIG="$config" \
 	"$artifact_dir/lifecycle.test"
 
-run_stage transfer-local 3 \
+run_stage transfer-local 4 \
 BOOMERANGZ_TRANSFER_GUEST_RUN="$run_id" \
 	"$artifact_dir/transfer.test"
 

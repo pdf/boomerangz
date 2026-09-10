@@ -91,8 +91,11 @@ setup() {
 	# requirements. userprop on both sides is required by boomerangz metadata.
 	# refreservation, volblocksize and volsize are likewise fixture-only: tests
 	# create their own sparse zvol payloads rather than sharing one built here.
-	zfs allow -u "$service_user" bookmark,create,destroy,hold,mount,refreservation,release,send,snapshot,userprop,volblocksize,volsize "$source_pool/data"
-	zfs allow -u "$service_user" canmount,compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
+	# The encryption set is fixture-only on the source, where tests build their
+	# own encryption roots; on the destination it is what receiving a raw
+	# encrypted stream and inspecting the result requires.
+	zfs allow -u "$service_user" bookmark,change-key,create,destroy,encryption,hold,keyformat,keylocation,load-key,mount,pbkdf2iters,refreservation,release,send,snapshot,userprop,volblocksize,volsize "$source_pool/data"
+	zfs allow -u "$service_user" canmount,compression,create,destroy,encryption,keyformat,keylocation,load-key,mount,mountpoint,pbkdf2iters,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
 	if [[ $direct_ssh_user != "$service_user" ]]; then
 		# Direct SSH runs ZFS as the remote login identity. Grant that dedicated,
 		# non-administrative account destination permissions only.

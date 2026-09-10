@@ -74,6 +74,11 @@ func destroyTree(ctx context.Context, dataset string) error {
 	list := exec.CommandContext(ctx, "zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-r", dataset)
 	output, err := list.CombinedOutput()
 	if err != nil {
+		// A fixture that was never created, or that the test already removed,
+		// is the state cleanup wants; only report what it cannot achieve.
+		if strings.Contains(string(output), "does not exist") {
+			return nil
+		}
 		return fmt.Errorf("list snapshots: %w: %s", err, output)
 	}
 	for _, snapshot := range strings.Fields(string(output)) {
@@ -92,6 +97,9 @@ func destroyTree(ctx context.Context, dataset string) error {
 		}
 	}
 	if destroy, destroyErr := exec.CommandContext(ctx, "zfs", "destroy", "-R", dataset).CombinedOutput(); destroyErr != nil {
+		if strings.Contains(string(destroy), "does not exist") {
+			return nil
+		}
 		return fmt.Errorf("destroy: %w: %s", destroyErr, destroy)
 	}
 	return nil

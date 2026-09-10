@@ -59,7 +59,7 @@ func TestGuestReceivedPropertyLayers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := func(args ...string) string {
+	command := func(t *testing.T, args ...string) string {
 		t.Helper()
 		out, cmdErr := exec.CommandContext(t.Context(), "zfs", args...).CombinedOutput()
 		if cmdErr != nil {
@@ -73,10 +73,10 @@ func TestGuestReceivedPropertyLayers(t *testing.T) {
 	metadata := policy.StateNamespace + "snapshot"
 	source := zfstest.FixtureName(sourcePool, "properties")
 	target := zfstest.FixtureName(destinationPool, "property-layers")
-	command("create", "-u", source)
+	command(t, "create", "-u", source)
 	zfstest.RegisterCleanup(t, source)
-	command("set", property+"=on", source)
-	command("snapshot", "-o", metadata+"=probe", source+"@property-layers")
+	command(t, "set", property+"=on", source)
+	command(t, "snapshot", "-o", metadata+"=probe", source+"@property-layers")
 
 	// -p carries the properties; -x excludes one of them at the receiving end,
 	// which is the first of the two routes to a hidden received value.
@@ -101,9 +101,9 @@ func TestGuestReceivedPropertyLayers(t *testing.T) {
 	zfstest.RegisterCleanup(t, target)
 
 	// layers reports the raw columns InspectState parses, for one object.
-	layers := func(object, name string) (value, received, source string) {
+	layers := func(t *testing.T, object, name string) (value, received, source string) {
 		t.Helper()
-		fields := strings.Split(command("get", "-H", "-p", "-o", "value,received,source", name, object), "\t")
+		fields := strings.Split(command(t, "get", "-H", "-p", "-o", "value,received,source", name, object), "\t")
 		if len(fields) != 3 {
 			t.Fatalf("unexpected column count for %s on %s: %q", name, object, fields)
 		}
@@ -152,9 +152,9 @@ func TestGuestReceivedPropertyLayers(t *testing.T) {
 	} {
 		t.Run(step.name, func(t *testing.T) {
 			if len(step.mutate) > 0 {
-				command(step.mutate...)
+				command(t, step.mutate...)
 			}
-			value, received, source := layers(target, property)
+			value, received, source := layers(t, target, property)
 			if value != step.value || received != step.received || source != step.source {
 				t.Fatalf("value=%q received=%q source=%q, want %q/%q/%q",
 					value, received, source, step.value, step.received, step.source)
@@ -169,15 +169,15 @@ func TestGuestReceivedPropertyLayers(t *testing.T) {
 	// boomerangz tell "no value" apart from "a received value I must resolve".
 	snapshot := target + "@property-layers"
 	t.Run("snapshot-metadata", func(t *testing.T) {
-		value, received, source := layers(snapshot, metadata)
+		value, received, source := layers(t, snapshot, metadata)
 		if value != "probe" || received != "probe" || source != "received" {
 			t.Fatalf("value=%q received=%q source=%q, want probe/probe/received", value, received, source)
 		}
 		assertInventory(t, snapshot, metadata, true, true)
 	})
 	t.Run("snapshot-metadata-after-inherit", func(t *testing.T) {
-		command("inherit", metadata, snapshot)
-		value, received, source := layers(snapshot, metadata)
+		command(t, "inherit", metadata, snapshot)
+		value, received, source := layers(t, snapshot, metadata)
 		if value != "-" || received != "probe" || source != "-" {
 			t.Fatalf("value=%q received=%q source=%q, want -/probe/-", value, received, source)
 		}

@@ -39,6 +39,20 @@ only worth reading if it is true.
 | `dataset adopt` and `dataset clean` over the CLI | `TestGuestLifecycle/cli-adopt-and-clean` (gated on `BOOMERANGZ_LIFECYCLE_GUEST_CLI`) |
 | Received-property layering, and which hidden values reach `State.Received` | `TestGuestReceivedPropertyLayers` |
 
+### Encryption and raw sends
+
+| Behaviour | Owned by |
+| --- | --- |
+| `raw` defaulted on for a real encryption root; received dataset becomes an encryption root of its own | `TestGuestEncryptedTransfer/raw-forced-for-encryption-root` |
+| `replicate=on` refused on an encrypted source without `raw` | `TestGuestEncryptedTransfer/replicate-without-raw-refused` |
+| `props=on` without `raw` refused by the planner | `TestGuestEncryptedTransfer/props-without-raw-refused` |
+| Raw send succeeds with the key unloaded; the same send without `raw` is refused | `TestGuestEncryptedTransfer/key-unavailable` |
+| Data received beneath an encryption root inherits its key | `TestGuestEncryptedTransfer/destination-under-encryption-root` |
+
+The refusals are unit-tested over hand-built `zfs.Dataset` values; what these
+add is that ZFS's own `encryptionroot` reaches the guards, so each phase
+resolves policy from `ListDatasets` output rather than a literal.
+
 ### Property to send/receive mapping
 
 | Behaviour | Owned by |
@@ -60,7 +74,6 @@ only worth reading if it is true.
 | --- | --- |
 | Full bootstrap over `ssh` direct, `ssh-shell` and `native`, with transport recorded in the target binding | `TestGuestSSHTransfer` |
 | Everything the local engine is tested for, over a remote transport | **Not covered** - chunk B |
-| Encryption roots, raw sends, key-unavailable behaviour | **Not covered** - chunk A |
 
 ### Scheduler and daemon
 
@@ -111,6 +124,15 @@ test that vanishes - deleted, renamed, or silently skipped by an unset
 environment guard - drops the count below the floor and fails the run rather
 than passing unnoticed. Raise the floor when adding a test whose environment
 guard is satisfied by that stage.
+
+Tests that split into phases pass the running `*testing.T` to every helper
+rather than capturing one. A closure that closes over an outer `t` reports a
+phase's failure against the whole test, and a `t.Cleanup` registered inside a
+phase destroys its fixture when that phase ends rather than when the test
+does - both silent, and both invisible in a diff, because moving a line into a
+`t.Run` rebinds `t` without changing the token. Register cleanup at the scope
+that declares the state. The `chain` helpers are the deliberate exception:
+they call `t.Run` and so must use the parent's `t`.
 
 Tests own their fixtures. `zfstest.FixtureName` names a dataset for one test,
 `zfstest.PayloadVolume` creates and seeds a zvol on demand, and

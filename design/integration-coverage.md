@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: in progress. Chunks 0-3 have landed, so the harness repairs are done; A-F are outstanding.
+Status: in progress. Chunks 0-3 and A have landed; B-F are outstanding.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -370,7 +370,7 @@ visible-received path those functions reject earlier may be the only one that
 matters. Worth settling in chunk D or F with a test that plants such a binding
 and looks.
 
-### Chunk A - encryption and raw sends
+### Chunk A - encryption and raw sends (done)
 
 Add an encrypted source dataset to the fixtures and cover: raw send of an
 encryption root; `replicate=on` refused on an encrypted source without `raw`;
@@ -378,7 +378,53 @@ encryption root; `replicate=on` refused on an encrypted source without `raw`;
 itself an encryption root; and key-unavailable behaviour. This is the largest
 single gap.
 
+**How it landed.** Split by the section 4 rule rather than written wholesale
+as integration work. The policy refusals were already unit-tested, but
+`plan.go`'s `props`-without-`raw` guard had no test at all - every dataset in
+`plan_test.go` is `EncryptionRoot: "-"` - and it is pure logic over a struct,
+so it went to `TestBuildRefusesEncryptedPropertyStreamWithoutRaw` in the unit
+suite, which also asserts the same source *with* raw plans cleanly so the
+refusal is attributable to the combination rather than to encryption.
+
+The integration half is `TestGuestEncryptedTransfer`, five phases against a
+real encryption root, a real passphrase key and real raw streams. Its value is
+not re-testing the refusals: it is that every one of those guards keys off
+`Dataset.EncryptionRoot`, which the unit tests hand-construct. Each phase
+therefore resolves policy from `ListDatasets` output, so a run proves the
+pool's own `encryptionroot` reaches the logic. Creating an encryption root
+under delegation needed `encryption`, `keyformat`, `keylocation`,
+`pbkdf2iters`, `load-key` and `change-key`, which bootstrap.sh had never
+granted.
+
+Three failures across three runs, all mine, and two worth recording. The
+shared destination's cleanup was registered inside the first phase, so it
+fired when that phase ended and later phases found the fixture gone - the
+`t`-capture defect again, in its second direction. And
+`destination-under-encryption-root` was built wrong: with `discard=off` the
+destination root *is* the received dataset, so pre-creating it as an
+encryption root tested a collision rather than inheritance. The encryption
+root has to be the parent. The third was a lax assertion: "the non-raw send
+succeeded" could equally have meant the raw transfer earlier in the phase left
+nothing to send, so the phase now takes a fresh snapshot and previews to
+confirm real work before asserting the refusal.
+
+**Observation for chunk E or F, not acted on here.** A non-raw send with the
+key unavailable is refused as `transfer failed; source recovery references
+retained: stream pipeline: exit status 1`. Nothing in that names the key, so
+an operator has no indication that `zfs load-key` is the fix. That is a
+diagnostics gap rather than a correctness one, and it belongs with the other
+"usable error" work rather than in this chunk.
+
 ### Chunk B - remote transport parity
+
+Starting point for a fresh session: the harness is repaired and the ledger in
+`test/integration/README.md` is current, so nothing here needs archaeology.
+Read that ledger, this section, and the `t`-capture note in the README's "How
+a run is structured" before writing a test. Stage pass floors currently sit at
+lifecycle 1, transfer-local 4, transfer-remote 1, daemon 3, control 2, and a
+new test in an already-running stage means raising its floor. Base images
+cache under `~/.cache/boomerangz-integration`, so the first run is not slow.
+
 
 Parameterise the local engine's behaviour table over `local`, `ssh-direct`,
 `ssh-shell` and `native`, and run the incremental, bookmark, resume and
