@@ -40,6 +40,11 @@ readonly source_image=$run_root/source.qcow2
 readonly destination_image=$run_root/destination.qcow2
 readonly seed_image=$run_root/seed.img
 readonly guest_artifacts=/var/tmp/boomerangz-integration-$run_id
+# Base images are shared across runs rather than re-downloaded per run ID.
+# On CI this is a per-job directory and so always a miss, which is fine - the
+# point is local iteration, where the run root is fresh every time.
+readonly image_cache=${BOOMERANGZ_IMAGE_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/boomerangz-integration}
+readonly base_image=$image_cache/$target_image_name
 
 qemu_pid=
 boot_index=0
@@ -188,10 +193,30 @@ done
 
 uname -a >"$diagnostics/host-uname.txt"
 "$target_qemu_binary" --version >"$diagnostics/qemu-version.txt"
-curl --fail --location --silent --show-error "$target_image_url" --output "$run_root/$target_image_name"
-printf '%s  %s\n' "$target_image_sha256" "$run_root/$target_image_name" | sha256sum --check
-chmod 0444 "$run_root/$target_image_name"
-"$target_dir/prepare-image.sh" "$run_root/$target_image_name" "$system_image" "$target_system_size"
+# The adapter pins the base image's sha256, so that check doubles as the cache
+# validator: a cached file is used only while it still matches, and a version
+# bump changes both the name and the hash. prepare-image.sh makes system.img a
+# qcow2 backing-file reference to this path, so it must stay readable for the
+# whole run rather than be consumed like scratch.
+mkdir -p "$image_cache"
+if printf '%s  %s\n' "$target_image_sha256" "$base_image" | sha256sum --status --check - 2>/dev/null; then
+	printf 'boomerangz integration: reusing cached %s\n' "$target_image_name"
+else
+	download=$(mktemp "$image_cache/.$target_image_name.XXXXXX")
+	curl --fail --location --silent --show-error "$target_image_url" --output "$download" || {
+		rm -f -- "$download"
+		fail "could not download $target_image_url"
+	}
+	printf '%s  %s\n' "$target_image_sha256" "$download" | sha256sum --check || {
+		rm -f -- "$download"
+		fail "base image checksum mismatch for $target_image_name"
+	}
+	chmod 0444 "$download"
+	# Rename inside the cache directory so a concurrent run sees either the
+	# previous file or the complete new one, never a partial download.
+	mv -f -- "$download" "$base_image"
+fi
+"$target_dir/prepare-image.sh" "$base_image" "$system_image" "$target_system_size"
 qemu-img create -f qcow2 "$source_image" 2G
 qemu-img create -f qcow2 "$destination_image" 2G
 
