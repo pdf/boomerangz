@@ -44,7 +44,7 @@ func terminalWidth(writer io.Writer) (bool, int) {
 	return true, width
 }
 
-func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential string, watch bool, interval time.Duration) error {
+func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential string, watch, useJSON bool, interval time.Duration) error {
 	if interval < 100*time.Millisecond || interval > time.Hour {
 		return fmt.Errorf("status interval must be between 100ms and 1h")
 	}
@@ -54,6 +54,7 @@ func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential
 	}
 	defer func() { _ = client.Connection.Close() }()
 	interactive, width := terminalWidth(out)
+	interactive = interactive && !useJSON
 	if !watch {
 		response, err := client.Status.GetStatus(ctx, &controlrpc.GetStatusRequest{})
 		if err != nil {

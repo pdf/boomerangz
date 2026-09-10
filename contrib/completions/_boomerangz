@@ -15,7 +15,7 @@ _boomerangz_options() {
     'config check'|'config show') reply=(-h --help --config --config-dir) ;;
     'config reload') reply=(-h --help --socket) ;;
     'daemon ') reply=(-h --help --config --config-dir) ;;
-    'status ') reply=(-h --help --config --config-dir --credential -w --watch -i --interval) ;;
+    'status ') reply=(-h --help --config --config-dir --credential -w --watch -i --interval --json) ;;
     'trigger ') reply=(-h --help --config --config-dir --credential) ;;
     'version ') reply=(-h --help --json) ;;
     'pairing create') reply=(-h --help --config --config-dir --listener --client-cert --client-key --scope --expires-in) ;;

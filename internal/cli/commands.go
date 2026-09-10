@@ -170,6 +170,7 @@ type statusCommand struct {
 	Credential    string        `help:"Imported pairing name or absolute bundle path."`
 	Watch         bool          `short:"w" help:"Continuously watch status."`
 	Interval      time.Duration `short:"i" default:"2s" help:"Maximum interval between watch updates."`
+	JSON          bool          `help:"Emit JSON."`
 }
 
 func (c *statusCommand) Run(env *commandEnvironment) error {
@@ -177,7 +178,7 @@ func (c *statusCommand) Run(env *commandEnvironment) error {
 	if err != nil {
 		return err
 	}
-	return runStatus(env.Context, env.Stdout, loaded.Config, c.Credential, c.Watch, c.Interval)
+	return runStatus(env.Context, env.Stdout, loaded.Config, c.Credential, c.Watch, c.JSON, c.Interval)
 }
 
 type triggerCommand struct {

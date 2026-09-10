@@ -22,14 +22,16 @@ boomerangz status
 ```
 
 In a terminal, status is formatted for reading. Redirected output is one JSON
-object. Watch continuously:
+object, and `--json` selects that structured output even in a terminal. Watch
+continuously:
 
 ```sh
 boomerangz status --watch
 boomerangz status --watch --interval 5s
 ```
 
-When watch output is redirected, it becomes newline-delimited JSON.
+When watch output is redirected, or when `--json` is supplied, it becomes
+newline-delimited JSON.
 
 ## Request a snapshot
 

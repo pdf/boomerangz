@@ -26,11 +26,12 @@ Commands that read configuration accept:
 | Command | Options and arguments |
 | --- | --- |
 | `boomerangz daemon` | Run management in the foreground. |
-| `boomerangz status` | `--credential NAME_OR_PATH`, `--watch`/`-w`, and `--interval DURATION` (default `2s`). |
+| `boomerangz status` | `--credential NAME_OR_PATH`, `--watch`/`-w`, `--interval DURATION` (default `2s`), and `--json`. |
 | `boomerangz trigger [DATASET...]` | Empty selects every active root; `--credential NAME_OR_PATH` addresses a paired listener. |
 
 Interactive status uses a readable terminal view. Redirected one-shot output is
-one JSON object; redirected watch output is newline-delimited JSON.
+one JSON object; redirected watch output is newline-delimited JSON. Add `--json`
+to emit that structured output even when standard output is a terminal.
 
 ## Dataset lifecycle
 
