@@ -162,6 +162,7 @@ func TestTargetBindingDetectsReplacementAndMappingDrift(t *testing.T) {
 	}
 	property := targetBindingProperty(initial.TargetBinding.CanonicalTarget)
 	view.Source.Properties = append(view.Source.Properties, zfs.Property{Dataset: request.Source, Name: property, Value: encoded, Source: zfs.SourceLocal})
+	view.BindingIdentity = view.DestinationIdentity
 	if _, err := Build(request, view, fixtureInstallation); err != nil {
 		t.Fatalf("stable bootstrap binding rejected: %v", err)
 	}
@@ -189,6 +190,59 @@ func TestTargetBindingDetectsReplacementAndMappingDrift(t *testing.T) {
 	view.DestinationIdentity.GUID++
 	if _, err := Build(request, view, fixtureInstallation); err == nil {
 		t.Fatal("same-named replacement accepted")
+	}
+}
+
+func TestTargetBindingAllowsNewIntermediateAncestor(t *testing.T) {
+	t.Parallel()
+	request, view := testFixture(t)
+	oldSource, newSource := request.Source, "tank/projects/data"
+	request.Source = newSource
+	request.DestinationRoot = "backup"
+	request.Policy.Local = []string{"backup"}
+	request.Policy.Discard = policy.DiscardFirst
+	for index := range view.Inventory {
+		if view.Inventory[index].Name == oldSource {
+			view.Inventory[index].Name = newSource
+		}
+	}
+	for index := range view.Source.Objects {
+		view.Source.Objects[index].Name = strings.Replace(view.Source.Objects[index].Name, oldSource, newSource, 1)
+	}
+	for index := range view.Source.Properties {
+		view.Source.Properties[index].Dataset = strings.Replace(view.Source.Properties[index].Dataset, oldSource, newSource, 1)
+	}
+	for key, value := range request.Policy.Values {
+		if value.Dataset == oldSource {
+			value.Dataset = newSource
+		}
+		if key == policy.Namespace+"local" {
+			value.Value = "backup"
+		}
+		if key == policy.Namespace+"discard" {
+			value.Value = string(policy.DiscardFirst)
+		}
+		request.Policy.Values[key] = value
+	}
+
+	initial, err := Build(request, view, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := encodeBinding(initial.TargetBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.Source.Properties = append(view.Source.Properties, zfs.Property{Dataset: newSource, Name: targetBindingProperty(initial.TargetBinding.CanonicalTarget), Value: encoded, Source: zfs.SourceLocal})
+	view.BindingIdentity = view.DestinationIdentity
+	view.Inventory = append(view.Inventory, zfs.Dataset{Name: "backup/projects", Type: zfs.Filesystem})
+	view.DestinationIdentity = zfs.DatasetIdentity{Name: "backup/projects", Type: zfs.Filesystem, GUID: 12, Pool: "backup", PoolGUID: 11}
+	plan, err := Build(request, view, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.TargetBinding != initial.TargetBinding || plan.BindingNew {
+		t.Fatalf("binding changed after intermediate appeared: initial=%+v plan=%+v", initial.TargetBinding, plan.TargetBinding)
 	}
 }
 
