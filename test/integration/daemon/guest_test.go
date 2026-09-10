@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +25,27 @@ import (
 )
 
 type sendInterval struct{ start, end int64 }
+
+type scopedDaemonBackend struct {
+	*zfs.Direct
+	root string
+}
+
+func (b *scopedDaemonBackend) scoped(properties []zfs.Property) []zfs.Property {
+	return slices.DeleteFunc(properties, func(property zfs.Property) bool {
+		return property.Dataset != b.root && !strings.HasPrefix(property.Dataset, b.root+"/")
+	})
+}
+
+func (b *scopedDaemonBackend) GetActivationProperties(ctx context.Context) ([]zfs.Property, error) {
+	properties, err := b.Direct.GetActivationProperties(ctx)
+	return b.scoped(properties), err
+}
+
+func (b *scopedDaemonBackend) GetLifecycleProperties(ctx context.Context) ([]zfs.Property, error) {
+	properties, err := b.Direct.GetLifecycleProperties(ctx)
+	return b.scoped(properties), err
+}
 
 type observedLocalStream struct {
 	delegate transfer.Stream
@@ -285,7 +307,8 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	cfg.Daemon.ManagementWorkers = 3
 	cfg.Daemon.LocalTransferWorkers = 2
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	runtime, err := daemon.NewWithLocalStream(cfg, direct, "abcdefab-cdef-4abc-8def-abcdefabcdef", logger, observed)
+	backend := &scopedDaemonBackend{Direct: direct, root: root}
+	runtime, err := daemon.NewWithLocalStream(cfg, backend, "abcdefab-cdef-4abc-8def-abcdefabcdef", logger, observed)
 	if err != nil {
 		t.Fatal(err)
 	}
