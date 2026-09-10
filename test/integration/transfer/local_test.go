@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -399,7 +400,7 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 	suffix := time.Now().UTC().Format("150405000")
 	source := sourcePool + "/data/payload"
 	destination := destinationPool + "/data/interrupted-" + suffix
-	command("set", policy.Namespace+"enabled=on", policy.Namespace+"local="+destination, source)
+	command("set", policy.Namespace+"enabled=on", policy.Namespace+"incremental=all", policy.Namespace+"local="+destination, source)
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
 		t.Fatal(err)
@@ -458,8 +459,21 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sourceState.Holds) != 1 || len(sourceState.Holds[recovered.Plan.Snapshot]) == 0 {
-		t.Fatalf("successful recovery did not retain its incremental-all base: %v", sourceState.Holds)
+	lineage, err := lifecycle.RootAuthority(sourceState, source, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	references, err := lifecycle.References(sourceState, source, lineage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := "local:" + destination
+	retained := slices.ContainsFunc(references, func(reference lifecycle.Reference) bool {
+		snapshot := reference.SnapshotName(source)
+		return reference.Target == target && slices.Contains(sourceState.Holds[snapshot], reference.HoldName())
+	})
+	if !retained {
+		t.Fatalf("successful recovery did not retain its incremental-all reference: refs=%+v holds=%v", references, sourceState.Holds)
 	}
 	t.Logf("interrupted receive resumed from durable state on %s", destination)
 }
