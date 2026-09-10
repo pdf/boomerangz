@@ -26,6 +26,14 @@ exercise. It takes a guest boot per run, so `make integration-test-compile`
 is the quick check that they still build - it is a compile gate, not
 verification, and work is not verified against it.
 
+`test/integration/README.md` carries the coverage ledger: one line per
+behavior axis, naming the test that owns it, and naming the axes nothing owns
+yet. A change that adds, moves, or removes an integration behavior updates the
+ledger in the same change - it is how "is this tested?" gets answered without
+reading the suite, and it is worth reading only while it is true. Adding a
+test to a package whose stage already runs also means raising that stage's
+pass floor in `guest/run-common.sh`.
+
 Generated protobuf `.pb.go` files are committed. Regenerate with
 `go tool buf generate` (covered by `make test`'s diff-check) rather than
 editing them.
@@ -79,3 +87,5 @@ tooling or assistant attribution in commit messages or PR descriptions.
   properties, ownership, and lifecycle semantics; its Section 12 package tree
   is stale. Prefer the code and ARCHITECTURE.md for current structure.
 - `internal/cli/commands.go` - the whole CLI surface at a glance.
+- [test/integration/README.md](test/integration/README.md) - what the
+  integration suite owns, what it does not, and how a run is structured.

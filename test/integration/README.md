@@ -1,0 +1,119 @@
+# Integration suite
+
+Tests that need a real ZFS kernel module: stream formats, resume tokens, holds
+and bookmarks, delegation, mount semantics, and process lifecycle. Everything
+here runs inside a disposable QEMU guest against pools the harness creates and
+destroys.
+
+Run with `make integration-test`. See [AGENTS.md](../../AGENTS.md) for when it
+is expected to run and `make integration-test-compile` for the compile-only
+check.
+
+## What belongs here
+
+Apply the sizing rule before adding anything: if a fake `zfs.Executor` can
+express the behaviour, it belongs in a unit test, not here. A guest boot per
+run is the cost, and a test that only asserts what a fake was told to return
+proves nothing. `localBackend` in `internal/transfer/local_test.go` is the
+established idiom for the unit-test side.
+
+## Coverage ledger
+
+One line per behaviour axis, naming what owns it. The axes follow
+[ARCHITECTURE.md](../../ARCHITECTURE.md)'s headings, because those are the
+axes changes get reviewed against.
+
+**A change that adds, moves, or removes an integration behaviour updates this
+ledger in the same change.** It is the answer to "is this tested?", and it is
+only worth reading if it is true.
+
+### Snapshot lifecycle and `org.boomerangz:state:*`
+
+| Behaviour | Owned by |
+| --- | --- |
+| Recursive vs non-recursive snapshot scope | `TestGuestLifecycle/snapshot-scope` |
+| Reference protect, checkpoint, release; wrong destination GUID refused | `TestGuestLifecycle/reference-checkpoint` |
+| Pruning respects foreign holds and the newest snapshot | `TestGuestLifecycle/prune-respects-holds` |
+| Adoption after lineage loss, without disturbing descendants | `TestGuestLifecycle/adopt` |
+| Clean clears metadata and preserves snapshots | `TestGuestLifecycle/clean` |
+| `dataset adopt` and `dataset clean` over the CLI | `TestGuestLifecycle/cli-adopt-and-clean` (gated on `BOOMERANGZ_LIFECYCLE_GUEST_CLI`) |
+| Received-property layering, and which hidden values reach `State.Received` | `TestGuestReceivedPropertyLayers` |
+
+### Property to send/receive mapping
+
+| Behaviour | Owned by |
+| --- | --- |
+| Full bootstrap to multiple local targets | `TestGuestLocalTransfer/full-bootstrap` |
+| `incremental=all` base retention and hold rotation across pruning | `TestGuestLocalTransfer/incremental-all-base-retention` |
+| `-i` vs `-I`, foreign intermediates, namespace isolation, receive overrides | `TestGuestLocalTransfer/incremental-modes` |
+| Bookmark-based incremental after the source snapshot is pruned | `TestGuestLocalTransfer/bookmark-incremental` |
+| Unrelated destination history refused before sending | `TestGuestLocalTransfer/unrelated-destination-refused` |
+| Reseed recovery of an otherwise-blocked target | `TestGuestLocalTransfer/reseed-recovery` |
+| Recursive `replicate` with `discard=first` and `discard=all` mapping | `TestGuestLocalTransfer/recursive-mapping` |
+| Linux `canmount=noauto` ancestor preparation under an ordinary receive root | `TestGuestLocalTransfer/linux-ancestor-preparation` |
+| Resume after an interrupted receive, for both incremental modes | `TestGuestInterruptedTransferRecovery` |
+| Raw delegated ZFS capability floor: send/recv, `-R`, `-p`, resume tokens, holds, bookmarks | `guest/delegated-matrix.sh` |
+
+### Remote transports
+
+| Behaviour | Owned by |
+| --- | --- |
+| Full bootstrap over `ssh` direct, `ssh-shell` and `native`, with transport recorded in the target binding | `TestGuestSSHTransfer` |
+| Everything the local engine is tested for, over a remote transport | **Not covered** - chunk B |
+| Encryption roots, raw sends, key-unavailable behaviour | **Not covered** - chunk A |
+
+### Scheduler and daemon
+
+| Behaviour | Owned by |
+| --- | --- |
+| Scheduling and retirement | `TestGuestDaemonSchedulingAndRetirement` |
+| Concurrent siblings, ancestor exclusion, conservative destination setup | `TestGuestLocalTransferConcurrency` |
+| Remote outage: `waiting-retry` with reason retained, pending-snapshot coalescing, reconnection, canonical target identity | `TestGuestRemoteOutageReconnection` |
+| `prune:<dataset>` jobs reaching `succeeded` | **Not covered** - chunk C |
+| Retry and backoff state sequence, rather than its endpoints | **Not covered** - chunk C |
+
+### Control plane and packaging
+
+| Behaviour | Owned by |
+| --- | --- |
+| Daemon control socket lifecycle | `TestGuestDaemonControl` |
+| Recovery after an abrupt restart | `TestGuestDaemonAbruptRestart` |
+| Packaged systemd unit start/reload/stop, not enabled by default | `targets/cachyos/run.sh` |
+| `pairing create` / `import` / `list` / `revoke` against a real listener | **Not covered** - chunk D |
+| Access control negatives: revoked credential, `ssh-shell` command outside its set, root outside `replication_roots`, missing delegation | **Not covered** - chunk D |
+| `dataset list`, `dataset inspect`, `dataset reseed`, `identity recover` | **Not covered** - chunk E |
+| Adversarial: destination out of space mid-receive, socket contention, power loss between snapshot and property write | **Not covered** - chunk F |
+
+Chunk letters refer to [design/integration-coverage.md](../../design/integration-coverage.md),
+which carries the reasoning behind each gap and the plan for closing it.
+
+### Not behaviour tests
+
+Two things in these packages own no axis, and their absence from the ledger
+above is deliberate rather than a gap. `TestGuestInterruptedReceiveHelper` is
+a subprocess the interrupted-receive test re-executes to sever a stream
+mid-flight; it skips unless its own environment variable is set, so it reports
+as skipped in a normal run. `BenchmarkGuestRemoteTransfer` measures remote
+transfer throughput and runs only under
+`BOOMERANGZ_INTEGRATION_MODE=benchmark` via `make integration-benchmark`,
+which is a separate mode that skips the test stages entirely.
+
+## How a run is structured
+
+`host/run.sh` provisions the guest and hands off to `targets/<target>/run.sh`,
+which installs the packaged assets and calls `guest/run-common.sh`. That runs
+the raw capability probe and then each test binary package-wide, with no
+name filters: a test added to any package here runs without editing a runner
+script.
+
+Each stage declares a floor for the number of top-level passes it expects. A
+test that vanishes - deleted, renamed, or silently skipped by an unset
+environment guard - drops the count below the floor and fails the run rather
+than passing unnoticed. Raise the floor when adding a test whose environment
+guard is satisfied by that stage.
+
+Tests own their fixtures. `zfstest.FixtureName` names a dataset for one test,
+`zfstest.PayloadVolume` creates and seeds a zvol on demand, and
+`zfstest.RegisterCleanup` destroys the tree afterwards, releasing holds first.
+`bootstrap.sh` creates pools and delegates permissions; it builds no fixtures,
+so stage order carries no meaning and can be shuffled.
