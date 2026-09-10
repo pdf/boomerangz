@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,7 +23,7 @@ import (
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
-func installDelayedZFSSend(t *testing.T, delay time.Duration) {
+func installDelayedZFSSend(t *testing.T, delay time.Duration) string {
 	t.Helper()
 	realZFS, err := exec.LookPath("zfs")
 	if err != nil {
@@ -30,15 +31,24 @@ func installDelayedZFSSend(t *testing.T, delay time.Duration) {
 	}
 	directory := t.TempDir()
 	wrapper := filepath.Join(directory, "zfs")
+	logPath := filepath.Join(directory, "send.log")
 	const script = `#!/bin/sh
 set -eu
 if [ "${1-}" = send ]; then
+	snapshot=
 	for argument in "$@"; do
 		if [ "$argument" = -nP ]; then
 			exec "$BOOMERANGZ_TEST_REAL_ZFS" "$@"
 		fi
+		snapshot=$argument
 	done
+	identifier=$$
+	printf 'start %s %s %s\n' "$identifier" "$snapshot" "$(date +%s%N)" >>"$BOOMERANGZ_TEST_SEND_LOG"
 	sleep "$BOOMERANGZ_TEST_SEND_DELAY"
+	status=0
+	"$BOOMERANGZ_TEST_REAL_ZFS" "$@" || status=$?
+	printf 'end %s %s %s\n' "$identifier" "$snapshot" "$(date +%s%N)" >>"$BOOMERANGZ_TEST_SEND_LOG"
+	exit "$status"
 fi
 exec "$BOOMERANGZ_TEST_REAL_ZFS" "$@"
 `
@@ -47,45 +57,66 @@ exec "$BOOMERANGZ_TEST_REAL_ZFS" "$@"
 	}
 	t.Setenv("BOOMERANGZ_TEST_REAL_ZFS", realZFS)
 	t.Setenv("BOOMERANGZ_TEST_SEND_DELAY", strconv.FormatFloat(delay.Seconds(), 'f', 3, 64))
+	t.Setenv("BOOMERANGZ_TEST_SEND_LOG", logPath)
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
 }
 
-func observeTransferJobs(t *testing.T, runtime *daemon.Runtime, description string, jobs []string, phase time.Time, expectOverlap bool) {
+type sendInterval struct{ start, end int64 }
+
+func waitForSendIntervals(t *testing.T, logPath string, datasets []string) map[string]sendInterval {
 	t.Helper()
 	deadline := time.Now().Add(45 * time.Second)
-	sawOverlap := false
 	for time.Now().Before(deadline) {
-		latest := make(map[string]daemon.Event, len(jobs))
-		for _, event := range runtime.Status() {
-			if slices.Contains(jobs, event.Job) && event.At.After(phase) {
-				latest[event.Job] = event
+		contents, err := os.ReadFile(logPath)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		type record struct {
+			dataset string
+			at      int64
+		}
+		starts := make(map[string]record)
+		intervals := make(map[string]sendInterval, len(datasets))
+		for _, line := range strings.Split(string(contents), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) != 4 {
+				continue
+			}
+			at, parseErr := strconv.ParseInt(fields[3], 10, 64)
+			if parseErr != nil {
+				continue
+			}
+			dataset, _, _ := strings.Cut(fields[2], "@")
+			switch fields[0] {
+			case "start":
+				starts[fields[1]] = record{dataset: dataset, at: at}
+			case "end":
+				start, exists := starts[fields[1]]
+				if exists && start.dataset == dataset {
+					if _, recorded := intervals[dataset]; !recorded {
+						intervals[dataset] = sendInterval{start: start.at, end: at}
+					}
+				}
 			}
 		}
-		sending, succeeded := 0, 0
-		for _, job := range jobs {
-			switch latest[job].State {
-			case "sending":
-				sending++
-			case "succeeded":
-				succeeded++
+		complete := true
+		for _, dataset := range datasets {
+			if intervals[dataset].end == 0 {
+				complete = false
+				break
 			}
 		}
-		if sending > 1 {
-			sawOverlap = true
-			if !expectOverlap {
-				t.Fatalf("%s overlapped hierarchy-conflicting transfers: %+v", description, latest)
-			}
-		}
-		if succeeded == len(jobs) {
-			if expectOverlap && !sawOverlap {
-				t.Fatalf("%s completed without concurrent sibling transfers: %+v", description, latest)
-			}
-			return
+		if complete {
+			return intervals
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("timed out observing %s: %+v", description, runtime.Status())
+	t.Fatalf("timed out waiting for ZFS sends from %v", datasets)
+	return nil
 }
+
+func sendIntervalsOverlap(a, b sendInterval) bool { return a.start < b.end && b.start < a.end }
 
 // This test is opt-in and must run in the disposable guest, never on the host.
 func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
@@ -227,7 +258,7 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 
 	// Keep each acquired transfer lock observable without changing the daemon's
 	// production stream implementation or relying on fixture data volume.
-	installDelayedZFSSend(t, 2*time.Second)
+	sendLog := installDelayedZFSSend(t, 2*time.Second)
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
 		t.Fatal(err)
@@ -244,27 +275,38 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
-	phase := time.Now().UTC()
 	go func() { done <- runtime.Run(ctx) }()
-	job := func(dataset string) string { return "local:" + dataset + ":" + target }
 
 	// All mapped destinations are initially absent, so setup work must use the
 	// common existing receive root and serialize even with two workers.
-	observeTransferJobs(t, runtime, "initial destination setup", []string{job(root), job(left), job(right)}, phase, false)
+	initial := waitForSendIntervals(t, sendLog, []string{root, left, right})
+	if sendIntervalsOverlap(initial[root], initial[left]) || sendIntervalsOverlap(initial[root], initial[right]) || sendIntervalsOverlap(initial[left], initial[right]) {
+		t.Fatalf("initial destination setup overlapped hierarchy-conflicting sends: %+v", initial)
+	}
 
-	phase = time.Now().UTC()
+	if err := os.WriteFile(sendLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	accepted, err := runtime.Trigger([]string{left, right})
 	if err != nil || len(accepted) != 2 {
 		t.Fatalf("trigger siblings=%v err=%v", accepted, err)
 	}
-	observeTransferJobs(t, runtime, "existing sibling destinations", []string{job(left), job(right)}, phase, true)
+	siblings := waitForSendIntervals(t, sendLog, []string{left, right})
+	if !sendIntervalsOverlap(siblings[left], siblings[right]) {
+		t.Fatalf("existing sibling destinations did not send concurrently: %+v", siblings)
+	}
 
-	phase = time.Now().UTC()
+	if err := os.WriteFile(sendLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	accepted, err = runtime.Trigger([]string{root, left})
 	if err != nil || len(accepted) != 2 {
 		t.Fatalf("trigger ancestor pair=%v err=%v", accepted, err)
 	}
-	observeTransferJobs(t, runtime, "ancestor and descendant destinations", []string{job(root), job(left)}, phase, false)
+	ancestorPair := waitForSendIntervals(t, sendLog, []string{root, left})
+	if sendIntervalsOverlap(ancestorPair[root], ancestorPair[left]) {
+		t.Fatalf("ancestor and descendant destinations sent concurrently: %+v", ancestorPair)
+	}
 
 	cancel()
 	select {
