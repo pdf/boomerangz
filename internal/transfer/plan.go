@@ -276,7 +276,17 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		if err := validateBinding(*storedBinding); err != nil {
 			return plan, err
 		}
-		if *storedBinding != wantedBinding {
+		verifiedBinding := wantedBinding
+		if !view.DestinationExists {
+			if view.BindingIdentity.Name == "" {
+				return plan, fmt.Errorf("bound destination identity is missing")
+			}
+			verifiedBinding, err = bindingForTarget(request, target, view.BindingIdentity, transport, canonical)
+			if err != nil {
+				return plan, err
+			}
+		}
+		if *storedBinding != verifiedBinding {
 			return plan, fmt.Errorf("target identity or mapping differs from persistent binding; run boomerangz dataset reseed for this source and target")
 		}
 		plan.TargetBinding = *storedBinding

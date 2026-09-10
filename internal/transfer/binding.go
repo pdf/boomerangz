@@ -52,8 +52,8 @@ type localIdentityReader interface {
 	InspectDatasetIdentity(context.Context, string) (zfs.DatasetIdentity, error)
 }
 
-// InspectTarget resolves the exact dataset or nearest existing ancestor and
-// compares it with any persistent source-root binding for local or remote targets.
+// InspectTarget resolves an unbound target through its nearest existing ancestor.
+// A bound target revalidates its stored anchor until the exact dataset exists.
 func InspectTarget(ctx context.Context, reader localIdentityReader, request Request, source zfs.State) (LocalTargetInspection, error) {
 	transport, canonical := requestTransport(request), canonicalTarget(request)
 	configured := request.DestinationRoot
@@ -86,6 +86,25 @@ func InspectTarget(ctx context.Context, reader localIdentityReader, request Requ
 		inspection.Status = "unavailable"
 		return inspection, fmt.Errorf("destination has no existing ancestor")
 	}
+	stored, err := storedTargetBinding(source, request.Source, canonical)
+	if err != nil {
+		inspection.Status = "invalid-binding"
+		return inspection, err
+	}
+	inspection.Stored = stored
+	if stored != nil {
+		if err := validateBinding(*stored); err != nil {
+			inspection.Status = "invalid-binding"
+			return inspection, err
+		}
+		// New intermediate datasets may appear beneath a verified bootstrap
+		// anchor as related sources populate the destination namespace. Until
+		// this source's exact mapped dataset exists, revalidate the stored anchor
+		// rather than treating the nearer ancestor as a replacement.
+		if anchor != mapped {
+			anchor = stored.Anchor
+		}
+	}
 	identity, err := reader.InspectDatasetIdentity(ctx, anchor)
 	if err != nil {
 		inspection.Status = "unavailable"
@@ -97,19 +116,9 @@ func InspectTarget(ctx context.Context, reader localIdentityReader, request Requ
 		return inspection, err
 	}
 	inspection.Resolved = &resolved
-	stored, err := storedTargetBinding(source, request.Source, resolved.CanonicalTarget)
-	if err != nil {
-		inspection.Status = "invalid-binding"
-		return inspection, err
-	}
-	inspection.Stored = stored
 	if stored == nil {
 		inspection.Status = "unbound"
 		return inspection, nil
-	}
-	if err := validateBinding(*stored); err != nil {
-		inspection.Status = "invalid-binding"
-		return inspection, err
 	}
 	if *stored != resolved {
 		inspection.Status = "mismatch"

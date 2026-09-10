@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
@@ -20,6 +21,7 @@ type localBackend struct {
 	destination zfs.State
 	destExists  bool
 	identity    *zfs.DatasetIdentity
+	identities  map[string]zfs.DatasetIdentity
 	writes      []string
 	checks      map[string][]string
 	checkErr    error
@@ -49,6 +51,9 @@ func (b *localBackend) InspectState(_ context.Context, dataset string, _ bool) (
 }
 
 func (b *localBackend) InspectDatasetIdentity(_ context.Context, dataset string) (zfs.DatasetIdentity, error) {
+	if identity, found := b.identities[dataset]; found {
+		return identity, nil
+	}
 	if b.identity != nil && b.identity.Name == dataset {
 		return *b.identity, nil
 	}
@@ -401,6 +406,38 @@ func TestInspectLocalTargetReportsUnboundAndMismatch(t *testing.T) {
 	inspection, err = InspectLocalTarget(t.Context(), backend, request, backend.source)
 	if err == nil || inspection.Status != "invalid-binding" {
 		t.Fatalf("invalid inspection=%+v err=%v", inspection, err)
+	}
+}
+
+func TestInspectTargetRetainsVerifiedBootstrapAnchor(t *testing.T) {
+	t.Parallel()
+	request := Request{Source: "tank/projects/data", DestinationRoot: "backup", Policy: policy.Effective{Discard: policy.DiscardFirst}}
+	mapped := "backup/projects/data"
+	anchor := zfs.DatasetIdentity{Name: "backup", Type: zfs.Filesystem, GUID: 10, Pool: "backup", PoolGUID: 11}
+	binding, err := bindingFor(request, mapped, anchor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := encodeBinding(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := zfs.State{Properties: []zfs.Property{{Dataset: request.Source, Name: targetBindingProperty(binding.CanonicalTarget), Value: encoded, Source: zfs.SourceLocal}}}
+	backend := &localBackend{
+		inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem}, {Name: "backup/projects", Type: zfs.Filesystem}},
+		identities: map[string]zfs.DatasetIdentity{
+			"backup":          anchor,
+			"backup/projects": {Name: "backup/projects", Type: zfs.Filesystem, GUID: 12, Pool: "backup", PoolGUID: 11},
+		},
+	}
+	inspection, err := InspectTarget(t.Context(), backend, request, source)
+	if err != nil || inspection.Status != "verified" || inspection.Resolved == nil || inspection.Resolved.Anchor != "backup" {
+		t.Fatalf("inspection=%+v err=%v", inspection, err)
+	}
+	backend.inventory = append(backend.inventory, zfs.Dataset{Name: mapped, Type: zfs.Filesystem})
+	backend.identities[mapped] = zfs.DatasetIdentity{Name: mapped, Type: zfs.Filesystem, GUID: 13, Pool: "backup", PoolGUID: 11}
+	if inspection, err = InspectTarget(t.Context(), backend, request, source); err == nil || inspection.Status != "mismatch" {
+		t.Fatalf("unexpected exact destination accepted: inspection=%+v err=%v", inspection, err)
 	}
 }
 
