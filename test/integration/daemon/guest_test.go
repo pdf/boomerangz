@@ -288,10 +288,11 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	phase := time.Now().UTC()
 	go func() { done <- runtime.Run(ctx) }()
 
-	// All mapped destinations are initially absent, so setup work must use the
-	// common existing receive root and serialize even with two workers.
+	// All mapped destinations are initially absent, so the root must establish
+	// the shared hierarchy before either descendant starts. Once it has, the
+	// sibling setup streams no longer conflict with one another.
 	initial := waitForSendIntervals(t, observed, runtime, []string{root, left, right})
-	if sendIntervalsOverlap(initial[root], initial[left]) || sendIntervalsOverlap(initial[root], initial[right]) || sendIntervalsOverlap(initial[left], initial[right]) {
+	if initial[root].end > initial[left].start || initial[root].end > initial[right].start {
 		t.Fatalf("initial destination setup overlapped hierarchy-conflicting sends: %+v", initial)
 	}
 	waitForTransferSuccesses(t, runtime, []string{job(root), job(left), job(right)}, phase)
