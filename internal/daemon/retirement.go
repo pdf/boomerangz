@@ -255,7 +255,7 @@ func (r *Runtime) enqueueDestinationPrune(dataset string, effective policy.Effec
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		if startErr := ticket.Start(); startErr != nil {
-			return Outcome{State: "blocked", Reason: startErr.Error()}
+			return blockedOrCancelled(startErr)
 		}
 		if pruneErr := r.pruneDestination(ticket.Context(), dataset, effective, canonical); pruneErr != nil {
 			return Outcome{State: "failed", Reason: pruneErr.Error()}

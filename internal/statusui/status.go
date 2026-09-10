@@ -150,18 +150,21 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) 
 			return err
 		}
 	}
-	if len(view.Jobs) != 0 {
+	jobs := slices.DeleteFunc(slices.Clone(view.Jobs), func(job *controlrpc.JobStatus) bool {
+		return job.GetState() == "cancelled"
+	})
+	if len(jobs) != 0 {
 		if _, err := fmt.Fprintln(writer, "\nLATEST WORK"); err != nil {
 			return err
 		}
 		jobWidth, stateWidth := 0, 0
-		for _, job := range view.Jobs {
+		for _, job := range jobs {
 			jobWidth = max(jobWidth, len(displayJobName(job.GetJob())))
 			stateWidth = max(stateWidth, len(job.GetState()))
 		}
 		var rows strings.Builder
 		table := newTable(&rows)
-		for _, job := range view.Jobs {
+		for _, job := range jobs {
 			var detail strings.Builder
 			if job.GetState() == "sending" && job.GetTotalKnown() && job.GetTotalBytes() != 0 {
 				progressWidth := width - jobWidth - stateWidth - 48
