@@ -198,9 +198,23 @@ the test once it does. And the outage remote's root is spelled
 `boomerangz-test-<run-id>-dst/data/outage`, recomputed in the runner from the
 run ID rather than read back from `bootstrap.sh`.
 
-Not yet verified against a real guest: this landed on `make test` (shellcheck
-plus `make integration-test-compile`) only. The first QEMU run on this branch
-is what confirms the handshake timing and the pass floors.
+**Verified by a real run.** `make integration-test` is green: nine top-level
+passes across the five stages, no failures, packaged unit checks green.
+`TestGuestRemoteOutageReconnection` passed in 72s - a real connection refusal,
+`waiting-retry` with its reason retained, coalescing across the outage, the
+handshake, and canonical target identity after reconnection. The env guards
+carried the opt-in exactly as intended: `TestGuestSSHTransfer` skipped itself
+in the local stage and the local tests skipped in the remote stage, with both
+stages still meeting their floors.
+
+The first run failed, and usefully. `run_stage` executes as the invoking user
+while `$artifact_dir` is chowned to the service account, so `tee` could not
+create the stage log; under `pipefail` every stage exited 1 while its tests
+reported `PASS`. Both `make test` and `make integration-test-compile` were
+green against a runner on which every stage would have failed - the pass-floor
+mechanism added here to catch dormant tests was itself dead on arrival, and
+only a guest boot could show it. The stage log now goes to an invoking-user
+`mktemp` file.
 
 ### Chunk 1 - fixture isolation
 
@@ -212,6 +226,16 @@ is what confirms the handshake timing and the pass floors.
 
 Done when: the three suites that share `$src/data/payload` no longer do, and
 the stage order in `run-common.sh` can be shuffled without failures.
+
+Chunk 0's run gave this a concrete symptom to fix. `TestGuestSSHTransfer`
+sets `org.boomerangz:remote=home` on `$src/data/payload` and never clears it,
+so the daemon stage - which now drives a remote, and did not before - picked
+up a second job, `remote:<src>/data/payload:home`, and pointed it at the
+outage remote. It did not break the assertions, because the outage test
+watches its own job, but it contends for the transfer workers against that
+test's three-minute success deadline. The `known_hosts` sequencing noted under
+chunk 0 is the same defect seen from the other side. Both should go away when
+each test owns its source tree.
 
 ### Chunk 2 - split the monoliths
 
