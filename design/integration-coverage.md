@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: in progress. Chunk 0 has landed; chunks 1-3 and A-F are outstanding.
+Status: in progress. Chunks 0 and 1 have landed; chunks 2-3 and A-F are outstanding.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -216,7 +216,7 @@ mechanism added here to catch dormant tests was itself dead on arrival, and
 only a guest boot could show it. The stage log now goes to an invoking-user
 `mktemp` file.
 
-### Chunk 1 - fixture isolation
+### Chunk 1 - fixture isolation (done)
 
 - Give each test its own source tree under `$src/data/<test>-<suffix>` and its
   own destination roots. Move payload creation out of `bootstrap.sh` into a
@@ -236,6 +236,45 @@ watches its own job, but it contends for the transfer workers against that
 test's three-minute success deadline. The `known_hosts` sequencing noted under
 chunk 0 is the same defect seen from the other side. Both should go away when
 each test owns its source tree.
+
+**How it landed.** `bootstrap.sh` no longer builds a payload. Tests ask for
+one through `zfstest.PayloadVolume`, which creates a sparse zvol under a name
+from `zfstest.FixtureName`, seeds it, and registers a `t.Cleanup` that
+releases boomerangz's snapshot holds before `zfs destroy -R` - held snapshots
+refuse destruction regardless of `-f`, so the release pass is required rather
+than defensive. Cleanup failure logs instead of failing the test, leaving the
+guarded pool teardown as the backstop.
+
+Two consequences the change forced. Creating a sparse zvol under delegation
+needs `refreservation`, `volblocksize` and `volsize`, which bootstrap.sh had
+never granted because it did that work as root; and seeding writes to a
+`/dev/zvol` node that udev creates `root:disk`, so the service account needs
+that group. Both are fixture-only and commented as such.
+
+`delegated-matrix.sh` turned out to be a fourth consumer of the shared
+payload, and the one grep does not find: it never names the dataset, it
+recursively sends `$src/data` and asserts a volume child arrives, then
+truncates that same stream at 4M to force a resumable receive. It needed the
+payload's bulk, not just its existence. It now creates, seeds and destroys its
+own - which also makes it the first thing in the run to exercise the delegated
+volume permissions, so that question fails fast rather than three stages in.
+
+`known_hosts` was a shared mutable fixture too, and the reason chunk 0 had to
+sequence its seeding after the remote transfer stage: `TestGuestSSHTransfer`
+truncated the file. It now appends, and the runner seeds both host key entries
+before any stage runs.
+
+Verified two ways. A normal-order run is green with the payload bleed gone -
+zero `data/payload` jobs in the daemon stage, only the outage test's own, and
+no cleanup warnings. Then a run with the five stages fully reversed - control,
+daemon, transfer-remote, transfer-local, lifecycle - is also green, which is
+the done-when above and would have failed on host key verification before the
+`known_hosts` fix.
+
+Still shared, and left for chunk 3: `$src/data/child`, created by
+`bootstrap.sh` and used by both `delegated-matrix.sh` and
+`property-layers.sh`. The Go stages shuffle freely; those two probes do not
+yet.
 
 ### Chunk 2 - split the monoliths
 

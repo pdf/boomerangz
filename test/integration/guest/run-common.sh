@@ -133,6 +133,18 @@ sed 's/^/restrict /' "$loopback_key.pub" |
 sudo chown "$service_user:$service_user" "/var/lib/$service_user/.ssh/authorized_keys"
 sudo chmod 0600 "/var/lib/$service_user/.ssh/authorized_keys"
 
+# Seed both host key entries before any stage runs, so no stage depends on
+# another having populated known_hosts first. The outage listener presents the
+# same host key as sshd on port 22, so its entry is that keyscan with the host
+# field rewritten - it can be recorded while the link is still down.
+host_key=$(ssh-keyscan -t ed25519 -p 22 127.0.0.1)
+{
+	printf '%s\n' "$host_key"
+	printf '%s\n' "$host_key" | sed "s/^127\.0\.0\.1 /[127.0.0.1]:$outage_port /"
+} | sudo tee "/var/lib/$service_user/.ssh/known_hosts" >/dev/null
+sudo chown "$service_user:$service_user" "/var/lib/$service_user/.ssh/known_hosts"
+sudo chmod 0600 "/var/lib/$service_user/.ssh/known_hosts"
+
 if [[ $integration_mode == benchmark ]]; then
 	run_as_service \
 	BOOMERANGZ_REMOTE_GUEST_RUN="$run_id" \
@@ -161,16 +173,6 @@ BOOMERANGZ_REMOTE_GUEST_CLI="/usr/bin/boomerangz" \
 BOOMERANGZ_REMOTE_DIRECT_SSH_USER="$direct_ssh_user" \
 BOOMERANGZ_REMOTE_GUEST_USER="$service_user" \
 	"$artifact_dir/transfer.test"
-
-# The outage listener presents the same host key as sshd on port 22, so the
-# entry can be seeded from a keyscan of the live port before the link is up.
-# This runs after the remote transfer stage because that stage rewrites
-# known_hosts with the port 22 entry alone.
-ssh-keyscan -t ed25519 -p 22 127.0.0.1 |
-	sed "s/^127\.0\.0\.1 /[127.0.0.1]:$outage_port /" |
-	sudo tee -a "/var/lib/$service_user/.ssh/known_hosts" >/dev/null
-sudo chown "$service_user:$service_user" "/var/lib/$service_user/.ssh/known_hosts"
-sudo chmod 0600 "/var/lib/$service_user/.ssh/known_hosts"
 
 run_stage daemon 3 \
 BOOMERANGZ_DAEMON_GUEST_RUN="$run_id" \

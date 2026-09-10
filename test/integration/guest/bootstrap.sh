@@ -61,6 +61,10 @@ setup() {
 	verify_run_id "$run_id"
 	[[ $direct_ssh_user =~ ^[a-z_][a-z0-9_-]*$ ]] || fail "invalid direct SSH user"
 
+	# Seeding a zvol payload writes to its /dev/zvol node, which udev creates
+	# as root:disk. This is fixture-only and scoped to the disposable guest.
+	usermod -aG disk "$service_user"
+
 	install -d -m 0755 "$(dirname "$marker_path")"
 	printf '%s\n' "$run_id" >"$marker_path"
 	chmod 0644 "$marker_path"
@@ -82,20 +86,13 @@ setup() {
 	zpool create -m none "$destination_pool" "$destination_device"
 	zfs create -o mountpoint=none "$source_pool/data"
 	zfs create -o mountpoint=none "$source_pool/data/child"
-	zfs create -s -V 256M -b 128K "$source_pool/data/payload"
-	local payload_device="/dev/zvol/$source_pool/data/payload"
-	udevadm settle
-	for _ in {1..50}; do
-		[[ -e $payload_device ]] && break
-		sleep 0.1
-	done
-	[[ -e $payload_device ]] || fail "zvol device was not created: $payload_device"
-	dd if=/dev/urandom of="$payload_device" bs=1M count=32 status=none
 	zfs create -o mountpoint=none "$destination_pool/data"
 	# create on the source and snapshot on the destination are fixture-only
 	# permissions used by the integration suites. They are not deployment
 	# requirements. userprop on both sides is required by boomerangz metadata.
-	zfs allow -u "$service_user" bookmark,create,destroy,hold,mount,release,send,snapshot,userprop "$source_pool/data"
+	# refreservation, volblocksize and volsize are likewise fixture-only: tests
+	# create their own sparse zvol payloads rather than sharing one built here.
+	zfs allow -u "$service_user" bookmark,create,destroy,hold,mount,refreservation,release,send,snapshot,userprop,volblocksize,volsize "$source_pool/data"
 	zfs allow -u "$service_user" canmount,compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
 	if [[ $direct_ssh_user != "$service_user" ]]; then
 		# Direct SSH runs ZFS as the remote login identity. Grant that dedicated,

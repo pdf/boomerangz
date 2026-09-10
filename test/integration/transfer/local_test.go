@@ -111,7 +111,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 	const installation = "abcdefab-cdef-4abc-8def-abcdefabcdef"
 	engine, _ := transfer.NewLocal(direct, stream, installation)
 	snapshots, _ := lifecycle.NewService(direct, installation)
-	source := sourcePool + "/data/payload"
+	source := zfstest.PayloadVolume(t, zfstest.FixtureName(sourcePool, "local"), 256, 32)
 	suffix := time.Now().UTC().Format("150405")
 	latest := destinationPool + "/data/latest-" + suffix
 	all := destinationPool + "/data/all-" + suffix
@@ -390,7 +390,7 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	suffix := time.Now().UTC().Format("150405000")
-	source := sourcePool + "/data/payload"
+	source := zfstest.PayloadVolume(t, zfstest.FixtureName(sourcePool, "interrupted"), 256, 32)
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
 		t.Fatal(err)

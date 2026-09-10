@@ -67,7 +67,17 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sshDirectory, "known_hosts"), hostKey, 0600); err != nil {
+	// Append: known_hosts is shared with the runner, which seeds entries for
+	// ports this test does not use. Truncating it here made the daemon stage
+	// depend on running after this one.
+	knownHosts, err := os.OpenFile(filepath.Join(sshDirectory, "known_hosts"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := knownHosts.Write(hostKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := knownHosts.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -80,7 +90,7 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := sourcePool + "/data/payload"
+	source := zfstest.PayloadVolume(t, zfstest.FixtureName(sourcePool, "remote"), 256, 32)
 	suffix := time.Now().UTC().Format("150405")
 	command := func(args ...string) {
 		t.Helper()
