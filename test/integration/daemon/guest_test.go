@@ -118,6 +118,34 @@ func waitForSendIntervals(t *testing.T, logPath string, datasets []string) map[s
 
 func sendIntervalsOverlap(a, b sendInterval) bool { return a.start < b.end && b.start < a.end }
 
+func waitForTransferSuccesses(t *testing.T, runtime *daemon.Runtime, jobs []string, after time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		latest := make(map[string]daemon.Event, len(jobs))
+		for _, event := range runtime.Status() {
+			if slices.Contains(jobs, event.Job) && event.At.After(after) {
+				latest[event.Job] = event
+			}
+		}
+		succeeded := 0
+		for _, job := range jobs {
+			event := latest[job]
+			if event.State == "succeeded" {
+				succeeded++
+			}
+			if event.State == "failed" || event.State == "blocked" || event.State == "waiting-retry" {
+				t.Fatalf("transfer %s ended in %s: %s", job, event.State, event.Reason)
+			}
+		}
+		if succeeded == len(jobs) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for completed transfers %v: %+v", jobs, runtime.Status())
+}
+
 // This test is opt-in and must run in the disposable guest, never on the host.
 func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_DAEMON_GUEST_RUN")
@@ -275,6 +303,8 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
+	job := func(dataset string) string { return "local:" + dataset + ":" + target }
+	phase := time.Now().UTC()
 	go func() { done <- runtime.Run(ctx) }()
 
 	// All mapped destinations are initially absent, so setup work must use the
@@ -283,10 +313,12 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	if sendIntervalsOverlap(initial[root], initial[left]) || sendIntervalsOverlap(initial[root], initial[right]) || sendIntervalsOverlap(initial[left], initial[right]) {
 		t.Fatalf("initial destination setup overlapped hierarchy-conflicting sends: %+v", initial)
 	}
+	waitForTransferSuccesses(t, runtime, []string{job(root), job(left), job(right)}, phase)
 
 	if err := os.WriteFile(sendLog, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	phase = time.Now().UTC()
 	accepted, err := runtime.Trigger([]string{left, right})
 	if err != nil || len(accepted) != 2 {
 		t.Fatalf("trigger siblings=%v err=%v", accepted, err)
@@ -295,10 +327,12 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	if !sendIntervalsOverlap(siblings[left], siblings[right]) {
 		t.Fatalf("existing sibling destinations did not send concurrently: %+v", siblings)
 	}
+	waitForTransferSuccesses(t, runtime, []string{job(left), job(right)}, phase)
 
 	if err := os.WriteFile(sendLog, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	phase = time.Now().UTC()
 	accepted, err = runtime.Trigger([]string{root, left})
 	if err != nil || len(accepted) != 2 {
 		t.Fatalf("trigger ancestor pair=%v err=%v", accepted, err)
@@ -307,6 +341,7 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	if sendIntervalsOverlap(ancestorPair[root], ancestorPair[left]) {
 		t.Fatalf("ancestor and descendant destinations sent concurrently: %+v", ancestorPair)
 	}
+	waitForTransferSuccesses(t, runtime, []string{job(root), job(left)}, phase)
 
 	cancel()
 	select {
