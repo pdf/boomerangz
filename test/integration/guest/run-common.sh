@@ -69,19 +69,25 @@ run_stage() {
 	local name=$1
 	local min_passes=$2
 	shift 2
-	local log=$artifact_dir/stage-$name.log
 	local status=0
-	local passes
+	local passes skipped log
+	# Scratch for the pass floor below, owned by the invoking user: this
+	# function does not run as the service account and $artifact_dir does.
+	# Nothing collects this file - its contents are already on stdout, which
+	# the host harness tees into the run's diagnostics.
+	log=$(mktemp)
 	run_as_service "$@" -test.v 2>&1 | stage_filter | tee "$log" || status=$?
+	passes=$(grep -c '^--- PASS: ' "$log" || true)
+	skipped=$(grep '^--- SKIP: ' "$log" || true)
+	rm -f -- "$log"
 	if [[ $status -ne 0 ]]; then
 		printf 'integration stage %s failed with status %d\n' "$name" "$status" >&2
 		return "$status"
 	fi
-	passes=$(grep -c '^--- PASS: ' "$log" || true)
 	if [[ $passes -lt $min_passes ]]; then
 		printf 'integration stage %s reported %d top-level passes, expected at least %d\n' \
 			"$name" "$passes" "$min_passes" >&2
-		grep '^--- SKIP: ' "$log" >&2 || printf 'no skipped tests were reported\n' >&2
+		printf '%s\n' "${skipped:-no skipped tests were reported}" >&2
 		return 1
 	fi
 	printf 'integration stage %s: %d top-level passes\n' "$name" "$passes"
