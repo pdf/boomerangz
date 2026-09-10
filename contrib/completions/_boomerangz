@@ -1,33 +1,181 @@
 #compdef boomerangz
 
-_boomerangz() {
-  local context state line
-  typeset -A opt_args
-  _arguments -C \
-    '(-h --help)'{-h,--help}'[show help]' \
-    '--json[emit JSON]' \
-    '1:command:->command' \
-    '*::argument:->argument'
-  case $state in
-    command)
-      _values 'command' \
-        'config[inspect and validate daemon configuration]' \
-        'daemon[run management in the foreground]' \
-        'dataset[inspect and administer datasets]' \
-        'identity[inspect and recover installation identity]' \
-        'pairing[manage authenticated API pairings]' \
-        'status[show live daemon status]' \
-        'trigger[queue an immediate snapshot]' \
-        'version[show version information]'
+_boomerangz_option_takes_value() {
+  case $1 in
+    --config|--config-dir|--socket|--credential|--interval|-i|--listener|\
+      --client-cert|--client-key|--scope|--expires-in|--owner)
+      return 0
       ;;
-    argument)
-      case $words[2] in
-        config) _values 'command' check reload show ;;
-        dataset) _values 'command' adopt clean inspect list reseed ;;
-        identity) _values 'command' recover ;;
-        pairing) _values 'command' create import list revoke ;;
-        *) _files ;;
-      esac
+  esac
+  return 1
+}
+
+_boomerangz_options() {
+  case "$1 $2" in
+    'config check'|'config show') reply=(-h --help --config --config-dir) ;;
+    'config reload') reply=(-h --help --socket) ;;
+    'daemon ') reply=(-h --help --config --config-dir) ;;
+    'status ') reply=(-h --help --config --config-dir --credential -w --watch -i --interval) ;;
+    'trigger ') reply=(-h --help --config --config-dir --credential) ;;
+    'version ') reply=(-h --help --json) ;;
+    'pairing create') reply=(-h --help --config --config-dir --listener --client-cert --client-key --scope --expires-in) ;;
+    'pairing import'|'pairing list'|'pairing revoke') reply=(-h --help --config --config-dir) ;;
+    'dataset list'|'dataset inspect') reply=(-h --help --config --config-dir --json) ;;
+    'dataset adopt'|'dataset reseed') reply=(-h --help --config --config-dir --apply) ;;
+    'dataset clean') reply=(-h --help --config --config-dir --recursive --all --destroy-owned-snapshots --apply) ;;
+    'identity recover') reply=(-h --help --config --config-dir --owner --apply) ;;
+    *) reply=(-h --help) ;;
+  esac
+}
+
+_boomerangz_datasets() {
+  reply=()
+  (( $+commands[zfs] )) || return
+  reply=("${(@f)$(command zfs list -H -o name -s name -t filesystem,volume 2>/dev/null)}")
+}
+
+_boomerangz_reseed_targets() {
+  local dataset=$1 value target
+  local -A seen
+  reply=()
+  [[ -n $dataset ]] || return
+  (( $+commands[zfs] )) || return
+  for value in "${(@f)$(command zfs get -H -o value \
+    org.boomerangz:local,org.boomerangz:remote "$dataset" 2>/dev/null)}"; do
+    [[ -n $value && $value != - ]] || continue
+    for target in ${(s:,:)value}; do
+      target=${target//[[:space:]]/}
+      [[ -n $target && -z ${seen[$target]} ]] || continue
+      seen[$target]=1
+      reply+=("$target")
+    done
+  done
+}
+
+# Populate reply and completion_kind independently from the completion widgets.
+_boomerangz_candidates() {
+  local current previous command= subcommand= word
+  local positional_count=0 skip_value=0 end_options=0 saw_all=0 i
+  local -a positionals
+  reply=()
+  completion_kind=values
+  current=$words[CURRENT]
+  previous=
+  (( CURRENT > 1 )) && previous=$words[CURRENT-1]
+
+  case $current in
+    --config=*|--config-dir=*|--socket=*|--client-cert=*|--client-key=*)
+      completion_kind=attached-file
+      return
+      ;;
+    --scope=*)
+      local prefix=${current%%=*}=
+      local value=${current#*=}
+      reply=(status trigger replicate prune admin)
+      reply=(${(M)reply:#${value}*})
+      reply=("${(@)reply/#/${prefix}}")
+      return
+      ;;
+  esac
+
+  if _boomerangz_option_takes_value "$previous"; then
+    case $previous in
+      --config|--config-dir|--socket|--client-cert|--client-key) completion_kind=files ;;
+      --scope)
+        reply=(status trigger replicate prune admin)
+        reply=(${(M)reply:#${current}*})
+        ;;
+    esac
+    return
+  fi
+
+  for ((i = 2; i < CURRENT; i++)); do
+    word=$words[i]
+    if (( skip_value )); then
+      skip_value=0
+      continue
+    fi
+    if (( ! end_options )); then
+      if [[ $word == -- ]]; then
+        end_options=1
+        continue
+      fi
+      if _boomerangz_option_takes_value "$word"; then
+        skip_value=1
+        continue
+      fi
+      if [[ $word == --*=* || $word == -* ]]; then
+        [[ $word == --all ]] && saw_all=1
+        continue
+      fi
+    fi
+    if [[ -z $command ]]; then
+      command=$word
+      continue
+    fi
+    case $command in
+      config|dataset|identity|pairing)
+        if [[ -z $subcommand ]]; then
+          subcommand=$word
+          continue
+        fi
+        ;;
+    esac
+    positionals+=("$word")
+    ((positional_count++))
+  done
+
+  if [[ $current == -* ]]; then
+    _boomerangz_options "$command" "$subcommand"
+    reply=(${(M)reply:#${current}*})
+    return
+  fi
+
+  if [[ -z $command ]]; then
+    reply=(config daemon dataset identity pairing status trigger version)
+  elif [[ -z $subcommand ]]; then
+    case $command in
+      config) reply=(check reload show) ;;
+      dataset) reply=(adopt clean inspect list reseed) ;;
+      identity) reply=(recover) ;;
+      pairing) reply=(create import list revoke) ;;
+      trigger) _boomerangz_datasets ;;
+    esac
+  else
+    case "$command $subcommand" in
+      'dataset inspect'|'dataset adopt')
+        (( positional_count == 0 )) && _boomerangz_datasets
+        ;;
+      'dataset reseed')
+        if (( positional_count == 0 )); then
+          _boomerangz_datasets
+        elif (( positional_count == 1 )); then
+          _boomerangz_reseed_targets "$positionals[1]"
+        fi
+        ;;
+      'dataset clean')
+        (( saw_all )) || _boomerangz_datasets
+        ;;
+      'pairing import')
+        (( positional_count == 1 )) && completion_kind=files
+        ;;
+    esac
+  fi
+  [[ $completion_kind == values ]] && reply=(${(M)reply:#${current}*})
+}
+
+_boomerangz() {
+  local completion_kind
+  local -a reply
+  _boomerangz_candidates
+  case $completion_kind in
+    files) _files ;;
+    attached-file)
+      compset -P 1 '*='
+      _files
+      ;;
+    values)
+      (( ${#reply} )) && compadd -a reply
       ;;
   esac
 }
