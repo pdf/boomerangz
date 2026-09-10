@@ -68,6 +68,13 @@ func reportWorkerState(logger *slog.Logger, status *StatusStore, event Event) {
 	}
 }
 
+func blockedOrCancelled(err error) Outcome {
+	if errors.Is(err, context.Canceled) {
+		return Outcome{State: "cancelled", Reason: err.Error()}
+	}
+	return Outcome{State: "blocked", Reason: err.Error()}
+}
+
 // Runtime owns one daemon's discovery coordinator, schedules, worker pools,
 // recovery coordinators, and live lifecycle safety state.
 type Runtime struct {
@@ -592,7 +599,7 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		if startErr := ticket.Start(); startErr != nil {
-			return Outcome{State: "blocked", Reason: startErr.Error()}
+			return blockedOrCancelled(startErr)
 		}
 		deadline, deadlineErr := r.nextOwnedSnapshot(schedule.Dataset, schedule.Policy.Grid.Cadence())
 		if deadlineErr != nil {
@@ -667,7 +674,7 @@ func (r *Runtime) enqueuePrune(dataset string, effective policy.Effective) {
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		if startErr := ticket.Start(); startErr != nil {
-			return Outcome{State: "blocked", Reason: startErr.Error()}
+			return blockedOrCancelled(startErr)
 		}
 		service, serviceErr := r.service()
 		if serviceErr != nil {
@@ -792,7 +799,7 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 		defer ticket.Finish()
 		r.clearDirty(jobID)
 		if startErr := ticket.Start(); startErr != nil {
-			return Outcome{State: "blocked", Reason: startErr.Error()}
+			return blockedOrCancelled(startErr)
 		}
 		engine, engineErr := transfer.NewLocalWithService(r.backend, r.localStream, r.installation, r.lifecycle)
 		if engineErr != nil {
@@ -811,6 +818,9 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 			r.recordProgress("transfer", jobID, dataset, canonical, progress)
 		})
 		if applyErr != nil {
+			if errors.Is(applyErr, context.Canceled) {
+				return blockedOrCancelled(applyErr)
+			}
 			var temporary interface{ Temporary() bool }
 			if errors.As(applyErr, &temporary) && temporary.Temporary() {
 				return Outcome{State: "waiting-retry", Reason: applyErr.Error()}
@@ -891,7 +901,7 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 		defer ticket.Finish()
 		r.clearDirty(jobID)
 		if startErr := ticket.Start(); startErr != nil {
-			return Outcome{State: "blocked", Reason: startErr.Error()}
+			return blockedOrCancelled(startErr)
 		}
 		outcome, reconcileErr := road.coordinator.Reconcile(ticket.Context(), func(progress zfs.Progress) {
 			r.recordProgress("transfer", jobID, dataset, road.request.CanonicalTarget, progress)
@@ -900,6 +910,9 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 			r.schedule(jobID, outcome.NotBefore, func() { r.enqueueRemote(dataset, remote, effective, "") })
 		}
 		if reconcileErr != nil {
+			if errors.Is(reconcileErr, context.Canceled) {
+				return blockedOrCancelled(reconcileErr)
+			}
 			return Outcome{State: outcome.Status, Reason: reconcileErr.Error()}
 		}
 		if outcome.Status == "succeeded" {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -33,6 +34,18 @@ func TestWorkerStateLogLevels(t *testing.T) {
 	}
 	if len(status.Snapshot()) != 3 {
 		t.Fatal("logging did not retain worker status")
+	}
+}
+
+func TestBlockedOrCancelledOutcome(t *testing.T) {
+	t.Parallel()
+	cancelled := blockedOrCancelled(fmt.Errorf("start work: %w", context.Canceled))
+	if cancelled.State != "cancelled" || cancelled.Reason == "" {
+		t.Fatalf("cancelled outcome=%+v", cancelled)
+	}
+	blocked := blockedOrCancelled(errors.New("unsafe state"))
+	if blocked.State != "blocked" {
+		t.Fatalf("blocked outcome=%+v", blocked)
 	}
 }
 
