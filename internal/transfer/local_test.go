@@ -25,6 +25,7 @@ type localBackend struct {
 	writes      []string
 	checks      map[string][]string
 	checkErr    error
+	afterSet    func()
 }
 
 func cloneState(state zfs.State) (zfs.State, error) {
@@ -91,6 +92,11 @@ func (b *localBackend) SetProperties(_ context.Context, object string, values ma
 		})
 		state.Properties = append(state.Properties, zfs.Property{Dataset: object, Name: key, Value: value, Source: zfs.SourceLocal})
 		b.writes = append(b.writes, "set "+object+" "+key)
+	}
+	if b.afterSet != nil {
+		after := b.afterSet
+		b.afterSet = nil
+		after()
 	}
 	return nil
 }
@@ -352,6 +358,41 @@ func TestApplyFailureRetainsBoundRecoveryProof(t *testing.T) {
 	}
 	if len(backend.source.Holds) != 1 {
 		t.Fatal("failed transfer did not retain source hold")
+	}
+}
+
+func TestApplyAllowsUnrelatedSnapshotDuringPreparation(t *testing.T) {
+	t.Parallel()
+	backend, request := newLocalBackend(t)
+	request.Snapshot = backend.source.Objects[2].Name
+	backend.afterSet = func() {
+		backend.source.Objects = append(backend.source.Objects, zfs.Object{Name: request.Source + "@unrelated", Type: "snapshot", GUID: 999, CreateTXG: 5})
+	}
+	engine, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Apply(t.Context(), request, nil)
+	if err != nil || !result.Verified {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestApplyMarksDatasetChangeDuringPreparationRetryable(t *testing.T) {
+	t.Parallel()
+	backend, request := newLocalBackend(t)
+	backend.afterSet = func() { backend.source.Objects[0].GUID++ }
+	engine, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Apply(t.Context(), request, nil)
+	var temporary interface{ Temporary() bool }
+	if !errors.As(err, &temporary) || !temporary.Temporary() {
+		t.Fatalf("preparation change was not retryable: %v", err)
+	}
+	if slices.Contains(backend.writes, "stream") {
+		t.Fatal("stream started after source dataset identity changed")
 	}
 }
 

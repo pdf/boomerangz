@@ -2,6 +2,7 @@ package zfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -11,6 +12,8 @@ import (
 type stateRunner struct {
 	calls     [][]string
 	fail      bool
+	disappear bool
+	unstable  bool
 	inventory string
 }
 
@@ -26,12 +29,61 @@ func (r *stateRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 		return []byte("tank/data@snap\tforeign-hold\t123\n"), nil
 	case "get":
 		object := args[len(args)-1]
+		if (r.disappear || r.unstable) && object == "tank/data@snap" {
+			r.disappear = false
+			if !r.unstable {
+				r.inventory = "tank/data\tfilesystem\t1\t123\t6\n"
+			}
+			return nil, fmt.Errorf("zfs get: exit status 1: cannot open 'tank/data@snap': dataset does not exist")
+		}
 		if args[len(args)-2] != "all" {
 			return []byte(object + "\torg.boomerangz:state:lineage\t-\thidden\t-\n"), nil
 		}
 		return []byte(object + "\torg.boomerangz:enabled\ton\t-\tlocal\n" + object + "\tcompression\tzstd\t-\tlocal\n"), nil
 	}
 	return nil, nil
+}
+
+func TestInspectStateBoundsRepeatedInventoryChurn(t *testing.T) {
+	t.Parallel()
+	r := &stateRunner{unstable: true, inventory: "tank/data\tfilesystem\t1\t123\t6\ntank/data@snap\tsnapshot\t2\t123\t6\n"}
+	d := &Direct{runner: r}
+	_, err := d.InspectState(t.Context(), "tank/data", false)
+	var temporary interface{ Temporary() bool }
+	if !errors.As(err, &temporary) || !temporary.Temporary() {
+		t.Fatalf("repeated inventory churn was not retryable: %v", err)
+	}
+	listCalls := 0
+	for _, call := range r.calls {
+		if call[0] == "list" {
+			listCalls++
+		}
+	}
+	if listCalls != inspectStateAttempts {
+		t.Fatalf("inventory list calls = %d, want %d", listCalls, inspectStateAttempts)
+	}
+}
+
+func TestInspectStateRestartsWhenListedObjectDisappears(t *testing.T) {
+	t.Parallel()
+	r := &stateRunner{disappear: true, inventory: "tank/data\tfilesystem\t1\t123\t6\ntank/data@snap\tsnapshot\t2\t123\t6\n"}
+	d := &Direct{runner: r}
+	state, err := d.InspectState(t.Context(), "tank/data", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Objects) != 1 || state.Objects[0].Name != "tank/data" {
+		t.Fatalf("unexpected restarted inventory: %#v", state.Objects)
+	}
+	listCalls := 0
+	for _, call := range r.calls {
+		if call[0] == "list" {
+			listCalls++
+		}
+	}
+	if listCalls != 2 {
+		t.Fatalf("inventory list calls = %d, want 2", listCalls)
+	}
 }
 
 func TestInspectStateScopeAndHiddenMetadata(t *testing.T) {

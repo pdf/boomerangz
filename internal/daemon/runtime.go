@@ -21,7 +21,10 @@ import (
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
-const defaultQueueCapacity = 1024
+const (
+	defaultQueueCapacity        = 1024
+	transientTransferRetryDelay = time.Second
+)
 
 type backend interface {
 	transfer.Backend
@@ -808,6 +811,10 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 			r.recordProgress("transfer", jobID, dataset, canonical, progress)
 		})
 		if applyErr != nil {
+			var temporary interface{ Temporary() bool }
+			if errors.As(applyErr, &temporary) && temporary.Temporary() {
+				return Outcome{State: "waiting-retry", Reason: applyErr.Error()}
+			}
 			return Outcome{State: "blocked", Reason: applyErr.Error()}
 		}
 		if !result.Verified {
@@ -817,9 +824,15 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 		r.enqueueDestinationPrune(dataset, effective, canonical)
 		return Outcome{State: "succeeded"}
 	}
-	job.After = func(Outcome) {
+	job.After = func(outcome Outcome) {
 		if r.isDirty(jobID) {
 			r.enqueueLocal(dataset, target, effective, "")
+			return
+		}
+		if outcome.State == "waiting-retry" {
+			r.schedule("retry:"+jobID, r.now().Add(transientTransferRetryDelay), func() {
+				r.enqueueLocal(dataset, target, effective, "")
+			})
 		}
 	}
 	if added, submitErr := r.local.Submit(job); submitErr != nil || !added {

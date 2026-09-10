@@ -66,6 +66,18 @@ func (e *DestinationUnavailableError) Error() string {
 // Temporary permits bounded roadwarrior retry while the remote pool is absent.
 func (*DestinationUnavailableError) Temporary() bool { return true }
 
+// PreparationChangedError reports concurrent inventory changes that prevented a
+// stable preflight. Recovery state is retained and the complete attempt is safe
+// to retry.
+type PreparationChangedError struct {
+	Reason string
+}
+
+func (e *PreparationChangedError) Error() string { return e.Reason }
+
+// Temporary permits local and remote coordinators to retry ordinary churn.
+func (*PreparationChangedError) Temporary() bool { return true }
+
 // Local serializes administrative jobs through this instance. Callers must also
 // coordinate other processes and retain a stable effective policy generation.
 type Local struct {
@@ -241,11 +253,24 @@ func (l *Local) checkPermissions(ctx context.Context, request Request, view View
 }
 
 func sourceStable(a, b zfs.State) bool {
-	// Preparation adds only dataset lineage and reference records/holds. Everything
-	// else, including snapshot GUIDs and policy values on ancestors, must agree.
+	// Snapshot and bookmark churn is permitted here. Build immediately revalidates
+	// the selected base and endpoints by name and GUID after this control-plane
+	// check. Dataset identities and effective policy must remain stable.
+	objects := func(state zfs.State) []zfs.Object {
+		var rows []zfs.Object
+		for _, object := range state.Objects {
+			if object.Type == "filesystem" || object.Type == "volume" {
+				rows = append(rows, object)
+			}
+		}
+		return rows
+	}
 	properties := func(state zfs.State) []zfs.Property {
 		var rows []zfs.Property
 		for _, p := range state.Properties {
+			if strings.ContainsAny(p.Dataset, "@#") {
+				continue
+			}
 			if strings.HasPrefix(p.Name, lifecycle.ReferencePrefix) || strings.HasPrefix(p.Name, targetBindingPrefix) || (p.Name == lifecycle.LineageProperty && !strings.Contains(p.Dataset, "@")) {
 				continue
 			}
@@ -253,7 +278,25 @@ func sourceStable(a, b zfs.State) bool {
 		}
 		return rows
 	}
-	return reflect.DeepEqual(a.Objects, b.Objects) && reflect.DeepEqual(properties(a), properties(b)) && reflect.DeepEqual(a.ResumeTokens, b.ResumeTokens)
+	return reflect.DeepEqual(objects(a), objects(b)) && reflect.DeepEqual(properties(a), properties(b)) && reflect.DeepEqual(a.ResumeTokens, b.ResumeTokens)
+}
+
+func destinationStable(a, b zfs.State) bool {
+	objects := func(state zfs.State) []zfs.Object {
+		var rows []zfs.Object
+		for _, object := range state.Objects {
+			if object.Type == "filesystem" || object.Type == "volume" {
+				rows = append(rows, object)
+			}
+		}
+		return rows
+	}
+	properties := func(state zfs.State) []zfs.Property {
+		return slices.DeleteFunc(slices.Clone(state.Properties), func(property zfs.Property) bool {
+			return strings.ContainsAny(property.Dataset, "@#")
+		})
+	}
+	return reflect.DeepEqual(objects(a), objects(b)) && reflect.DeepEqual(properties(a), properties(b)) && reflect.DeepEqual(a.ResumeTokens, b.ResumeTokens)
 }
 
 func missingReceiveParents(root, target string, inventory []zfs.Dataset) ([]string, error) {
@@ -316,14 +359,14 @@ func (l *Local) prepareReceiveParents(ctx context.Context, request Request, view
 		return view, plan, err
 	}
 	if !sourceStable(view.Source, prepared.Source) {
-		return view, plan, fmt.Errorf("source state changed while preparing receive ancestors")
+		return view, plan, &PreparationChangedError{Reason: "source state changed while preparing receive ancestors"}
 	}
 	fresh, err := Build(request, prepared, l.installation)
 	if err != nil {
 		return view, plan, err
 	}
 	if fresh.Snapshot != plan.Snapshot || fresh.Base != plan.Base || !reflect.DeepEqual(fresh.Expected, plan.Expected) {
-		return view, plan, fmt.Errorf("transfer history changed while preparing receive ancestors")
+		return view, plan, &PreparationChangedError{Reason: "transfer history changed while preparing receive ancestors"}
 	}
 	return prepared, fresh, nil
 }
@@ -403,15 +446,15 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 		if loadErr != nil {
 			return result, loadErr
 		}
-		if !sourceStable(before.Source, prepared.Source) || !reflect.DeepEqual(before.Destination, prepared.Destination) || before.DestinationExists != prepared.DestinationExists {
-			return result, fmt.Errorf("transfer state changed during preparation; recovery holds retained")
+		if !sourceStable(before.Source, prepared.Source) || !destinationStable(before.Destination, prepared.Destination) || before.DestinationExists != prepared.DestinationExists {
+			return result, &PreparationChangedError{Reason: "transfer state changed during preparation; recovery holds retained"}
 		}
 		fresh, buildErr := Build(request, prepared, l.installation)
 		if buildErr != nil {
 			return result, buildErr
 		}
 		if fresh.Snapshot != plan.Snapshot || fresh.Base != plan.Base || !reflect.DeepEqual(fresh.Expected, plan.Expected) || fresh.TargetBinding != plan.TargetBinding {
-			return result, fmt.Errorf("transfer history changed during preparation")
+			return result, &PreparationChangedError{Reason: "transfer history changed during preparation; recovery holds retained"}
 		}
 		// Newly written recovery records must also be excluded from property streams.
 		plan = fresh
