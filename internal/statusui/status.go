@@ -7,6 +7,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
@@ -75,6 +76,10 @@ func byteSize(bytes uint64) string {
 	return fmt.Sprintf("%.1f PiB", value/float64(unit))
 }
 
+func newTable(writer io.Writer) *tabwriter.Writer {
+	return tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)
+}
+
 // Terminal writes a compact status display that degrades at narrow widths.
 func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) error {
 	view := normalized(snapshot)
@@ -89,7 +94,11 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) 
 			return err
 		}
 	} else {
-		if _, err := fmt.Fprintln(writer, "\nDATASET\tSTATE\tNEXT SNAPSHOT"); err != nil {
+		if _, err := fmt.Fprintln(writer); err != nil {
+			return err
+		}
+		table := newTable(writer)
+		if _, err := fmt.Fprintln(table, "DATASET\tSTATE\tNEXT SNAPSHOT"); err != nil {
 			return err
 		}
 		for _, dataset := range view.Datasets {
@@ -100,9 +109,12 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) 
 			if dataset.GetNextSnapshotUnixNano() != 0 {
 				next = time.Unix(0, dataset.GetNextSnapshotUnixNano()).UTC().Format(time.RFC3339)
 			}
-			if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\n", dataset.GetName(), state, next); err != nil {
+			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\n", dataset.GetName(), state, next); err != nil {
 				return err
 			}
+		}
+		if err := table.Flush(); err != nil {
+			return err
 		}
 	}
 	if len(view.Queues) != 0 {
@@ -110,40 +122,64 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) 
 			return err
 		}
 		barWidth := width - 34
+		table := newTable(writer)
 		for _, queue := range view.Queues {
 			if barWidth >= 8 {
-				if _, err := fmt.Fprintf(writer, "%-18s %4d/%-4d %s\n", queue.GetName(), queue.GetPending(), queue.GetCapacity(), bar(queue.GetPending(), queue.GetCapacity(), barWidth)); err != nil {
+				if _, err := fmt.Fprintf(table, "%s\t%d/%d\t%s\n", queue.GetName(), queue.GetPending(), queue.GetCapacity(), bar(queue.GetPending(), queue.GetCapacity(), barWidth)); err != nil {
 					return err
 				}
-			} else if _, err := fmt.Fprintf(writer, "%s %d/%d\n", queue.GetName(), queue.GetPending(), queue.GetCapacity()); err != nil {
+			} else if _, err := fmt.Fprintf(table, "%s\t%d/%d\n", queue.GetName(), queue.GetPending(), queue.GetCapacity()); err != nil {
 				return err
 			}
+		}
+		if err := table.Flush(); err != nil {
+			return err
 		}
 	}
 	if len(view.Jobs) != 0 {
 		if _, err := fmt.Fprintln(writer, "\nLATEST WORK"); err != nil {
 			return err
 		}
+		jobWidth, stateWidth := 0, 0
 		for _, job := range view.Jobs {
-			line := fmt.Sprintf("%-28s %-16s", job.GetJob(), job.GetState())
+			jobWidth = max(jobWidth, len(job.GetJob()))
+			stateWidth = max(stateWidth, len(job.GetState()))
+		}
+		var rows strings.Builder
+		table := newTable(&rows)
+		for _, job := range view.Jobs {
+			var detail strings.Builder
 			if job.GetState() == "sending" && job.GetTotalKnown() && job.GetTotalBytes() != 0 {
-				progressWidth := width - len(line) - 44
+				progressWidth := width - jobWidth - stateWidth - 48
 				if progressWidth >= 8 {
-					line += " " + progressBar(job.GetBytes(), job.GetTotalBytes(), progressWidth)
+					detail.WriteString(progressBar(job.GetBytes(), job.GetTotalBytes(), progressWidth))
+					detail.WriteByte(' ')
 				}
-				line += fmt.Sprintf(" %s/%s", byteSize(job.GetBytes()), byteSize(job.GetTotalBytes()))
+				_, _ = fmt.Fprintf(&detail, "%s/%s", byteSize(job.GetBytes()), byteSize(job.GetTotalBytes()))
 			} else if job.GetState() == "sending" && job.GetBytes() != 0 {
-				line += " " + byteSize(job.GetBytes())
+				detail.WriteString(byteSize(job.GetBytes()))
 			}
 			if job.GetState() == "sending" && job.GetBytesPerSecond() > 0 {
-				line += fmt.Sprintf(" @ %s/s", byteSize(uint64(job.GetBytesPerSecond())))
+				_, _ = fmt.Fprintf(&detail, " @ %s/s", byteSize(uint64(job.GetBytesPerSecond())))
 			}
 			if job.GetState() == "sending" && job.GetEtaNanoseconds() > 0 {
-				line += " ETA " + time.Duration(job.GetEtaNanoseconds()).Round(time.Second).String()
+				detail.WriteString(" ETA " + time.Duration(job.GetEtaNanoseconds()).Round(time.Second).String())
 			}
 			if job.GetReason() != "" {
-				line += " " + job.GetReason()
+				if detail.Len() != 0 {
+					detail.WriteByte(' ')
+				}
+				detail.WriteString(job.GetReason())
 			}
+			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\n", job.GetJob(), job.GetState(), detail.String()); err != nil {
+				return err
+			}
+		}
+		if err := table.Flush(); err != nil {
+			return err
+		}
+		for line := range strings.Lines(rows.String()) {
+			line = strings.TrimSuffix(line, "\n")
 			if len(line) > width {
 				line = line[:width]
 			}
