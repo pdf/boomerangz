@@ -72,7 +72,7 @@ _boomerangz_options() {
             printf '%s' '-h --help --config --config-dir'
             ;;
         'status ')
-            printf '%s' '-h --help --config --config-dir --credential -w --watch -i --interval'
+            printf '%s' '-h --help --config --config-dir --credential -w --watch -i --interval --json'
             ;;
         'trigger ')
             printf '%s' '-h --help --config --config-dir --credential'

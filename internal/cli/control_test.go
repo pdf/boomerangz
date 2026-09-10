@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -70,6 +71,20 @@ func TestControlCommandsUseRunningDaemon(t *testing.T) {
 	}
 	if !bytes.Contains(statusOutput.Bytes(), []byte(`"generation":9`)) {
 		t.Fatalf("status=%s", statusOutput.String())
+	}
+	var statusJSONOutput bytes.Buffer
+	statusJSONArgs := append([]string{"status", "--json"}, common...)
+	if err := runWithReader(t.Context(), statusJSONArgs, &statusJSONOutput, io.Discard, BuildInfo{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Generation uint64 `json:"generation"`
+	}
+	if err := json.Unmarshal(statusJSONOutput.Bytes(), &decoded); err != nil {
+		t.Fatalf("status --json=%s: %v", statusJSONOutput.String(), err)
+	}
+	if decoded.Generation != 9 {
+		t.Fatalf("status --json generation=%d", decoded.Generation)
 	}
 	var triggerOutput bytes.Buffer
 	triggerArgs := append([]string{"trigger"}, common...)
