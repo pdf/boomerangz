@@ -73,6 +73,31 @@ func TestNearestReceiveLockScope(t *testing.T) {
 	}
 }
 
+func TestMissingMappedAncestor(t *testing.T) {
+	t.Parallel()
+	target := "backup/root"
+	root := "tank/data/project"
+	child := root + "/child"
+	effective := policy.Effective{Enabled: true, Local: []string{target}, Discard: policy.DiscardFirst}
+	active := map[string]bool{root: true, child: true}
+	policies := map[string]policy.Effective{root: effective, child: effective}
+	mapped, err := zfs.MapReceiveDataset(child, target, zfs.ReceiveDropFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := missingMappedAncestor(child, target, mapped, []zfs.Dataset{{Name: target, Type: zfs.Filesystem}}, active, policies); got != "backup/root/data/project" {
+		t.Fatalf("missing ancestor = %q", got)
+	}
+	inventory := []zfs.Dataset{{Name: target, Type: zfs.Filesystem}, {Name: "backup/root/data/project", Type: zfs.Filesystem}}
+	if got := missingMappedAncestor(child, target, mapped, inventory, active, policies); got != "" {
+		t.Fatalf("established ancestor reported missing: %q", got)
+	}
+	delete(active, root)
+	if got := missingMappedAncestor(child, target, mapped, []zfs.Dataset{{Name: target, Type: zfs.Filesystem}}, active, policies); got != "" {
+		t.Fatalf("inactive ancestor created dependency: %q", got)
+	}
+}
+
 type runtimeBackend struct {
 	scanned  chan struct{}
 	state    zfs.State

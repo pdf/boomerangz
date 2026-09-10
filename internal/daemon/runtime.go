@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"reflect"
 	"slices"
@@ -802,6 +803,43 @@ func nearestReceiveLockScope(root, mapped string, inventory []zfs.Dataset) strin
 	return nearest
 }
 
+func missingMappedAncestor(dataset, target, mapped string, inventory []zfs.Dataset, active map[string]bool, policies map[string]policy.Effective) string {
+	exists := make(map[string]bool, len(inventory))
+	for _, entry := range inventory {
+		exists[entry.Name] = true
+	}
+	for ancestor := dataset; strings.Contains(ancestor, "/"); {
+		ancestor = ancestor[:strings.LastIndexByte(ancestor, '/')]
+		if !active[ancestor] {
+			continue
+		}
+		ancestorPolicy, ok := policies[ancestor]
+		if !ok || !slices.Contains(ancestorPolicy.Local, target) {
+			continue
+		}
+		ancestorMapped, err := zfs.MapReceiveDataset(ancestor, target, zfs.ReceiveDiscard(ancestorPolicy.Discard))
+		if err != nil || ancestorMapped == mapped || !strings.HasPrefix(mapped, ancestorMapped+"/") {
+			continue
+		}
+		if !exists[ancestorMapped] {
+			return ancestorMapped
+		}
+	}
+	return ""
+}
+
+func (r *Runtime) missingLocalDestinationAncestor(ctx context.Context, dataset, target, mapped string) (string, error) {
+	inventory, err := r.backend.ListDatasets(ctx)
+	if err != nil {
+		return "", err
+	}
+	r.mu.Lock()
+	active := maps.Clone(r.active)
+	policies := maps.Clone(r.policies)
+	r.mu.Unlock()
+	return missingMappedAncestor(dataset, target, mapped, inventory, active, policies), nil
+}
+
 func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effective, snapshot string) bool {
 	canonical := "local:" + target
 	jobID := "local:" + dataset + ":" + target
@@ -833,6 +871,13 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 		r.clearDirty(jobID)
 		if startErr := ticket.Start(); startErr != nil {
 			return blockedOrCancelled(startErr)
+		}
+		missingAncestor, ancestorErr := r.missingLocalDestinationAncestor(ticket.Context(), dataset, target, mapped)
+		if ancestorErr != nil {
+			return Outcome{State: "waiting-retry", Reason: "inspect destination hierarchy: " + ancestorErr.Error()}
+		}
+		if missingAncestor != "" {
+			return Outcome{State: "waiting-retry", Reason: "waiting for destination ancestor " + missingAncestor}
 		}
 		engine, engineErr := transfer.NewLocalWithService(r.backend, r.localStream, r.installation, r.lifecycle)
 		if engineErr != nil {
