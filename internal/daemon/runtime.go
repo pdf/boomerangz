@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"reflect"
 	"slices"
@@ -118,18 +119,28 @@ type Runtime struct {
 
 // New constructs an operational daemon around typed local ZFS execution.
 func New(cfg config.Config, source backend, installation string, logger *slog.Logger) (*Runtime, error) {
+	stream, err := zfs.NewLocalStream("zfs")
+	if err != nil {
+		return nil, err
+	}
+	return NewWithLocalStream(cfg, source, installation, logger, stream)
+}
+
+// NewWithLocalStream constructs a daemon with an explicit local transfer
+// stream. It permits embedders and guarded integration tests to wrap stream
+// execution without changing the typed ZFS query backend.
+func NewWithLocalStream(cfg config.Config, source backend, installation string, logger *slog.Logger, stream transfer.Stream) (*Runtime, error) {
 	if source == nil || !lifecycle.ValidID(installation) {
 		return nil, fmt.Errorf("daemon backend and installation identity are required")
+	}
+	if stream == nil {
+		return nil, fmt.Errorf("daemon local transfer stream is required")
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
-	}
-	stream, err := zfs.NewLocalStream("zfs")
-	if err != nil {
-		return nil, err
 	}
 	lifecycleService, err := lifecycle.NewService(source, installation)
 	if err != nil {
@@ -409,6 +420,19 @@ func actionableRoot(entry discovery.Entry, installation string) bool {
 	return owner == "" || owner == installation
 }
 
+func discoveryChangeRequiresReconcile(current discovery.Entry, currentExists bool, previous discovery.Entry, previousExists bool) bool {
+	if !currentExists || !previousExists {
+		return true
+	}
+	stripReferences := func(entry discovery.Entry) discovery.Entry {
+		entry.Stored = slices.DeleteFunc(slices.Clone(entry.Stored), func(property zfs.Property) bool {
+			return strings.HasPrefix(property.Name, lifecycle.ReferencePrefix)
+		})
+		return entry
+	}
+	return !reflect.DeepEqual(stripReferences(current), stripReferences(previous))
+}
+
 func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 	if generation == nil {
 		return
@@ -443,7 +467,15 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 	r.mu.Lock()
 	changed := make(map[string]bool)
 	for _, name := range generation.Changed(r.generation) {
-		changed[name] = true
+		current, currentExists := generation.Inspect(name)
+		var previous discovery.Entry
+		previousExists := false
+		if r.generation != nil {
+			previous, previousExists = r.generation.Inspect(name)
+		}
+		if discoveryChangeRequiresReconcile(current, currentExists, previous, previousExists) {
+			changed[name] = true
+		}
 	}
 	r.generation = generation
 	previousKnown := r.known
@@ -792,6 +824,43 @@ func nearestReceiveLockScope(root, mapped string, inventory []zfs.Dataset) strin
 	return nearest
 }
 
+func missingMappedAncestor(dataset, target, mapped string, inventory []zfs.Dataset, active map[string]bool, policies map[string]policy.Effective) string {
+	exists := make(map[string]bool, len(inventory))
+	for _, entry := range inventory {
+		exists[entry.Name] = true
+	}
+	for ancestor := dataset; strings.Contains(ancestor, "/"); {
+		ancestor = ancestor[:strings.LastIndexByte(ancestor, '/')]
+		if !active[ancestor] {
+			continue
+		}
+		ancestorPolicy, ok := policies[ancestor]
+		if !ok || !slices.Contains(ancestorPolicy.Local, target) {
+			continue
+		}
+		ancestorMapped, err := zfs.MapReceiveDataset(ancestor, target, zfs.ReceiveDiscard(ancestorPolicy.Discard))
+		if err != nil || ancestorMapped == mapped || !strings.HasPrefix(mapped, ancestorMapped+"/") {
+			continue
+		}
+		if !exists[ancestorMapped] {
+			return ancestorMapped
+		}
+	}
+	return ""
+}
+
+func (r *Runtime) missingLocalDestinationAncestor(ctx context.Context, dataset, target, mapped string) (string, error) {
+	inventory, err := r.backend.ListDatasets(ctx)
+	if err != nil {
+		return "", err
+	}
+	r.mu.Lock()
+	active := maps.Clone(r.active)
+	policies := maps.Clone(r.policies)
+	r.mu.Unlock()
+	return missingMappedAncestor(dataset, target, mapped, inventory, active, policies), nil
+}
+
 func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effective, snapshot string) bool {
 	canonical := "local:" + target
 	jobID := "local:" + dataset + ":" + target
@@ -823,6 +892,13 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 		r.clearDirty(jobID)
 		if startErr := ticket.Start(); startErr != nil {
 			return blockedOrCancelled(startErr)
+		}
+		missingAncestor, ancestorErr := r.missingLocalDestinationAncestor(ticket.Context(), dataset, target, mapped)
+		if ancestorErr != nil {
+			return Outcome{State: "waiting-retry", Reason: "inspect destination hierarchy: " + ancestorErr.Error()}
+		}
+		if missingAncestor != "" {
+			return Outcome{State: "waiting-retry", Reason: "waiting for destination ancestor " + missingAncestor}
 		}
 		engine, engineErr := transfer.NewLocalWithService(r.backend, r.localStream, r.installation, r.lifecycle)
 		if engineErr != nil {

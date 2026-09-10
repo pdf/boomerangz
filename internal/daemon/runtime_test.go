@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +71,53 @@ func TestNearestReceiveLockScope(t *testing.T) {
 	}
 	if got := nearestReceiveLockScope("missing/root", "missing/root/data", inventory); got != "" {
 		t.Fatalf("missing receive root lock scope = %q, want exclusive target lock", got)
+	}
+}
+
+func TestMissingMappedAncestor(t *testing.T) {
+	t.Parallel()
+	target := "backup/root"
+	root := "tank/data/project"
+	child := root + "/child"
+	effective := policy.Effective{Enabled: true, Local: []string{target}, Discard: policy.DiscardFirst}
+	active := map[string]bool{root: true, child: true}
+	policies := map[string]policy.Effective{root: effective, child: effective}
+	mapped, err := zfs.MapReceiveDataset(child, target, zfs.ReceiveDropFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := missingMappedAncestor(child, target, mapped, []zfs.Dataset{{Name: target, Type: zfs.Filesystem}}, active, policies); got != "backup/root/data/project" {
+		t.Fatalf("missing ancestor = %q", got)
+	}
+	inventory := []zfs.Dataset{{Name: target, Type: zfs.Filesystem}, {Name: "backup/root/data/project", Type: zfs.Filesystem}}
+	if got := missingMappedAncestor(child, target, mapped, inventory, active, policies); got != "" {
+		t.Fatalf("established ancestor reported missing: %q", got)
+	}
+	delete(active, root)
+	if got := missingMappedAncestor(child, target, mapped, []zfs.Dataset{{Name: target, Type: zfs.Filesystem}}, active, policies); got != "" {
+		t.Fatalf("inactive ancestor created dependency: %q", got)
+	}
+}
+
+func TestDiscoveryReferenceChangeDoesNotReconcile(t *testing.T) {
+	t.Parallel()
+	base := discovery.Entry{
+		Dataset: zfs.Dataset{Name: "tank/data", Type: zfs.Filesystem},
+		Policy:  policy.Effective{Enabled: true, Local: []string{"backup/root"}},
+		Stored:  []zfs.Property{{Dataset: "tank/data", Name: lifecycle.OwnerProperty, Value: "owner", Source: zfs.SourceLocal}},
+	}
+	withReference := base
+	withReference.Stored = append(slices.Clone(base.Stored), zfs.Property{Dataset: "tank/data", Name: lifecycle.ReferencePrefix + "target:snapshot", Value: "reference", Source: zfs.SourceLocal})
+	if discoveryChangeRequiresReconcile(withReference, true, base, true) {
+		t.Fatal("recovery-reference-only change requested reconciliation")
+	}
+	changedPolicy := base
+	changedPolicy.Policy.Local = []string{"backup/other"}
+	if !discoveryChangeRequiresReconcile(changedPolicy, true, base, true) {
+		t.Fatal("policy change did not request reconciliation")
+	}
+	if !discoveryChangeRequiresReconcile(base, true, discovery.Entry{}, false) {
+		t.Fatal("new dataset did not request reconciliation")
 	}
 }
 
@@ -142,6 +190,15 @@ func TestRuntimeGracefulShutdownWithoutPolicies(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("daemon did not shut down")
+	}
+}
+
+func TestNewWithLocalStreamRequiresStream(t *testing.T) {
+	t.Parallel()
+	cfg := config.Defaults()
+	backend := &runtimeBackend{}
+	if _, err := NewWithLocalStream(cfg, backend, "11111111-1111-4111-8111-111111111111", nil, nil); err == nil {
+		t.Fatal("nil local transfer stream accepted")
 	}
 }
 

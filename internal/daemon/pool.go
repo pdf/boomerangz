@@ -19,7 +19,12 @@ type Reporter func(Event)
 type keyLocks struct {
 	mu      sync.Mutex
 	active  map[string]map[string]int
+	waiters map[string][]*lockWaiter
 	changed chan struct{}
+}
+
+type lockWaiter struct {
+	scope string
 }
 
 func (k *keyLocks) acquire(ctx context.Context, key string) (func(), error) {
@@ -30,17 +35,64 @@ func overlappingLockScope(a, b string) bool {
 	return a == "" || b == "" || a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
+func (k *keyLocks) signalLocked() {
+	if k.changed != nil {
+		close(k.changed)
+	}
+	k.changed = make(chan struct{})
+}
+
+func (k *keyLocks) removeWaiterLocked(key string, waiter *lockWaiter) {
+	waiters := k.waiters[key]
+	for index, candidate := range waiters {
+		if candidate != waiter {
+			continue
+		}
+		waiters = append(waiters[:index], waiters[index+1:]...)
+		if len(waiters) == 0 {
+			delete(k.waiters, key)
+		} else {
+			k.waiters[key] = waiters
+		}
+		return
+	}
+}
+
 func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(), error) {
 	if key == "" {
 		return func() {}, nil
 	}
+	waiter := &lockWaiter{scope: scope}
+	k.mu.Lock()
+	if k.waiters == nil {
+		k.waiters = make(map[string][]*lockWaiter)
+	}
+	k.waiters[key] = append(k.waiters[key], waiter)
+	k.mu.Unlock()
 	for {
 		k.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			k.removeWaiterLocked(key, waiter)
+			k.signalLocked()
+			k.mu.Unlock()
+			return nil, err
+		}
 		blocked := false
 		for active := range k.active[key] {
 			if overlappingLockScope(active, scope) {
 				blocked = true
 				break
+			}
+		}
+		if !blocked {
+			for _, earlier := range k.waiters[key] {
+				if earlier == waiter {
+					break
+				}
+				if overlappingLockScope(earlier.scope, scope) {
+					blocked = true
+					break
+				}
 			}
 		}
 		if !blocked {
@@ -50,7 +102,9 @@ func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(),
 			if k.active[key] == nil {
 				k.active[key] = make(map[string]int)
 			}
+			k.removeWaiterLocked(key, waiter)
 			k.active[key][scope]++
+			k.signalLocked()
 			k.mu.Unlock()
 			return func() {
 				k.mu.Lock()
@@ -61,10 +115,7 @@ func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(),
 				if len(k.active[key]) == 0 {
 					delete(k.active, key)
 				}
-				if k.changed != nil {
-					close(k.changed)
-				}
-				k.changed = make(chan struct{})
+				k.signalLocked()
 				k.mu.Unlock()
 			}, nil
 		}
@@ -75,7 +126,7 @@ func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(),
 		k.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			continue
 		case <-changed:
 		}
 	}

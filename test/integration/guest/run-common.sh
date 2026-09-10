@@ -97,7 +97,7 @@ BOOMERANGZ_REMOTE_GUEST_USER="$service_user" \
 
 run_as_service \
 BOOMERANGZ_DAEMON_GUEST_RUN="$run_id" \
-	"$artifact_dir/daemon.test" -test.v -test.run '^TestGuestDaemonSchedulingAndRetirement$'
+	"$artifact_dir/daemon.test" -test.v -test.run '^TestGuest(DaemonSchedulingAndRetirement|LocalTransferConcurrency)$'
 
 run_as_service \
 BOOMERANGZ_CONTROL_GUEST_RUN="$run_id" \
