@@ -246,12 +246,12 @@ func (r *Runtime) pruneDestination(ctx context.Context, dataset string, effectiv
 	return nil
 }
 
-func (r *Runtime) enqueueDestinationPrune(dataset string, effective policy.Effective, canonical string) {
+func (r *Runtime) enqueueDestinationPrune(dataset string, effective policy.Effective, canonical, lockScope string) {
 	ticket, err := r.gate.Queue(context.Background(), dataset, lifecycle.Management)
 	if err != nil {
 		return
 	}
-	job := Job{ID: "destination-prune:" + dataset + ":" + lifecycle.TargetID(canonical), Group: dataset, Scope: dataset, LockKey: canonical, StartState: "pruning", Drop: ticket.Finish}
+	job := Job{ID: "destination-prune:" + dataset + ":" + lifecycle.TargetID(canonical), Group: dataset, Scope: dataset, LockKey: canonical, LockScope: lockScope, StartState: "pruning", Drop: ticket.Finish}
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		if startErr := ticket.Start(); startErr != nil {

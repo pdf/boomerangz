@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,30 +17,67 @@ type Event = daemonstate.Event
 type Reporter func(Event)
 
 type keyLocks struct {
-	mu    sync.Mutex
-	locks map[string]chan struct{}
+	mu      sync.Mutex
+	active  map[string]map[string]int
+	changed chan struct{}
 }
 
 func (k *keyLocks) acquire(ctx context.Context, key string) (func(), error) {
+	return k.acquireScope(ctx, key, "")
+}
+
+func overlappingLockScope(a, b string) bool {
+	return a == "" || b == "" || a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
+func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(), error) {
 	if key == "" {
 		return func() {}, nil
 	}
-	k.mu.Lock()
-	if k.locks == nil {
-		k.locks = make(map[string]chan struct{})
-	}
-	lock := k.locks[key]
-	if lock == nil {
-		lock = make(chan struct{}, 1)
-		lock <- struct{}{}
-		k.locks[key] = lock
-	}
-	k.mu.Unlock()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-lock:
-		return func() { lock <- struct{}{} }, nil
+	for {
+		k.mu.Lock()
+		blocked := false
+		for active := range k.active[key] {
+			if overlappingLockScope(active, scope) {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			if k.active == nil {
+				k.active = make(map[string]map[string]int)
+			}
+			if k.active[key] == nil {
+				k.active[key] = make(map[string]int)
+			}
+			k.active[key][scope]++
+			k.mu.Unlock()
+			return func() {
+				k.mu.Lock()
+				k.active[key][scope]--
+				if k.active[key][scope] == 0 {
+					delete(k.active[key], scope)
+				}
+				if len(k.active[key]) == 0 {
+					delete(k.active, key)
+				}
+				if k.changed != nil {
+					close(k.changed)
+				}
+				k.changed = make(chan struct{})
+				k.mu.Unlock()
+			}, nil
+		}
+		if k.changed == nil {
+			k.changed = make(chan struct{})
+		}
+		changed := k.changed
+		k.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-changed:
+		}
 	}
 }
 
@@ -167,7 +205,7 @@ func (p *Pool) worker(runCtx, workerCtx context.Context) {
 			}
 			continue
 		}
-		release, err := p.locks.acquire(runCtx, job.LockKey)
+		release, err := p.locks.acquireScope(runCtx, job.LockKey, job.LockScope)
 		if err != nil {
 			outcome := Outcome{State: "failed", Reason: err.Error()}
 			p.emit(job, outcome.State, outcome.Reason)

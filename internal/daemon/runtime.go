@@ -780,9 +780,32 @@ func (r *Runtime) enqueueTransfers(dataset string, effective policy.Effective, s
 	return protected
 }
 
+func nearestReceiveLockScope(root, mapped string, inventory []zfs.Dataset) string {
+	nearest := ""
+	for _, dataset := range inventory {
+		insideRoot := dataset.Name == root || strings.HasPrefix(dataset.Name, root+"/")
+		containsMapped := mapped == dataset.Name || strings.HasPrefix(mapped, dataset.Name+"/")
+		if insideRoot && containsMapped && len(dataset.Name) > len(nearest) {
+			nearest = dataset.Name
+		}
+	}
+	return nearest
+}
+
 func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effective, snapshot string) bool {
 	canonical := "local:" + target
 	jobID := "local:" + dataset + ":" + target
+	mapped, mapErr := zfs.MapReceiveDataset(dataset, target, zfs.ReceiveDiscard(effective.Discard))
+	if mapErr != nil {
+		r.logger.Error("map local transfer lock scope", "dataset", dataset, "target", target, "error", mapErr)
+		return false
+	}
+	lockScope := ""
+	if inventory, inventoryErr := r.backend.ListDatasets(context.Background()); inventoryErr != nil {
+		r.logger.Warn("use exclusive local target lock", "dataset", dataset, "target", target, "error", inventoryErr)
+	} else {
+		lockScope = nearestReceiveLockScope(target, mapped, inventory)
+	}
 	if snapshot != "" {
 		if pendingErr := r.protectAndCoalesce(dataset, snapshot, canonical, effective.Send.Replicate); pendingErr != nil {
 			r.logger.Error("protect local pending snapshot", "dataset", dataset, "target", target, "error", pendingErr)
@@ -794,7 +817,7 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 	if err != nil {
 		return snapshot == ""
 	}
-	job := Job{ID: jobID, Group: dataset, Scope: dataset, LockKey: canonical, StartState: "sending", Drop: ticket.Finish}
+	job := Job{ID: jobID, Group: dataset, Scope: dataset, LockKey: canonical, LockScope: lockScope, StartState: "sending", Drop: ticket.Finish}
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		r.clearDirty(jobID)
@@ -831,7 +854,7 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 			return Outcome{State: "failed", Reason: "transfer was not verified"}
 		}
 		completed = hasPending && result.Plan.Snapshot == pending.Name
-		r.enqueueDestinationPrune(dataset, effective, canonical)
+		r.enqueueDestinationPrune(dataset, effective, canonical, result.Plan.Destination)
 		return Outcome{State: "succeeded"}
 	}
 	job.After = func(outcome Outcome) {
@@ -916,7 +939,7 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 			return Outcome{State: outcome.Status, Reason: reconcileErr.Error()}
 		}
 		if outcome.Status == "succeeded" {
-			r.enqueueDestinationPrune(dataset, effective, road.request.CanonicalTarget)
+			r.enqueueDestinationPrune(dataset, effective, road.request.CanonicalTarget, "")
 		}
 		return Outcome{State: outcome.Status}
 	}

@@ -78,6 +78,34 @@ func TestPoolSerializesLockKeyAcrossWorkers(t *testing.T) {
 	}
 }
 
+func TestHierarchyLocksAllowSiblingsAndBlockAncestors(t *testing.T) {
+	t.Parallel()
+	var locks keyLocks
+	releaseA, err := locks.acquireScope(t.Context(), "local:backup/root", "backup/root/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseB, err := locks.acquireScope(t.Context(), "local:backup/root", "backup/root/b")
+	if err != nil {
+		releaseA()
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := locks.acquireScope(ctx, "local:backup/root", "backup/root"); err == nil {
+		releaseB()
+		releaseA()
+		t.Fatal("ancestor lock overlapped active descendants")
+	}
+	releaseB()
+	releaseA()
+	releaseRoot, err := locks.acquireScope(t.Context(), "local:backup/root", "backup/root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseRoot()
+}
+
 func TestPoolResizeDoesNotCancelRunningJob(t *testing.T) {
 	t.Parallel()
 	pool, err := NewPool("transfer", 1, 4, nil)
