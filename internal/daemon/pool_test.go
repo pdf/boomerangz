@@ -106,6 +106,72 @@ func TestHierarchyLocksAllowSiblingsAndBlockAncestors(t *testing.T) {
 	releaseRoot()
 }
 
+func TestHierarchyLocksDoNotStarveWaitingAncestor(t *testing.T) {
+	t.Parallel()
+	var locks keyLocks
+	key := "local:backup/root"
+	releaseRight, err := locks.acquireScope(t.Context(), key, "backup/root/right")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type acquired struct {
+		name    string
+		release func()
+	}
+	started := make(chan acquired, 2)
+	acquire := func(name, scope string) {
+		release, acquireErr := locks.acquireScope(t.Context(), key, scope)
+		if acquireErr != nil {
+			t.Errorf("acquire %s: %v", name, acquireErr)
+			return
+		}
+		started <- acquired{name: name, release: release}
+	}
+	go acquire("root", "backup/root")
+	deadline := time.Now().Add(time.Second)
+	for {
+		locks.mu.Lock()
+		queued := len(locks.waiters[key]) == 1
+		locks.mu.Unlock()
+		if queued {
+			break
+		}
+		if time.Now().After(deadline) {
+			releaseRight()
+			t.Fatal("ancestor did not begin waiting")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	go acquire("left", "backup/root/left")
+	select {
+	case got := <-started:
+		got.release()
+		releaseRight()
+		t.Fatalf("%s bypassed the waiting ancestor", got.name)
+	case <-time.After(20 * time.Millisecond):
+	}
+	releaseRight()
+	root := <-started
+	if root.name != "root" {
+		root.release()
+		t.Fatalf("%s acquired before the waiting ancestor", root.name)
+	}
+	select {
+	case got := <-started:
+		got.release()
+		root.release()
+		t.Fatalf("%s overlapped the active ancestor", got.name)
+	case <-time.After(20 * time.Millisecond):
+	}
+	root.release()
+	left := <-started
+	if left.name != "left" {
+		left.release()
+		t.Fatalf("unexpected final acquirer %s", left.name)
+	}
+	left.release()
+}
+
 func TestPoolResizeDoesNotCancelRunningJob(t *testing.T) {
 	t.Parallel()
 	pool, err := NewPool("transfer", 1, 4, nil)
