@@ -494,7 +494,7 @@ func (r *Runtime) enqueueInactive(dataset string, active bool) {
 	id := fmt.Sprintf("inactive:%s:%t", dataset, active)
 	_, err := r.management.Submit(Job{ID: id, Group: dataset, Scope: dataset, LockKey: dataset, StartState: "reconciling", Run: func(ctx context.Context) Outcome {
 		if !active {
-			if waitErr := r.gate.WaitQuiescent(ctx, dataset); waitErr != nil {
+			if waitErr := r.gate.WaitScopeQuiescent(ctx, dataset); waitErr != nil {
 				return Outcome{State: "blocked", Reason: waitErr.Error()}
 			}
 		}

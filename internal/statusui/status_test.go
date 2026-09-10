@@ -30,12 +30,15 @@ func TestTerminalNarrowAndJSON(t *testing.T) {
 
 func TestTerminalShowsKnownTransferProgress(t *testing.T) {
 	t.Parallel()
-	snapshot := &controlrpc.StatusSnapshot{Jobs: []*controlrpc.JobStatus{{Job: "local:tank/data:backup/data", State: "sending", Bytes: 512, TotalBytes: 1024, TotalKnown: true, BytesPerSecond: 256, EtaNanoseconds: int64(2 * time.Second)}}}
+	snapshot := &controlrpc.StatusSnapshot{Jobs: []*controlrpc.JobStatus{
+		{Job: "local:tank/data:backup/data", State: "sending", Bytes: 512, TotalBytes: 1024, TotalKnown: true, BytesPerSecond: 256, EtaNanoseconds: int64(2 * time.Second)},
+		{Job: "inactive:tank/data/child:false", State: "succeeded"},
+	}}
 	var output bytes.Buffer
 	if err := Terminal(&output, snapshot, 140); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "512 B/1.0 KiB") || !strings.Contains(output.String(), "@ 256 B/s") || !strings.Contains(output.String(), "ETA 2s") || !strings.Contains(output.String(), "[") {
+	if !strings.Contains(output.String(), "512 B/1.0 KiB") || !strings.Contains(output.String(), "@ 256 B/s") || !strings.Contains(output.String(), "ETA 2s") || !strings.Contains(output.String(), "[") || !strings.Contains(output.String(), "deactivate:tank/data/child") {
 		t.Fatalf("progress output=%q", output.String())
 	}
 }

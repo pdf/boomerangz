@@ -78,6 +78,20 @@ func TestQuiescenceWaitsForResultReconstruction(t *testing.T) {
 	}
 }
 
+func TestScopeQuiescenceIgnoresIndependentAncestor(t *testing.T) {
+	t.Parallel()
+	var gate Gate
+	if err := gate.SetEnabled("tank/root", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.SetEnabled("tank/root/child", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.WaitScopeQuiescent(t.Context(), "tank/root/child"); err != nil {
+		t.Fatalf("disabled child blocked by active ancestor: %v", err)
+	}
+}
+
 func TestQuiescenceRejectsRelatedActiveRoot(t *testing.T) {
 	t.Parallel()
 	var gate Gate

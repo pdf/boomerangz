@@ -80,6 +80,20 @@ func newTable(writer io.Writer) *tabwriter.Writer {
 	return tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)
 }
 
+func displayJobName(name string) string {
+	remainder, ok := strings.CutPrefix(name, "inactive:")
+	if !ok {
+		return name
+	}
+	if dataset, found := strings.CutSuffix(remainder, ":true"); found {
+		return "activate:" + dataset
+	}
+	if dataset, found := strings.CutSuffix(remainder, ":false"); found {
+		return "deactivate:" + dataset
+	}
+	return name
+}
+
 // Terminal writes a compact status display that degrades at narrow widths.
 func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) error {
 	view := normalized(snapshot)
@@ -142,7 +156,7 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) 
 		}
 		jobWidth, stateWidth := 0, 0
 		for _, job := range view.Jobs {
-			jobWidth = max(jobWidth, len(job.GetJob()))
+			jobWidth = max(jobWidth, len(displayJobName(job.GetJob())))
 			stateWidth = max(stateWidth, len(job.GetState()))
 		}
 		var rows strings.Builder
@@ -171,7 +185,7 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) 
 				}
 				detail.WriteString(job.GetReason())
 			}
-			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\n", job.GetJob(), job.GetState(), detail.String()); err != nil {
+			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\n", displayJobName(job.GetJob()), job.GetState(), detail.String()); err != nil {
 				return err
 			}
 		}
