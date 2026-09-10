@@ -40,6 +40,11 @@ Do not enable datasets until you have reviewed the
 The project uses Go 1.26.8 and keeps real OpenZFS tests inside disposable
 virtual machines.
 
+[ARCHITECTURE.md](ARCHITECTURE.md) maps the repository: entrypoints, the
+package-by-package layout, and the property, state, and scheduling contracts.
+[AGENTS.md](AGENTS.md) records the conventions every change is held to, and
+[PLAN.md](PLAN.md) covers the original design intent.
+
 Run the same host-safe validation suite as the primary CI workflow:
 
 ```sh
