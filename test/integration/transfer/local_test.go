@@ -389,18 +389,8 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := func(args ...string) string {
-		t.Helper()
-		out, commandErr := exec.CommandContext(t.Context(), "zfs", args...).CombinedOutput()
-		if commandErr != nil {
-			t.Fatalf("guest zfs %s: %v: %s", args[0], commandErr, out)
-		}
-		return strings.TrimSpace(string(out))
-	}
 	suffix := time.Now().UTC().Format("150405000")
 	source := sourcePool + "/data/payload"
-	destination := destinationPool + "/data/interrupted-" + suffix
-	command("set", policy.Namespace+"enabled=on", policy.Namespace+"incremental=all", policy.Namespace+"local="+destination, source)
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
 		t.Fatal(err)
@@ -410,70 +400,79 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := direct.GetStoredProperties(t.Context(), []string{source})
-	if err != nil {
-		t.Fatal(err)
-	}
-	effective := policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, nil)
-	metadata, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), effective)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := transfer.Request{Source: source, DestinationRoot: destination, Snapshot: source + "@" + metadata.Name(), Policy: effective}
-	interrupted, err := transfer.NewLocal(direct, interruptedReceiveStream{}, installation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := interrupted.Apply(t.Context(), request, nil)
-	if err == nil || len(result.ResumeDatasets) != 1 {
-		t.Fatalf("interrupted result=%+v err=%v", result, err)
-	}
-	state, err := direct.InspectState(t.Context(), source, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(state.Holds) == 0 {
-		t.Fatal("interrupted transfer did not retain source recovery holds")
-	}
-
 	stream, err := zfs.NewLocalStream("zfs")
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := transfer.NewLocal(direct, stream, installation)
-	if err != nil {
-		t.Fatal(err)
+	for _, mode := range []string{"all", "latest"} {
+		t.Run(mode, func(t *testing.T) {
+			destination := destinationPool + "/data/interrupted-" + mode + "-" + suffix
+			output, err := exec.CommandContext(t.Context(), "zfs", "set", policy.Namespace+"enabled=on", policy.Namespace+"incremental="+mode, policy.Namespace+"local="+destination, source).CombinedOutput()
+			if err != nil {
+				t.Fatalf("configure source: %v: %s", err, output)
+			}
+			rows, err := direct.GetStoredProperties(t.Context(), []string{source})
+			if err != nil {
+				t.Fatal(err)
+			}
+			effective := policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, nil)
+			metadata, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), effective)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := transfer.Request{Source: source, DestinationRoot: destination, Snapshot: source + "@" + metadata.Name(), Policy: effective}
+			interrupted, err := transfer.NewLocal(direct, interruptedReceiveStream{}, installation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := interrupted.Apply(t.Context(), request, nil)
+			if err == nil || len(result.ResumeDatasets) != 1 {
+				t.Fatalf("interrupted result=%+v err=%v", result, err)
+			}
+
+			restarted, err := transfer.NewLocal(direct, stream, installation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovered, err := restarted.Apply(t.Context(), request, nil)
+			if err != nil || !recovered.Verified || recovered.Plan.Mode != "resume" {
+				t.Fatalf("recovered result=%+v err=%v", recovered, err)
+			}
+			destinationState, err := direct.InspectState(t.Context(), destination, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(destinationState.ResumeTokens) != 0 {
+				t.Fatalf("successful recovery retained resume token: %v", destinationState.ResumeTokens)
+			}
+			sourceState, err := direct.InspectState(t.Context(), source, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lineage, err := lifecycle.RootAuthority(sourceState, source, installation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			references, err := lifecycle.References(sourceState, source, lineage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, found, checkpointed, retained := "local:"+destination, false, false, false
+			for _, reference := range references {
+				if reference.Target != target {
+					continue
+				}
+				found = true
+				snapshot := reference.SnapshotName(source)
+				retained = slices.Contains(sourceState.Holds[snapshot], reference.HoldName())
+				checkpointed = slices.ContainsFunc(sourceState.Objects, func(object zfs.Object) bool {
+					return object.Name == reference.BookmarkName(source) && object.Type == "bookmark" && object.GUID == reference.GUID
+				})
+			}
+			if !found || !checkpointed || retained != (mode == "all") {
+				t.Fatalf("unexpected %s recovery reference: found=%t checkpointed=%t retained=%t refs=%+v holds=%v", mode, found, checkpointed, retained, references, sourceState.Holds)
+			}
+			t.Logf("%s interrupted receive resumed from durable state on %s", mode, destination)
+		})
 	}
-	recovered, err := restarted.Apply(t.Context(), request, nil)
-	if err != nil || !recovered.Verified || recovered.Plan.Mode != "resume" {
-		t.Fatalf("recovered result=%+v err=%v", recovered, err)
-	}
-	destinationState, err := direct.InspectState(t.Context(), destination, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(destinationState.ResumeTokens) != 0 {
-		t.Fatalf("successful recovery retained resume token: %v", destinationState.ResumeTokens)
-	}
-	sourceState, err := direct.InspectState(t.Context(), source, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lineage, err := lifecycle.RootAuthority(sourceState, source, installation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	references, err := lifecycle.References(sourceState, source, lineage)
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := "local:" + destination
-	retained := slices.ContainsFunc(references, func(reference lifecycle.Reference) bool {
-		snapshot := reference.SnapshotName(source)
-		return reference.Target == target && slices.Contains(sourceState.Holds[snapshot], reference.HoldName())
-	})
-	if !retained {
-		t.Fatalf("successful recovery did not retain its incremental-all reference: refs=%+v holds=%v", references, sourceState.Holds)
-	}
-	t.Logf("interrupted receive resumed from durable state on %s", destination)
 }
