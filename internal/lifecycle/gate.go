@@ -168,8 +168,43 @@ func (g *Gate) Status(dataset string) GateStatus {
 	return status
 }
 
+// WaitScopeQuiescent waits for running work to finish on one exact disabled
+// scheduling scope. Independently scheduled ancestors and descendants do not
+// prevent the scope from becoming inactive.
+func (g *Gate) WaitScopeQuiescent(ctx context.Context, dataset string) error {
+	if err := zfs.ValidateDataset(dataset); err != nil {
+		return err
+	}
+	for {
+		g.mu.Lock()
+		s := g.get(dataset)
+		if s.enabled {
+			g.mu.Unlock()
+			return fmt.Errorf("scope is still enabled")
+		}
+		running := false
+		for t := range s.tickets {
+			if t.running {
+				running = true
+				break
+			}
+		}
+		changed := s.changed
+		g.mu.Unlock()
+		if !running {
+			return ctx.Err()
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
 // WaitQuiescent waits for running work to finish on an already disabled scope.
-// It does not enable, disable, or mutate datasets and observes cancellation.
+// Related ancestor and descendant scheduling scopes must also be disabled and
+// idle, as required by recursive administrative operations.
 func (g *Gate) WaitQuiescent(ctx context.Context, dataset string) error {
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return err
