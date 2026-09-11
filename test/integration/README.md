@@ -38,6 +38,7 @@ only worth reading if it is true.
 | Clean clears metadata and preserves snapshots | `TestGuestLifecycle/clean` |
 | `dataset adopt` and `dataset clean` over the CLI | `TestGuestLifecycle/cli-adopt-and-clean` (gated on `BOOMERANGZ_LIFECYCLE_GUEST_CLI`) |
 | Received-property layering, and which hidden values reach `State.Received` | `TestGuestReceivedPropertyLayers` |
+| A root claimed but not yet snapshotted: lineage resumed, foreign claim refused, inherited markers not authority | `TestGuestInterruptedLineageInitialization` |
 
 ### Encryption and raw sends
 
@@ -66,6 +67,7 @@ resolves policy from `ListDatasets` output rather than a literal.
 | Recursive `replicate` with `discard=first` and `discard=all` mapping | `TestGuestLocalTransfer/recursive-mapping` |
 | Linux `canmount=noauto` ancestor preparation under an ordinary receive root | `TestGuestLocalTransfer/linux-ancestor-preparation` |
 | Resume after an interrupted receive, for both incremental modes | `TestGuestInterruptedTransferRecovery` |
+| A destination exhausted mid-receive, the source recovery state it retains, and the retry once room returns | `TestGuestDestinationExhaustion` |
 | Raw delegated ZFS capability floor: send/recv, `-R`, `-p`, resume tokens, holds, bookmarks | `guest/delegated-matrix.sh` |
 
 ### Remote transports
@@ -98,11 +100,30 @@ resolves policy from `ListDatasets` output rather than a literal.
 | `ssh-shell` operations outside `ssh_shell.replication_roots` refused | `TestGuestAccessControlRefusals/operation-outside-replication-roots` |
 | A receive root outside `ssh_shell.replication_roots` refused before anything is created | `TestGuestAccessControlRefusals/receive-root-outside-replication-roots` |
 | A missing `zfs allow` grant reported with the account, dataset and permissions | `TestGuestAccessControlRefusals/missing-delegation` |
-| `dataset list`, `dataset inspect`, `dataset reseed`, `identity recover` | **Not covered** - chunk E |
-| Adversarial: destination out of space mid-receive, socket contention, power loss between snapshot and property write | **Not covered** - chunk F |
+| `dataset list` status classification from real pool state | `TestGuestDatasetCLI/list` |
+| `dataset inspect` provenance: local authority on the source, and receive isolation plus received state on the replica | `TestGuestDatasetCLI/inspect-source`, `TestGuestDatasetCLI/inspect-received` |
+| `dataset reseed` resolving a configured target, destroying the replica, and leaving the source sendable | `TestGuestDatasetCLI/reseed` |
+| `identity recover` against owner and lineage markers a real snapshot wrote | `TestGuestIdentityRecoverCLI` |
+| A second daemon refused without displacing the first; a killed daemon's socket reclaimed | `TestGuestDaemonSocketContention` |
+| `config check`, `config show` redaction, and the `status` renderer selection | Unit tests - see "Deliberately not here" |
 
 Chunk letters refer to [design/integration-coverage.md](../../design/integration-coverage.md),
 which carries the reasoning behind each gap and the plan for closing it.
+
+### Deliberately not here
+
+Three CLI surfaces were triaged into unit tests rather than covered here,
+because no pool can contradict them.
+
+| Behaviour | Owned by |
+| --- | --- |
+| `config check` counts source files and refuses invalid drop-ins | `TestConfigCheckCountsEverySourceFile`, `TestConfigCheckReportsDropInFailures` |
+| `config show` merges drop-ins and redacts listener private keys | `TestConfigShowMergesAndRedactsListenerSecrets` |
+| `status` renders JSON whenever its output is not a terminal | `TestStatusRendererSelection`, with the rendering itself in `internal/statusui` |
+
+`config check` and `config show` read configuration files and nothing else.
+`status`'s terminal rendering cannot be reached from here at all: the selector
+turns on `term.IsTerminal`, and every stage gives the command a pipe.
 
 ### Not behaviour tests
 

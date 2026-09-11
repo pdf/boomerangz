@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: in progress. Chunks 0-3 and A have landed; B-F are outstanding.
+Status: in progress. Chunks 0-3, A and C-F have landed; B is outstanding.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -421,7 +421,7 @@ Starting point for a fresh session: the harness is repaired and the ledger in
 `test/integration/README.md` is current, so nothing here needs archaeology.
 Read that ledger, this section, and the `t`-capture note in the README's "How
 a run is structured" before writing a test. Stage pass floors currently sit at
-lifecycle 1, transfer-local 4, transfer-remote 1, daemon 3, control 2, and a
+lifecycle 2, transfer-local 5, transfer-remote 2, daemon 6, control 6, and a
 new test in an already-running stage means raising its floor. Base images
 cache under `~/.cache/boomerangz-integration`, so the first run is not slow.
 
@@ -511,18 +511,174 @@ delegated deployment. Reaching it needed the local target configured on the
 source, because the planner refuses a destination the source properties do not
 name, which stops the permission preflight from running at all.
 
-### Chunk E - CLI surface
+### Chunk E - CLI surface (done)
 
 Triage the untested commands from section 3 against the section 4 rule. Add
 integration coverage only for those that read real pool state
 (`dataset list`, `dataset inspect`, `dataset reseed`, `identity recover`);
 send the rest to unit tests over `zfs.Executor` and record that here.
 
-### Chunk F - adversarial paths
+**How it landed.** Seven commands triaged, four covered here and three sent to
+unit tests. The split was decided per command by asking what a pool could
+contradict, not by which package the code lives in.
+
+`config check` and `config show` read configuration files and never touch ZFS
+at all, so they went to `internal/cli/config_test.go`. That was not a null
+result: `config show` redacts `tls_key` through `config.MarshalRedacted`, and
+nothing in the tree tested it, so a regression that disclosed a listener's
+private key would have been silent. The new test asserts the key is gone, the
+marker is present, and the rest of the effective configuration - the
+non-secret neighbour, a drop-in override, an untouched default - survives the
+redaction. It also pinned an existing diagnostic gap rather than papering over
+it: an unknown field in a drop-in is refused as `decode merged configuration:
+strict mode: fields in the document are missing in the target struct`, naming
+neither the file nor the key, because the strict decode runs over the merged
+document after `Load` has dropped the per-key provenance it collected. The
+test asserts what the command does and says why; fixing the message is
+product work outside this chunk.
+
+`status`'s non-JSON rendering cannot be reached from the integration suite at
+all, which is the more useful finding than "it is untested". The choice is
+made by `terminalWidth`, which requires stdout to be an `*os.File` that
+`term.IsTerminal` accepts; every stage gives the command a pipe, so a guest
+test would exercise the JSON path however it was written. The rendering itself
+is already covered in `internal/statusui` over the proto snapshot. What was
+left unowned was the selector, so `TestStatusRendererSelection` pins its
+negative half - a redirected or piped `status` stays machine-readable - which
+is the property scripts depend on.
+
+The four that earned a pool are one test each in the control stage, which is
+the stage that has the CLI binary. Both write their own configuration into
+`t.TempDir` and pass `--config` plus `--config-dir`: the shared stage
+configuration is not available for this, because `TestGuestDaemonControl`
+appends to it and asserts a reload generation of 2, and its identity directory
+already belongs to another installation.
+
+`TestGuestDatasetCLI` covers `list`, `inspect` and `reseed` against one tree.
+The rendering of `list` and `inspect` is unit-tested over a fake reader
+already, so the phases assert the thing a fake cannot supply: that ZFS's own
+value and source columns drive the classification. A locally activated root
+reads as active, its replicated descendant as covered, a root naming an
+unconfigured remote as invalid, and a bare dataset as inactive - four statuses
+from one `zfs get` sweep. The phase worth the boot is `inspect-received`, and it
+was written on a wrong premise first. The source is sent with `props=on` and
+is activated with a non-default grid naming a destination, so the expectation
+was that the replica would carry `org.boomerangz:enabled=on` as a received
+property for the CLI to report as provenance. It does not, and the guest run
+is what said so: `completeReceiveExclusions` excludes every public
+`org.boomerangz` key from the receive, so even a send that explicitly asks for
+properties leaves the whole public namespace behind. What crosses is
+`state:lineage` and `state:owner`, which arrive as `received`.
+
+The phase now asserts that, which is the stronger claim: one `dataset inspect`
+of the replica shows receive isolation whole - activation inactive, `enabled`
+and `policy` back at their defaults, no local destination - alongside the
+received state boomerangz does keep, attributed to `received` and to the
+replica. Asking for properties and still not getting the public ones is the
+part a fake could not have told us.
+
+`reseed` is covered over the CLI rather than only through the service, which
+`TestGuestLocalTransfer/reseed-recovery` already owns. What the command adds is
+target resolution: it must resolve the name against the source's own effective
+`local`/`remote` lists, and the negative - a destination root the source
+policy does not name - is refused with
+`must identify exactly one effective local destination or remote`. The apply
+path is proved by what follows it rather than by its own output: the replica
+is gone, and a fresh transfer to the same root plans as `full`, so the reset
+left the source sendable rather than merely destroying the destination.
+
+`TestGuestIdentityRecoverCLI` is the inverse of the unit test beside it. That
+one hands `runIdentityRecover` a fabricated `zfs.State`; this one makes the
+markers with a real snapshot under one installation, points a scratch
+configuration with an empty identity directory at them, and recovers. The
+preview must not write, the apply must, and - the assertion that makes it
+worth a pool - the recovered installation must then be able to extend the
+lineage it adopted, which exercises `RootAuthority` against markers ZFS
+actually stored rather than against a literal. The owner is named with
+`--owner` rather than inferred, because `recoveryInventory` scans every
+dataset on the host and any other test's activated root would make the
+candidate set ambiguous; that is a property of the command, not of the test.
+
+**One piece of housekeeping the chunk forced.** `TestGuestDaemonControl` and
+`TestGuestDaemonAbruptRestart` created activated source roots and never
+destroyed them, which is the only leak left in the suite after chunk 1. It
+does not matter to them, but `identity recover` fails outright on an activated
+root whose owner and lineage it cannot resolve, so a leaked root is a loaded
+gun for anything that scans the pools. Both now register
+`zfstest.RegisterCleanup`.
+
+**Verified by two guest runs.** The first was red on exactly one phase -
+`inspect-received`, above - and green on everything else, including all three
+of `TestGuestIdentityRecoverCLI`'s phases and both of the reseed paths. The
+second run is green end to end: lifecycle 2, transfer-local 5,
+transfer-remote 2, daemon 6, control 6 top-level passes, no failures, and the
+packaged system checks green. The chunk cost one boot to learn that receive
+isolation is stricter than the test assumed, which is the kind of thing the
+suite exists to say.
+
+### Chunk F - adversarial paths (done)
 
 Destination out of space mid-receive; a second daemon contending for the
 socket; abrupt power loss between snapshot creation and property write. Lowest
 priority, highest information per test.
+
+**How it landed.** Three tests, in three stages, chosen by environment as
+chunk D established. The third item turned out to name a window that does not
+exist, and finding that out was the most useful part of the chunk.
+
+`TestGuestDestinationExhaustion` (transfer-local) receives a 96MiB payload
+into a container carrying a 32MiB quota. The quota sits on the container
+rather than on the receive root, because with `discard=off` the receive root
+*is* the received dataset and would inherit nothing that constrains it. The
+assertion that makes this an exhausted receive rather than a refused one is
+that the progress callback reported bytes before the failure - the stream was
+in flight when the destination ran out. The two phases after it are the point:
+the source still holds the snapshot it sent, so recovery state survived the
+failure, and lifting the quota lets the same request succeed. A transfer that
+fails on space must be a retry, not a reseed. Creating the quota under
+delegation needed a `quota` grant the destination pool had never been given;
+it is fixture-only and commented as such, since nothing in boomerangz sets
+quotas.
+
+`TestGuestDaemonSocketContention` (control) is process lifecycle, which the
+suite's charter already claims. A second `boomerangz daemon` against the same
+configuration is refused - `another lifecycle operation is running`, from the
+flock taken in `lifecycleLock` before the control server is ever started - and
+the running daemon keeps serving across the refusal, which is the half that
+would actually hurt if it regressed. Then the first daemon is killed with
+SIGKILL so it runs no shutdown, its socket file outlives it, and a replacement
+has to tell a stale socket from a live one: `listenUnix` dials it, takes
+`ECONNREFUSED` as proof, and rebinds. Both branches of that function are now
+covered, and neither is reachable without real processes, because the refusal
+depends on a lock the kernel releases on exit.
+
+**The power-loss window in the plan does not exist.** `Service.CreateSnapshot`
+passes the ownership metadata to `zfs snapshot -o`, so a snapshot and its
+properties are one transaction; there is no point at which a snapshot exists
+without its metadata, and no code that writes snapshot metadata afterwards.
+The window that does exist is the one before it: `CreateSnapshot` writes the
+root's owner and lineage markers with `SetProperties` and only then takes the
+first snapshot, so a crash in between leaves a root claimed but never
+snapshotted. `TestGuestInterruptedLineageInitialization` (lifecycle) covers
+the three states that leaves, all of which turn on which property source ZFS
+reports. A root claimed by this installation resumes its lineage rather than
+forking a new one. A root claimed by another installation is refused as a
+`dormant foreign lineage` and no snapshot is created. And a child under a
+claimed parent sees the parent's markers through inheritance, which ZFS
+attributes to the parent - so `InspectState` drops them, and the child claims
+local markers of its own instead of silently joining its parent's lineage.
+That last one is the case worth a pool: it is decided entirely by a source
+column, and the unit tests hand-build the state rather than reading one.
+
+**Verified by the same two guest runs.** All three tests passed on the first
+run and on the second, with the exhaustion test the most informative: 92MiB
+crossed before the receiver reported
+`cannot receive new filesystem stream: destination ... space quota exceeded`,
+the source kept its snapshot and its hold, and the retry after `quota=none`
+verified. Worth knowing for the diagnostics work: the sender's half of that
+error is `stream pipeline: write |1: broken pipe` plus `signal: killed`, so the
+only actionable sentence is the receiver's, and it arrives at the end of a
+three-line message.
 
 ## 6. Keeping this from re-rotting
 
