@@ -189,6 +189,7 @@ type transferApplier interface {
 // RecoveryOutcome describes one explicit or due remote reconciliation attempt.
 type RecoveryOutcome struct {
 	Status    string    `json:"status"`
+	Reason    string    `json:"reason,omitempty"`
 	NotBefore time.Time `json:"not_before,omitempty"`
 	Results   []Result  `json:"results,omitempty"`
 }
@@ -206,6 +207,7 @@ type Roadwarrior struct {
 	mu        sync.Mutex
 	failures  int
 	notBefore time.Time
+	reason    string
 }
 
 // NewRoadwarrior constructs a per-source-target recovery coordinator.
@@ -240,7 +242,11 @@ func (r *Roadwarrior) Reconcile(ctx context.Context, report func(zfs.Progress)) 
 	defer r.mu.Unlock()
 	now := r.now()
 	if now.Before(r.notBefore) {
-		return RecoveryOutcome{Status: "waiting-retry", NotBefore: r.notBefore}, nil
+		// An attempt made before the backoff deadline reports the failure that
+		// set it. Returning the bare status instead would overwrite the reason
+		// in the daemon's status store, which keeps only the latest event per
+		// job, and leave an operator watching a retry with no cause.
+		return RecoveryOutcome{Status: "waiting-retry", Reason: r.reason, NotBefore: r.notBefore}, nil
 	}
 	request := r.request
 	pending, hasPending := r.pending.Begin(request.Source, canonicalTarget(request))
@@ -266,11 +272,11 @@ func (r *Roadwarrior) Reconcile(ctx context.Context, report func(zfs.Progress)) 
 			if delayErr != nil {
 				return outcome, delayErr
 			}
-			r.notBefore = now.Add(delay)
-			outcome.Status, outcome.NotBefore = "waiting-retry", r.notBefore
+			r.notBefore, r.reason = now.Add(delay), err.Error()
+			outcome.Status, outcome.NotBefore, outcome.Reason = "waiting-retry", r.notBefore, r.reason
 			return outcome, err
 		}
-		r.failures, r.notBefore = 0, time.Time{}
+		r.failures, r.notBefore, r.reason = 0, time.Time{}, ""
 		if result.Plan.Mode != "resume" {
 			completed = hasPending && result.Verified && result.Plan.Snapshot == pending.Name
 			outcome.Status = "succeeded"

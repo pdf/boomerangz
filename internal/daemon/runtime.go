@@ -1017,7 +1017,7 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 		if outcome.Status == "succeeded" {
 			r.enqueueDestinationPrune(dataset, effective, road.request.CanonicalTarget, "")
 		}
-		return Outcome{State: outcome.Status}
+		return Outcome{State: outcome.Status, Reason: outcome.Reason}
 	}
 	job.After = func(Outcome) {
 		if r.isDirty(jobID) {
