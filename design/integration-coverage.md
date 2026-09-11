@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: in progress. Chunks 0-3 and A-F have landed; G is outstanding.
+Status: in progress. Chunks 0-3 and A-F have landed; G and H are outstanding.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -700,63 +700,116 @@ Destination out of space mid-receive; a second daemon contending for the
 socket; abrupt power loss between snapshot creation and property write. Lowest
 priority, highest information per test.
 
-**How it landed.** Three tests, in three stages, chosen by environment as
-chunk D established. The third item turned out to name a window that does not
-exist, and finding that out was the most useful part of the chunk.
+**How it landed.** Four tests, and a false start worth recording because it
+shaped the first three of them.
 
-`TestGuestDestinationExhaustion` (transfer-local) receives a 96MiB payload
-into a container carrying a 32MiB quota. The quota sits on the container
-rather than on the receive root, because with `discard=off` the receive root
-*is* the received dataset and would inherit nothing that constrains it. The
-assertion that makes this an exhausted receive rather than a refused one is
-that the progress callback reported bytes before the failure - the stream was
-in flight when the destination ran out. The two phases after it are the point:
-the source still holds the snapshot it sent, so recovery state survived the
-failure, and lifting the quota lets the same request succeed. A transfer that
-fails on space must be a retry, not a reseed. Creating the quota under
-delegation needed a `quota` grant the destination pool had never been given;
-it is fixture-only and commented as such, since nothing in boomerangz sets
-quotas.
+The chunk was read as "find out whether these adversarial conditions can
+arise" when it means "make them arise". Under the first reading, the
+power-loss item became an audit: `Service.CreateSnapshot` passes its metadata
+to `zfs snapshot -o`, so a snapshot and its properties commit together, the
+named window cannot open, and the test planted the post-crash state with
+`zfs set` instead of crashing anything. That tests the property-source
+semantics - which are real - but it is not an adversarial path, because
+nothing dies and the recovery code never meets state a real death produced.
+Two of the other three items had the same defect in smaller form. The chunk
+was reworked against the second reading.
 
-`TestGuestDaemonSocketContention` (control) is process lifecycle, which the
-suite's charter already claims. A second `boomerangz daemon` against the same
-configuration is refused - `another lifecycle operation is running`, from the
-flock taken in `lifecycleLock` before the control server is ever started - and
-the running daemon keeps serving across the refusal, which is the half that
-would actually hurt if it regressed. Then the first daemon is killed with
-SIGKILL so it runs no shutdown, its socket file outlives it, and a replacement
-has to tell a stale socket from a live one: `listenUnix` dials it, takes
-`ECONNREFUSED` as proof, and rebinds. Both branches of that function are now
-covered, and neither is reachable without real processes, because the refusal
-depends on a lock the kernel releases on exit.
+`TestGuestDaemonPowerLoss` injects the fault. Nothing in boomerangz exposes a
+seam between one ZFS operation and the next, but every operation is a
+subprocess resolved through `PATH`, so the boundary between "committed to the
+pool" and "the daemon acted on it" is reachable from outside the process: a
+`zfs` stand-in first on the daemon's `PATH` runs the real binary and then
+`kill -9`s its own parent. It disarms itself, so exactly one operation is
+fatal and the restarted daemon runs unimpeded. `snapshot-commit` cuts at the
+window the plan named and shows the atomicity claim survives a real SIGKILL -
+the snapshot that outlives the daemon is complete, carries its ownership
+metadata, and the restart adopts it rather than forking. `receive-commit`
+cuts at a boundary that genuinely is two operations wide: the receive is
+durable but the source-side target binding is not yet written, so a replica
+exists that the source has no record of, and the test asserts the restarted
+daemon reconciles it rather than stranding the target.
 
-**The power-loss window in the plan does not exist.** `Service.CreateSnapshot`
-passes the ownership metadata to `zfs snapshot -o`, so a snapshot and its
-properties are one transaction; there is no point at which a snapshot exists
-without its metadata, and no code that writes snapshot metadata afterwards.
-The window that does exist is the one before it: `CreateSnapshot` writes the
-root's owner and lineage markers with `SetProperties` and only then takes the
-first snapshot, so a crash in between leaves a root claimed but never
-snapshotted. `TestGuestInterruptedLineageInitialization` (lifecycle) covers
-the three states that leaves, all of which turn on which property source ZFS
-reports. A root claimed by this installation resumes its lineage rather than
-forking a new one. A root claimed by another installation is refused as a
-`dormant foreign lineage` and no snapshot is created. And a child under a
-claimed parent sees the parent's markers through inheritance, which ZFS
-attributes to the parent - so `InspectState` drops them, and the child claims
-local markers of its own instead of silently joining its parent's lineage.
-That last one is the case worth a pool: it is decided entirely by a source
-column, and the unit tests hand-build the state rather than reading one.
+`TestGuestDaemonSocketContention` gained the phase it was named for. The
+original asserted that a second daemon is refused and called both branches of
+`listenUnix` covered. That was wrong: `lifecycleLock` is keyed on
+`SocketPath + ".lifecycle.lock"`, so two daemons sharing a configuration
+always collide on the flock and never reach the socket at all. The test
+proved the lock and never executed `control socket is already active`.
+Reaching that branch needs something else already listening on the path, so
+`live-socket-refused` binds it from the test and starts a daemon against it -
+a real misconfiguration, and the branch that stops a daemon silently orphaning
+another one's control plane. The lock phase stays, renamed to say what it
+actually exercises.
 
-**Verified by the same two guest runs.** All three tests passed on the first
-run and on the second, with the exhaustion test the most informative: 92MiB
-crossed before the receiver reported
-`cannot receive new filesystem stream: destination ... space quota exceeded`,
-the source kept its snapshot and its hold, and the retry after `quota=none`
-verified. Worth knowing for the diagnostics work: the sender's half of that
-error is `stream pipeline: write |1: broken pipe` plus `signal: killed`, so the
-only actionable sentence is the receiver's, and it arrives at the end of a
-three-line message.
+`TestGuestDatasetContention` covers the half of the plan's "two daemons
+contending for the same socket **or the same dataset**" that the first pass
+dropped without comment. It is the case an operator can actually cause:
+separate socket paths mean separate locks, so nothing in the process model
+stops a second installation starting against a pool the first manages, and the
+refusal has to come from the ownership markers on the dataset. The second
+daemon's job for the contended dataset must not succeed, its reason must name
+the `dormant foreign lineage`, and the owner's lineage and snapshots must be
+untouched.
+
+`TestGuestDestinationExhaustion` is the one item that was adversarial from the
+start - a real quota, a real receive that runs out mid-stream - and it kept
+its shape. One assertion was softened when the error wording was unknown and
+has been tightened now that three runs have shown it: a failure that does not
+name space or quota fails the test, because telling an exhausted destination
+from any other transfer failure is the whole diagnostic value.
+
+`TestGuestInterruptedLineageInitialization` survives the rework. Planting the
+markers is a poor crash test but a good test of the property-source rules -
+local markers are authority, inherited ones are provenance, a foreign owner is
+refused - and those are decided by a column only a pool reports. It keeps that
+job and no longer claims to cover the crash.
+
+**The finding: the bootstrap transfer is not crash-safe.** Killing the daemon
+once a receive has committed, but before the transfer verifies, leaves the
+target permanently blocked with `target identity or mapping differs from
+persistent binding; run boomerangz dataset reseed for this source and target`.
+The daemon does not recover unattended.
+
+The mechanism is narrow. `resolveTargetBinding` records the *nearest existing
+ancestor* as the binding anchor, because on a first transfer the mapped
+dataset does not exist yet - so the binding says `<pool>/data`. The receive
+then creates the mapped dataset, so on the next pass `anchor == mapped`, the
+drift guard at [binding.go:104](../internal/transfer/binding.go) does not fire,
+the identity is read from the dataset the receive just created, and it does
+not match the stored anchor. Only the bootstrap is exposed: once a target has
+verified, its anchor *is* the mapped dataset, so a later crash re-plans
+cleanly.
+
+It is a gap in unattended recovery rather than a correctness bug - nothing is
+corrupted, the replica is intact, and the message names the remedy - so it is
+recorded rather than fixed here, and the phase asserts the behaviour as it
+stands. The phase also runs the remedy: it stops the daemon, runs
+`dataset reseed --apply`, and asserts the target then converges, because
+advice an operator cannot act on is worse than no advice. If the adoption path
+is ever implemented, that phase inverts and says so in its own comment.
+
+**The dataset-contention refusal is earlier than expected.** A second
+installation does not reach the `dormant foreign lineage` guard at all.
+`actionableRoot` ([runtime.go:408](../internal/daemon/runtime.go)) admits a
+root only when it carries no local owner or carries this installation's own,
+so a dataset another installation owns never enters the scheduler: `trigger`
+is refused with `is not an active scheduling root` and no job is ever created.
+The ownership guard in `CreateSnapshot` is the belt behind those braces, and
+`TestGuestInterruptedLineageInitialization/refuses-a-foreign-claim` asserts it
+directly. The test asserts the layer that actually fires.
+
+That refusal needed a control arm before it was worth anything. `is not an
+active scheduling root` is also what a daemon says about a dataset it has not
+discovered yet, and the first version triggered the contended dataset moments
+after starting the second daemon - so it would have passed against a daemon
+that had merely not finished starting, with no contention involved at all. The
+test now gives the same daemon an activated, unowned dataset as well, waits
+for that trigger to be accepted, and only then asks about the contended one.
+One acceptance and one refusal from the same daemon at the same moment is what
+makes the refusal attributable to ownership rather than to readiness. This is
+the same device chunk B used in carrying `local` as an arm of the transport
+table, and it is worth reaching for whenever a negative assertion rests on an
+error a not-ready system would produce anyway.
 
 **Left open, and worth naming.** Chunk B's section proposed one more
 adversarial shape for this chunk: a receive that fails for a reason other than
@@ -767,6 +820,34 @@ failure, so the shape is no longer entirely untested, but it runs over the
 local engine alone. Whether the other shapes leave the same recoverable state
 over `ssh-direct`, `ssh-shell` and `native`, or whether some of them strand a
 target with neither a resume token nor a clean refusal, is still unasked.
+
+**Verified across four guest runs, three of them red.** Every failure was the
+tests rather than the product, and each is worth recording because they are
+one error in three costumes - asserting what is easy to observe instead of
+what is under test.
+
+Run 4: the `zfs` stand-in compared arguments against the bare dataset name,
+but `zfs snapshot` names its target `dataset@name`, so nothing was ever killed
+and the phase waited out its timeout; the receive phase meanwhile asserted an
+ordering the code does not use, and its own guard caught that. Run 5: the
+receive phase, corrected, exposed the crash-safety finding above, and the
+contention test timed out because the owner had just snapshotted, nothing was
+due, and the second installation never attempted the work whose refusal was
+the point. Run 7: the contention test's new control arm timed out, because
+both daemons discover every dataset in the pools and the owner claimed the
+control-arm dataset first - the control arm failing rather than letting the
+real assertion pass unexamined is precisely the behaviour it was added for.
+Run 8 is green end to end: lifecycle 2, transfer-local 5, transfer-remote 3,
+daemon 6, control 8 top-level passes, no failures, packaged system checks
+green, and the contention test down from a 91s timeout to 12.5s.
+
+The exhaustion phase remains the most informative: 92MiB crossed before the
+receiver reported `cannot receive new filesystem stream: destination ... space
+quota exceeded`, the source kept its snapshot and its hold, and the retry
+after `quota=none` verified. Worth knowing for the diagnostics work - the
+sender's half of that error is `stream pipeline: write |1: broken pipe` plus
+`signal: killed`, so the only actionable sentence is the receiver's, and it
+arrives at the end of a three-line message.
 
 ### Chunk G - recursive replication over a remote
 
@@ -811,6 +892,49 @@ Done when: recursive `replicate` with both discard modes runs over each
 transport, with the received subtree, the prepared ancestors and the
 foreign-destination refusal asserted on the destination - and the ledger row
 under "Remote transports" names it.
+
+### Chunk H - refusals that do not discriminate
+
+Chunk F produced three variants of one error: asserting the thing that is easy
+to observe rather than the thing under test. The worst was a negative
+assertion - a second installation's `trigger` refused with `is not an active
+scheduling root` - that a daemon which had merely not finished starting would
+have satisfied just as well. An audit of every `err == nil` refusal in
+`test/integration/` for the same shape found three more, plus one milder case.
+This chunk fixes them.
+
+| Site | Assertion | What also satisfies it |
+| --- | --- | --- |
+| [local_test.go:298](../test/integration/transfer/local_test.go) `unrelated-destination-refused` | `Preview(...)` returns any error | any planner or inventory fault |
+| [local_test.go:370](../test/integration/transfer/local_test.go) `recursive-mapping` | `Preview(...)` returns any error | as above, for the recursive case |
+| [parity_test.go:443](../test/integration/transfer/parity_test.go) `unrelated-destination-refused` | `Preview(...)` returns any error, once per transport | any transport-specific fault, four times a run |
+| [guest_test.go:142](../test/integration/lifecycle/guest_test.go) `reference-checkpoint` | `Checkpoint` with a deliberately wrong destination GUID returns any error | a checkpoint broken for any reason |
+
+The first three are all the same phase shape: plant a foreign snapshot on the
+destination, then assert the transfer refuses it. The chained phases do supply
+weak readiness control - the same engine succeeded a phase earlier - but
+nothing attributes the failure to the snapshot that was planted.
+
+**Fix them with a before/after control arm, not a substring match.** Preview
+the request *before* planting the foreign snapshot and assert a real plan
+comes back; plant it; assert the refusal. That proves the planted snapshot is
+what changed the outcome, and unlike matching on error text it does not couple
+the test to wording that is free to change. This is the device
+`TestGuestEncryptedTransfer/key-unavailable` already uses - "nothing left to
+send, so the refusal below would prove nothing" - and the one chunk F's
+dataset-contention test ended up with. `reference-checkpoint` wants the same
+treatment: assert the checkpoint succeeds with the correct GUID before
+asserting it fails with the wrong one.
+
+Where a message genuinely is the behaviour - `missing-delegation` reporting
+the account, dataset and permissions, or the bootstrap-crash block naming
+`reseed` - keep asserting the text as well. Those tests are already right, and
+chunk D's are the model: error content plus a consequence check.
+
+Done when: no refusal in `test/integration/` passes against a system that is
+merely broken or not yet ready, and the audit that found these is recorded
+well enough to be repeated. It is a single guest run to verify, and it moves
+no stage floor, because every change is inside an existing phase.
 
 ## 6. Keeping this from re-rotting
 

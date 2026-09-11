@@ -17,6 +17,14 @@ run is the cost, and a test that only asserts what a fake was told to return
 proves nothing. `localBackend` in `internal/transfer/local_test.go` is the
 established idiom for the unit-test side.
 
+A refusal has to be attributable. Asserting only that an operation returned an
+error is satisfied by a system that is broken, misconfigured, or not yet
+ready, so pair it with something that discriminates: preview the same request
+successfully before planting the condition under test, assert the error text
+where the message *is* the behaviour, and check the consequence - that the
+dataset really was not created. `TestGuestEncryptedTransfer/key-unavailable`
+and `TestGuestAccessControlRefusals` are the models.
+
 ## Coverage ledger
 
 One line per behaviour axis, naming what owns it. The axes follow
@@ -110,7 +118,12 @@ failure attributable to the transport instead of to the test.
 | `dataset inspect` provenance: local authority on the source, and receive isolation plus received state on the replica | `TestGuestDatasetCLI/inspect-source`, `TestGuestDatasetCLI/inspect-received` |
 | `dataset reseed` resolving a configured target, destroying the replica, and leaving the source sendable | `TestGuestDatasetCLI/reseed` |
 | `identity recover` against owner and lineage markers a real snapshot wrote | `TestGuestIdentityRecoverCLI` |
-| A second daemon refused without displacing the first; a killed daemon's socket reclaimed | `TestGuestDaemonSocketContention` |
+| A daemon refused when another process already holds the control socket | `TestGuestDaemonSocketContention/live-socket-refused` |
+| A second daemon under one configuration refused by the lifecycle lock, without displacing the first | `TestGuestDaemonSocketContention/lock-refuses-second-daemon` |
+| A killed daemon's stale socket reclaimed by its replacement | `TestGuestDaemonSocketContention/stale-socket-reclaimed` |
+| SIGKILL once a snapshot has committed: metadata intact, lineage adopted on restart | `TestGuestDaemonPowerLoss/snapshot-commit` |
+| SIGKILL once a bootstrap receive has committed: target blocks for a reseed, and the reseed recovers it | `TestGuestDaemonPowerLoss/receive-commit` |
+| A second installation declining a dataset another owns as a scheduling root | `TestGuestDatasetContention` |
 | `config check`, `config show` redaction, and the `status` renderer selection | Unit tests - see "Deliberately not here" |
 
 Chunk letters refer to [design/integration-coverage.md](../../design/integration-coverage.md),
