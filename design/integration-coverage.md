@@ -849,7 +849,7 @@ sender's half of that error is `stream pipeline: write |1: broken pipe` plus
 `signal: killed`, so the only actionable sentence is the receiver's, and it
 arrives at the end of a three-line message.
 
-### Chunk G - focused integration runs
+### Chunk G - focused integration runs (done)
 
 Every chunk since 0 has been paid for one guest boot at a time, and chunks H
 and I are both made of small edits that will each want their own iteration.
@@ -905,7 +905,45 @@ package set, the target adapter - and a stale provisioned image is a much
 worse failure than a slow run. Worth its own chunk if the setup cost ever
 dominates again; it does not today.
 
-### Chunk H - recursive replication over a remote
+**How it landed.** Two environment variables, no new plumbing and no new
+Makefile variables: an environment variable set on a `make` command line is
+already exported into the recipe, so `BOOMERANGZ_INTEGRATION_STAGES=control
+make integration-test` reaches `host/run.sh` without the Makefile mentioning
+it. `BOOMERANGZ_INTEGRATION_FILTER` carries a `-test.run` regex the same way.
+
+The stage list lives in exactly one place. `run-common.sh` declares it and
+answers `--list-stages`, so `host/run.sh` validates a requested stage by
+asking the script that will run it - a misspelled stage is refused in under a
+second, rather than after the boot the chunk exists to avoid. Filters are
+refused outright in `package` and `benchmark` modes, which have no stages.
+
+The floors are bypassed, never miscounted: `run_stage` reports its count and
+says the floor was not enforced, an unselected stage prints a line saying so
+rather than vanishing, and `PARTIAL RUN - NOT VERIFICATION` prints at both
+ends of the run and in every stage summary. An unfiltered run sets
+`partial_run=no`, takes the same path it always did, and prints no banner -
+the full verification run below is byte-for-byte the old behaviour, floors
+enforced at 2/5/3/6/8.
+
+Measured on this host, warm cache: a full run is 18m46s, one stage
+(`lifecycle`) about 3 minutes, and one test
+(`-test.run '^TestGuestLifecycle$'`) 2m52s - so the floor is the ~2.7 minutes
+of setup, and everything above it is the tests. Chunks H and I were developed
+against a three-stage run at 11m29s, which is the shape most work wants:
+every stage the change touches, and nothing else.
+
+**It also caught a flake that was not in scope.** The packaged-system check
+failed one filtered run on `systemctl reload`, and passed the identical
+command on the next attempt. The unit is `Type=simple`, so `systemctl start`
+returns as soon as the process is forked and `is-active` agrees, but
+`ExecReload` is `boomerangz config reload` - a client of the control socket
+the daemon has not necessarily created yet. The check was a race against
+startup rather than an assertion about reload, and it has now been seen to
+lose. `targets/cachyos/run.sh` waits for the socket before reloading. The
+race is in the check, not in the unit: an operator reloading a service they
+just started by hand is not doing so 50ms later.
+
+### Chunk H - recursive replication over a remote (done)
 
 Starting point for a fresh session: chunk B built
 `TestGuestTransportParity`, which runs six behaviours against `local`,
@@ -949,7 +987,42 @@ transport, with the received subtree, the prepared ancestors and the
 foreign-destination refusal asserted on the destination - and the ledger row
 under "Remote transports" names it.
 
-### Chunk I - refusals that do not discriminate
+**How it landed.** As specified: a self-contained `recursive-mapping` phase
+inside `TestGuestTransportParity`, two discard modes under it, its own source
+tree and destination root per mode so the persistent binding is never asked to
+change mapping under one source. Green on the first guest run, on all four
+transports, with no product defect found - every transport behaved exactly as
+the local engine does.
+
+Three details are worth keeping.
+
+*Only `discard=first` reaches the ancestor guard.* The chunk expected both
+modes to need intermediate containers. `discard=first` maps the source path
+below the destination root, so `<root>/data` has to be created remotely and
+`CreateReceiveParent` runs over the transport; `discard=all` maps the basename
+directly under the root, so `missingReceiveParents` returns nothing and the
+`dataset == e.root` guard is never approached. The phase asserts which of the
+two happened rather than assuming, and checks `canmount=noauto` on the
+ancestor that was prepared. The root itself must already exist for either -
+`missingReceiveParents` refuses a root that is not an existing filesystem -
+so the guard never stands between a legitimate receive and its ancestors.
+
+*Assert snapshot names, not snapshot counts.* The phase plants a foreign
+recursive snapshot on the source before boomerangz's own, and `replicate=on`
+sends `-R`, so the foreign snapshot arrives at the destination too and
+`lifecycle.Snapshots` counts it. Naming the expected snapshot on the mapped
+dataset and on its child is both cheaper and stricter than a count that has
+to be kept in step with what else the phase happens to create.
+
+*It is the most expensive thing in the suite.* The phase adds about 23s per
+discard mode per transport - 190s in total, taking `TestGuestTransportParity`
+from 168s to 422s and the whole run from ~14.5 to 18m46s. That is not
+transport overhead: `local` costs the same as the three remotes, and
+`TestGuestLocalTransfer/recursive-mapping` already costs 21s per mode for the
+same work. Recursive snapshot and send work is simply slow in this guest. It
+is the single best candidate if run time ever needs to come down.
+
+### Chunk I - refusals that do not discriminate (done)
 
 Chunk F produced three variants of one error: asserting the thing that is easy
 to observe rather than the thing under test. The worst was a negative
@@ -991,6 +1064,30 @@ Done when: no refusal in `test/integration/` passes against a system that is
 merely broken or not yet ready, and the audit that found these is recorded
 well enough to be repeated. It is a single guest run to verify, and it moves
 no stage floor, because every change is inside an existing phase.
+
+**How it landed.** All four sites, one run, no product change and no floor
+moved. The three transfer phases each now create the pending source snapshot,
+preview the identical request and require a real plan back, and only then
+plant the foreign destination snapshot and require the refusal - so the
+planted snapshot is demonstrably what changed the outcome. No error text is
+matched, which is the point: the refusal is attributed by the control arm
+rather than by wording that is free to change.
+
+`reference-checkpoint` is the one that changed shape rather than gaining a
+line. It now checkpoints with the correct GUID first, asserts the versioned
+bookmark that creates, and then asserts the wrong GUID is refused *and* that
+the bookmarks are unchanged - a consequence check the phase had no way to
+make while the refusal came first. `CheckpointSet` validates the GUID before
+it looks for an existing bookmark, so the successful checkpoint does not mask
+the refusal.
+
+The audit that found these is repeatable as written: search
+`test/integration/` for an assertion that an operation returned a non-nil
+error, and ask of each what else would satisfy it. The shape to look for is a
+negative assertion whose error is one a not-ready, misconfigured or broken
+system produces anyway. `TestGuestTransportParity/<transport>/recursive-mapping`
+from chunk H was written with its control arm from the outset, which is what
+the convention in `test/integration/README.md` is for.
 
 ## 6. Keeping this from re-rotting
 
