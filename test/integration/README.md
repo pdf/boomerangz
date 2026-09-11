@@ -169,6 +169,13 @@ environment guard - drops the count below the floor and fails the run rather
 than passing unnoticed. Raise the floor when adding a test whose environment
 guard is satisfied by that stage.
 
+`BOOMERANGZ_INTEGRATION_STAGES` narrows a run to named stages and
+`BOOMERANGZ_INTEGRATION_FILTER` carries a `-test.run` regex into the stages
+that remain. Both exist for iteration only: a narrowed package cannot satisfy
+a pass floor, so a filtered run bypasses the floors outright and says
+`PARTIAL RUN - NOT VERIFICATION` at both ends and in each stage summary. See
+[AGENTS.md](../../AGENTS.md); an unfiltered run is what "verified" means.
+
 Tests that split into phases pass the running `*testing.T` to every helper
 rather than capturing one. A closure that closes over an outer `t` reports a
 phase's failure against the whole test, and a `t.Cleanup` registered inside a

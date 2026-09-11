@@ -26,6 +26,17 @@ exercise. It takes a guest boot per run, so `make integration-test-compile`
 is the quick check that they still build - it is a compile gate, not
 verification, and work is not verified against it.
 
+A run can be narrowed while iterating.
+`BOOMERANGZ_INTEGRATION_STAGES=control make integration-test` runs one stage
+(`lifecycle`, `transfer-local`, `transfer-remote`, `daemon`, `control`, comma-
+or space-separated), and `BOOMERANGZ_INTEGRATION_FILTER=<regex>` passes a
+`-test.run` regex to the stages that do run. Narrowing the suite makes the
+per-stage pass floors meaningless, so a filtered run bypasses them and prints
+`PARTIAL RUN - NOT VERIFICATION` at both ends and in every stage summary. Like
+`integration-test-compile` it is a development aid, not verification, and work
+is not verified against it - only an unfiltered `make integration-test` is.
+CI sets neither variable.
+
 Clean up after every run, including interrupted ones. The harness destroys the
 pools inside the guest but never removes its own run root, so each run leaves
 roughly 1.7 GiB under `$RUNNER_TEMP/boomerangz-integration/<run-id>/` - a copy

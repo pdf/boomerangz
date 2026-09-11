@@ -15,7 +15,11 @@ help:
 		'make integration-test-compile Compile integration tests without running them' \
 		'make integration-test          Run real-ZFS tests in a disposable QEMU guest' \
 		'make integration-package-test  Validate release packages in a disposable QEMU guest' \
-		'make integration-benchmark     Benchmark remote transfers in a disposable QEMU guest'
+		'make integration-benchmark     Benchmark remote transfers in a disposable QEMU guest' \
+		'' \
+		'Narrow a guest run while iterating (development aid, not verification):' \
+		'  BOOMERANGZ_INTEGRATION_STAGES=control make integration-test' \
+		'  BOOMERANGZ_INTEGRATION_FILTER=TestGuestDatasetContention make integration-test'
 
 test:
 	go test ./...

@@ -2,6 +2,17 @@
 
 set -euo pipefail
 
+# The stages this script runs, in order. This list is the only authority on
+# which names BOOMERANGZ_INTEGRATION_STAGES accepts; host/run.sh reads it back
+# with --list-stages so a misspelled stage is refused before the guest boots
+# rather than after it.
+readonly integration_stage_names=(lifecycle transfer-local transfer-remote daemon control)
+
+if [[ ${1:-} == --list-stages ]]; then
+	printf '%s\n' "${integration_stage_names[@]}"
+	exit 0
+fi
+
 readonly artifact_dir=${1:?missing artifact directory}
 readonly run_id=${2:?missing run ID}
 readonly source_device=${3:?missing source device}
@@ -26,6 +37,54 @@ export BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE=$destination_device
 [[ $integration_mode == test || $integration_mode == benchmark ]] || {
 	printf 'invalid integration mode %q\n' "$integration_mode" >&2
 	exit 1
+}
+
+# A filtered run is a development aid, not verification. Chunk 0 removed the
+# -test.run allowlists because a test that had quietly stopped running looked
+# exactly like a passing one, and the per-stage pass floors exist to make that
+# loud. Narrowing the run breaks the floors by construction, so the floors are
+# bypassed explicitly - never miscounted - and every partial run says so at
+# both ends and in each stage summary.
+readonly partial_run_banner='PARTIAL RUN - NOT VERIFICATION'
+readonly integration_stages=${BOOMERANGZ_INTEGRATION_STAGES:-}
+readonly integration_filter=${BOOMERANGZ_INTEGRATION_FILTER:-}
+selected_stages=()
+if [[ -n $integration_stages ]]; then
+	IFS=', ' read -r -a selected_stages <<<"$integration_stages"
+fi
+readonly selected_stages
+for requested in ${selected_stages[@]+"${selected_stages[@]}"}; do
+	matched=no
+	for known in "${integration_stage_names[@]}"; do
+		[[ $requested == "$known" ]] && matched=yes
+	done
+	[[ $matched == yes ]] || {
+		printf 'unknown integration stage %q; known stages: %s\n' \
+			"$requested" "${integration_stage_names[*]}" >&2
+		exit 1
+	}
+done
+if [[ -n $integration_stages || -n $integration_filter ]]; then
+	readonly partial_run=yes
+else
+	readonly partial_run=no
+fi
+
+announce_partial_run() {
+	[[ $partial_run == yes ]] || return 0
+	printf '=== %s (%s) ===\n' \
+		"$partial_run_banner" "$1"
+	printf 'stages: %s\n' "${integration_stages:-all}"
+	printf 'filter: %s\n' "${integration_filter:-none}"
+}
+
+stage_selected() {
+	[[ -n $integration_stages ]] || return 0
+	local candidate
+	for candidate in ${selected_stages[@]+"${selected_stages[@]}"}; do
+		[[ $candidate == "$1" ]] && return 0
+	done
+	return 1
 }
 
 run_as_service() {
@@ -69,20 +128,33 @@ run_stage() {
 	local name=$1
 	local min_passes=$2
 	shift 2
+	if ! stage_selected "$name"; then
+		printf 'integration stage %s: not selected (%s)\n' "$name" "$partial_run_banner"
+		return 0
+	fi
 	local status=0
 	local passes skipped log
+	local -a filter=()
+	if [[ -n $integration_filter ]]; then
+		filter=(-test.run "$integration_filter")
+	fi
 	# Scratch for the pass floor below, owned by the invoking user: this
 	# function does not run as the service account and $artifact_dir does.
 	# Nothing collects this file - its contents are already on stdout, which
 	# the host harness tees into the run's diagnostics.
 	log=$(mktemp)
-	run_as_service "$@" -test.v 2>&1 | stage_filter | tee "$log" || status=$?
+	run_as_service "$@" -test.v ${filter[@]+"${filter[@]}"} 2>&1 | stage_filter | tee "$log" || status=$?
 	passes=$(grep -c '^--- PASS: ' "$log" || true)
 	skipped=$(grep '^--- SKIP: ' "$log" || true)
 	rm -f -- "$log"
 	if [[ $status -ne 0 ]]; then
 		printf 'integration stage %s failed with status %d\n' "$name" "$status" >&2
 		return "$status"
+	fi
+	if [[ $partial_run == yes ]]; then
+		printf 'integration stage %s: %d top-level passes, floor of %d not enforced (%s)\n' \
+			"$name" "$passes" "$min_passes" "$partial_run_banner"
+		return 0
 	fi
 	if [[ $passes -lt $min_passes ]]; then
 		printf 'integration stage %s reported %d top-level passes, expected at least %d\n' \
@@ -100,10 +172,12 @@ cleanup() {
 		printf 'guarded guest cleanup failed; preserving pool state\n' >&2
 		status=1
 	}
+	announce_partial_run end
 	exit "$status"
 }
 trap cleanup EXIT
 
+announce_partial_run start
 chmod 0755 "$artifact_dir"/*.sh "$artifact_dir/boomerangz" "$artifact_dir"/*.test
 sudo modprobe zfs
 sudo "$artifact_dir/bootstrap.sh" setup "$run_id" "$source_device" "$destination_device" "$direct_ssh_user"

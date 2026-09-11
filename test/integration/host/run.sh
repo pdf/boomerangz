@@ -10,6 +10,9 @@ readonly repository
 readonly target=${1:?usage: run.sh TARGET}
 readonly release_dir=${BOOMERANGZ_RELEASE_DIR:-}
 readonly integration_mode=${BOOMERANGZ_INTEGRATION_MODE:-test}
+readonly integration_stages=${BOOMERANGZ_INTEGRATION_STAGES:-}
+readonly integration_filter=${BOOMERANGZ_INTEGRATION_FILTER:-}
+readonly partial_run_banner='PARTIAL RUN - NOT VERIFICATION'
 
 [[ $target =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
 	printf 'boomerangz integration: invalid target %q\n' "$target" >&2
@@ -19,6 +22,22 @@ readonly integration_mode=${BOOMERANGZ_INTEGRATION_MODE:-test}
 	printf 'boomerangz integration: invalid mode %q\n' "$integration_mode" >&2
 	exit 1
 }
+if [[ -n $integration_stages || -n $integration_filter ]]; then
+	[[ $integration_mode == test ]] || {
+		printf 'boomerangz integration: stage and test filters apply to test mode only, not %q\n' \
+			"$integration_mode" >&2
+		exit 1
+	}
+fi
+readonly stage_lister=$repository/test/integration/guest/run-common.sh
+for requested in ${integration_stages//,/ }; do
+	"$stage_lister" --list-stages | grep -qxF -- "$requested" || {
+		printf 'boomerangz integration: unknown stage %q; known stages: %s\n' \
+			"$requested" "$("$stage_lister" --list-stages | tr '\n' ' ')" >&2
+		exit 1
+	}
+done
+
 readonly target_dir=$repository/test/integration/targets/$target
 [[ -f $target_dir/config.sh ]] || {
 	printf 'boomerangz integration: unknown target %q\n' "$target" >&2
@@ -67,6 +86,16 @@ record_failure() {
 	trap - ERR
 	printf 'failed_command=%q\nfailed_line=%s\nexit_status=%s\n' "$BASH_COMMAND" "$1" "$status" >"$diagnostics/failure.txt"
 	return "$status"
+}
+
+# A filtered run narrows the suite, so the per-stage pass floors cannot hold
+# and are bypassed in the guest. Say so at both ends of the run, where it
+# cannot be mistaken for the verifying run CI performs.
+announce_partial_run() {
+	[[ -n $integration_stages || -n $integration_filter ]] || return 0
+	printf '=== %s (%s) ===\n' "$partial_run_banner" "$1"
+	printf 'stages: %s\nfilter: %s\n' \
+		"${integration_stages:-all}" "${integration_filter:-none}"
 }
 
 stop_qemu() {
@@ -265,7 +294,11 @@ fi
 copy_to_guest "$artifacts" "$target_dir/run.sh"
 ssh_guest "mv /home/$target_guest_user/integration/run.sh /home/$target_guest_user/integration/target/run.sh"
 ssh_guest "sudo mv /home/$target_guest_user/integration/artifacts $guest_artifacts"
-ssh_guest "BOOMERANGZ_INTEGRATION_RUN=$run_id BOOMERANGZ_INTEGRATION_MODE=$integration_mode /home/$target_guest_user/integration/target/run.sh $guest_artifacts $run_id $target_source_device $target_destination_device" | tee "$diagnostics/test-output.txt"
+announce_partial_run start
+ssh_guest "BOOMERANGZ_INTEGRATION_RUN=$run_id BOOMERANGZ_INTEGRATION_MODE=$integration_mode \
+ BOOMERANGZ_INTEGRATION_STAGES=$(printf '%q' "$integration_stages") \
+ BOOMERANGZ_INTEGRATION_FILTER=$(printf '%q' "$integration_filter") \
+ /home/$target_guest_user/integration/target/run.sh $guest_artifacts $run_id $target_source_device $target_destination_device" | tee "$diagnostics/test-output.txt"
 
 ssh_guest "$target_poweroff_command" || true
 for _ in {1..60}; do
@@ -273,3 +306,4 @@ for _ in {1..60}; do
 	sleep 1
 done
 stop_qemu
+announce_partial_run end
