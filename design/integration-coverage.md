@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: in progress. Chunks 0-3 and A-F have landed.
+Status: in progress. Chunks 0-3 and A-F have landed; G is outstanding.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -105,6 +105,10 @@ local engine is tested for - incremental `-i`/`-I`, bookmark bases, resume
 after an interrupted receive, reseed, recursive mapping, receive overrides,
 foreign-snapshot refusal - is untested over any remote transport, even though
 those paths go through a different `Executor` and `Stream` implementation.
+
+Chunk B closed all of that except recursive `replicate`, which is a large
+enough shape of its own to be chunk G rather than a phase appended to work
+already landed.
 
 **Pairing and native credentials end to end.** `runNative` builds a pairing
 bundle in-process via `control.CreateListenerPairing` and calls
@@ -753,6 +757,60 @@ verified. Worth knowing for the diagnostics work: the sender's half of that
 error is `stream pipeline: write |1: broken pipe` plus `signal: killed`, so the
 only actionable sentence is the receiver's, and it arrives at the end of a
 three-line message.
+
+**Left open, and worth naming.** Chunk B's section proposed one more
+adversarial shape for this chunk: a receive that fails for a reason other than
+a truncated stream - a destination property conflict, or a stream the receiver
+rejects outright - asked over each transport rather than only locally. This
+chunk did not answer it. `TestGuestDestinationExhaustion` is a non-truncation
+failure, so the shape is no longer entirely untested, but it runs over the
+local engine alone. Whether the other shapes leave the same recoverable state
+over `ssh-direct`, `ssh-shell` and `native`, or whether some of them strand a
+target with neither a resume token nor a clean refusal, is still unasked.
+
+### Chunk G - recursive replication over a remote
+
+Starting point for a fresh session: chunk B built
+`TestGuestTransportParity`, which runs six behaviours against `local`,
+`ssh-direct`, `ssh-shell` and `native`. This chunk adds the one send shape it
+left out. Read chunk B's "How it landed" first - the target-per-root rule, the
+native listener arrangement and the truncating-sender seam all apply here
+unchanged, and the test is the obvious place to put this work.
+
+`TestGuestLocalTransfer/recursive-mapping` covers `replicate=on` with
+`discard=first` and `discard=all`, an incremental recursive follow-up, and
+refusal of a foreign snapshot on the recursive destination - all locally.
+None of it has met a remote transport, and there are three specific reasons to
+expect this one to behave differently rather than merely be untested:
+
+- **Scope boundaries meet descendants.** `scopedExecutor.ListDatasets` filters
+  with `scope.Related` and `InspectState` demands `scope.Inside`
+  ([scope.go](../internal/replication/ssh/scope.go)); the RPC server does the
+  same against its allowed roots. A recursive receive creates a subtree under
+  the mapped destination, so this is the first time those filters are asked
+  about children rather than the root itself.
+- **Ancestor preparation meets the root guard.** `CreateReceiveParent`
+  refuses `dataset == e.root`. `discard=first` and `discard=all` both map the
+  received dataset below the destination root, so `prepareReceiveParents` has
+  to create intermediate containers remotely - the exact boundary that guard
+  sits on.
+- **Recursive planning gathers sibling bases.** `Apply` has a
+  `plan.Send.Recursive` branch that collects each child's matching base
+  snapshot into a second `ProtectSet` ([local.go](../internal/transfer/local.go)),
+  and `sendArgs` refuses a bookmark base for a recursive send. Both sit on the
+  source side, but the destination inventory that drives them comes from the
+  remote executor.
+
+Do it as a self-contained `recursive-mapping` phase per transport inside
+`TestGuestTransportParity`, building its own source tree the way the local
+test's equivalent phase does. That keeps it off the chained phases, and it
+does not move any stage floor: `run_stage` counts top-level `--- PASS:` lines,
+so subtests are free.
+
+Done when: recursive `replicate` with both discard modes runs over each
+transport, with the received subtree, the prepared ancestors and the
+foreign-destination refusal asserted on the destination - and the ledger row
+under "Remote transports" names it.
 
 ## 6. Keeping this from re-rotting
 
