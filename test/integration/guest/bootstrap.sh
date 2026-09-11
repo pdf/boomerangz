@@ -93,9 +93,11 @@ setup() {
 	# create their own sparse zvol payloads rather than sharing one built here.
 	# The encryption set is fixture-only on the source, where tests build their
 	# own encryption roots; on the destination it is what receiving a raw
-	# encrypted stream and inspecting the result requires.
+	# encrypted stream and inspecting the result requires. quota is likewise
+	# fixture-only: the exhaustion test constrains its own destination
+	# container rather than filling the pool.
 	zfs allow -u "$service_user" bookmark,change-key,create,destroy,encryption,hold,keyformat,keylocation,load-key,mount,pbkdf2iters,refreservation,release,send,snapshot,userprop,volblocksize,volsize "$source_pool/data"
-	zfs allow -u "$service_user" canmount,compression,create,destroy,encryption,keyformat,keylocation,load-key,mount,mountpoint,pbkdf2iters,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
+	zfs allow -u "$service_user" canmount,compression,create,destroy,encryption,keyformat,keylocation,load-key,mount,mountpoint,pbkdf2iters,quota,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
 	if [[ $direct_ssh_user != "$service_user" ]]; then
 		# Direct SSH runs ZFS as the remote login identity. Grant that dedicated,
 		# non-administrative account destination permissions only.

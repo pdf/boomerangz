@@ -3,12 +3,15 @@
 package control_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -470,4 +473,142 @@ func TestGuestIdentityRecoverCLI(t *testing.T) {
 			t.Fatalf("repeat refusal does not name the cause: %s", output)
 		}
 	})
+}
+
+// TestGuestDaemonSocketContention covers two daemons contending for one
+// installation: the second must refuse rather than displace the first, and a
+// socket left behind by a killed daemon must not block the replacement.
+//
+// This is process lifecycle rather than ZFS behaviour, but it is only real
+// with real processes: the refusal comes from an flock the kernel releases on
+// exit, and the reclaim path turns on whether a leftover socket still has
+// anything listening on it.
+func TestGuestDaemonSocketContention(t *testing.T) {
+	binary, sourcePool, _ := guestCLI(t)
+	configPath, dropInDir, _ := scratchConfig(t)
+	socket := filepath.Join(filepath.Dir(configPath), "control.sock")
+
+	// One activated root of this test's own, so the daemon has work to
+	// reconcile and a status to report while the contention is arranged.
+	root := sourcePool + "/data/contention-" + time.Now().UTC().Format("150405.000")
+	if output, err := exec.CommandContext(t.Context(), "zfs", "create", "-u", root).CombinedOutput(); err != nil {
+		t.Fatalf("guest zfs create: %v: %s", err, output)
+	}
+	zfstest.RegisterCleanup(t, root)
+	if output, err := exec.CommandContext(t.Context(), "zfs", "set",
+		policy.Namespace+"enabled=on", policy.Namespace+"policy=1x1h", root).CombinedOutput(); err != nil {
+		t.Fatalf("guest zfs set: %v: %s", err, output)
+	}
+
+	// start returns the running daemon and its accumulated output. The
+	// cleanup is registered here, at the scope that owns the process.
+	start := func(t *testing.T) (*exec.Cmd, *lockedBuffer) {
+		t.Helper()
+		log := &lockedBuffer{}
+		command := exec.CommandContext(t.Context(), binary, "daemon", "--config", configPath, "--config-dir", dropInDir)
+		command.Stdout = log
+		command.Stderr = log
+		command.WaitDelay = 5 * time.Second
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if command.Process != nil {
+				_ = command.Process.Kill()
+				_ = command.Wait()
+			}
+		})
+		return command, log
+	}
+	waitFor := func(t *testing.T, description string, log *lockedBuffer, check func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if check() {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s; daemon log: %s", description, log.String())
+	}
+	serving := func(t *testing.T) bool {
+		t.Helper()
+		info, err := os.Lstat(socket)
+		if err != nil || info.Mode()&os.ModeSocket == 0 {
+			return false
+		}
+		return exec.CommandContext(t.Context(), binary, "status", "--config", configPath, "--config-dir", dropInDir).Run() == nil
+	}
+
+	first, firstLog := start(t)
+	waitFor(t, "the first daemon to serve", firstLog, func() bool { return serving(t) })
+
+	chainOK := true
+	chain := func(name string, fn func(*testing.T)) {
+		if !chainOK {
+			t.Run(name, func(t *testing.T) { t.Skip("depends on an earlier phase that failed") })
+			return
+		}
+		chainOK = t.Run(name, fn)
+	}
+
+	chain("second-daemon-refused", func(t *testing.T) {
+		second, secondLog := start(t)
+		done := make(chan error, 1)
+		go func() { done <- second.Wait() }()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatalf("a second daemon started alongside the first: %s", secondLog.String())
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatalf("the second daemon neither refused nor exited: %s", secondLog.String())
+		}
+		if !strings.Contains(secondLog.String(), "another lifecycle operation is running") {
+			t.Fatalf("the refusal does not name the contention: %s", secondLog.String())
+		}
+		// The refusal must cost the running daemon nothing.
+		if !serving(t) {
+			t.Fatalf("the first daemon stopped serving after the second was refused: %s", firstLog.String())
+		}
+	})
+
+	chain("stale-socket-reclaimed", func(t *testing.T) {
+		if err := first.Process.Kill(); err != nil {
+			t.Fatal(err)
+		}
+		_ = first.Wait()
+		// A killed daemon runs no shutdown, so the socket file outlives it and
+		// the replacement has to distinguish that from a live one.
+		if info, err := os.Lstat(socket); err != nil || info.Mode()&os.ModeSocket == 0 {
+			t.Fatalf("killed daemon left no socket to reclaim: %v", err)
+		}
+		replacement, replacementLog := start(t)
+		waitFor(t, "the replacement daemon to serve", replacementLog, func() bool { return serving(t) })
+		if err := replacement.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		if err := replacement.Wait(); err != nil {
+			t.Fatalf("replacement daemon did not stop cleanly: %v: %s", err, replacementLog.String())
+		}
+	})
+}
+
+// lockedBuffer collects a subprocess's output for reporting while the test
+// reads it concurrently.
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }
