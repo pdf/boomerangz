@@ -155,13 +155,13 @@ if [[ $integration_mode == benchmark ]]; then
 	exit 0
 fi
 
-run_stage lifecycle 1 \
+run_stage lifecycle 2 \
 BOOMERANGZ_LIFECYCLE_GUEST_RUN="$run_id" \
 BOOMERANGZ_LIFECYCLE_GUEST_CLI="$artifact_dir/boomerangz" \
 BOOMERANGZ_LIFECYCLE_GUEST_CONFIG="$config" \
 	"$artifact_dir/lifecycle.test"
 
-run_stage transfer-local 4 \
+run_stage transfer-local 5 \
 BOOMERANGZ_TRANSFER_GUEST_RUN="$run_id" \
 	"$artifact_dir/transfer.test"
 
@@ -184,7 +184,7 @@ BOOMERANGZ_REMOTE_GUEST_ENDPOINT=ssh-shell \
 BOOMERANGZ_REMOTE_GUEST_CLI="/usr/bin/boomerangz" \
 	"$artifact_dir/daemon.test"
 
-run_stage control 3 \
+run_stage control 5 \
 BOOMERANGZ_CONTROL_GUEST_RUN="$run_id" \
 BOOMERANGZ_CONTROL_GUEST_CLI="$artifact_dir/boomerangz" \
 BOOMERANGZ_CONTROL_GUEST_CONFIG="$config" \

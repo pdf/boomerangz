@@ -56,6 +56,7 @@ func TestGuestDaemonControl(t *testing.T) {
 		return strings.TrimSpace(string(output))
 	}
 	command("zfs", "create", "-u", source)
+	zfstest.RegisterCleanup(t, source)
 	command("zfs", "set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x5m", source)
 
 	var daemonLog bytes.Buffer
@@ -217,6 +218,7 @@ func TestGuestDaemonAbruptRestart(t *testing.T) {
 		return strings.TrimSpace(string(output))
 	}
 	command("zfs", "create", "-u", source)
+	zfstest.RegisterCleanup(t, source)
 	command("zfs", "set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x5m", source)
 
 	var firstLog bytes.Buffer
