@@ -150,10 +150,20 @@ func TestRoadwarriorRetriesOnlyTemporaryFailures(t *testing.T) {
 		t.Fatalf("early retry lost the failure reason: %+v", outcome)
 	}
 
+	// The caller that owns scheduling reads the deadline rather than running
+	// an attempt to be told there is one.
+	if !recovery.NotBefore().Equal(now.Add(5 * time.Second)) {
+		t.Fatalf("backoff deadline not reported: %s", recovery.NotBefore())
+	}
+
 	blocked := &scriptedApply{results: []Result{{}}, errors: []error{errors.New("identity mismatch")}}
 	recovery, _ = NewRoadwarrior(blocked, request, nil, DefaultRetryPolicy(), func() time.Time { return now }, func() float64 { return 0.5 })
 	outcome, err = recovery.Reconcile(t.Context(), nil)
 	if err == nil || outcome.Status != "blocked" || !outcome.NotBefore.IsZero() {
 		t.Fatalf("blocked outcome=%+v err=%v", outcome, err)
+	}
+	// A target that will not be retried has no deadline to wait for.
+	if !recovery.NotBefore().IsZero() {
+		t.Fatal("a blocked target must not report a retry deadline")
 	}
 }

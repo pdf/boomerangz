@@ -209,3 +209,47 @@ func TestPoolResizeDoesNotCancelRunningJob(t *testing.T) {
 	pool.Close()
 	pool.Wait()
 }
+
+func TestPoolSilentOutcomeLeavesTheReportedStateStanding(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var states []string
+	pool, _ := NewPool("transfer", 1, 2, func(event Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		states = append(states, event.State+":"+event.Reason)
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	_ = pool.Start(ctx)
+	after := make(chan Outcome, 1)
+	job := Job{ID: "remote:tank/data:home", Group: "tank/data", Scope: "tank/data", StartState: "probing",
+		Run:   func(context.Context) Outcome { return Outcome{State: "waiting-retry", Reason: "offline", Silent: true} },
+		After: func(outcome Outcome) { after <- outcome }}
+	if added, err := pool.Submit(job); err != nil || !added {
+		t.Fatal(err)
+	}
+	select {
+	case outcome := <-after:
+		if outcome.State != "waiting-retry" || !outcome.Silent {
+			t.Fatalf("silent outcome was not delivered to After: %+v", outcome)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("job did not finish")
+	}
+	pool.Close()
+	pool.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	// An attempt that changed nothing reports no terminal transition, so the
+	// status store keeps whatever the last real attempt left there.
+	want := []string{"pending-transfer:", "probing:"}
+	if len(states) != len(want) {
+		t.Fatalf("recorded %v, want %v", states, want)
+	}
+	for index, state := range want {
+		if states[index] != state {
+			t.Fatalf("recorded %v, want %v", states, want)
+		}
+	}
+}

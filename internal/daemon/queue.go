@@ -10,10 +10,15 @@ import (
 	"github.com/pdf/boomerangz/internal/daemonstate"
 )
 
-// Outcome is the stable result of one worker attempt.
+// Outcome is the stable result of one worker attempt. Silent suppresses the
+// status transition for an attempt that changed nothing: a job re-run before
+// its own backoff deadline reports the state it is already in, and recording
+// that would overwrite a reported failure with a bare repetition and wake
+// every status watcher for it.
 type Outcome struct {
 	State  string
 	Reason string
+	Silent bool
 }
 
 // Job is typed daemon work. ID deduplicates equivalent queued work, Group is

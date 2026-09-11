@@ -230,6 +230,15 @@ func NewRoadwarrior(engine transferApplier, request Request, pending *PendingSet
 	return &Roadwarrior{engine: engine, request: request, pending: pending, retry: retry, now: now, random: random}, nil
 }
 
+// NotBefore reports the deadline the current backoff sets, zero when no
+// failure is outstanding. A caller that owns scheduling uses it to leave the
+// coordinator alone until an attempt would do something.
+func (r *Roadwarrior) NotBefore() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.notBefore
+}
+
 // Offer coalesces a newly eligible source snapshot while the target is offline.
 func (r *Roadwarrior) Offer(snapshot PendingSnapshot) (bool, error) {
 	return r.pending.Offer(r.request.Source, canonicalTarget(r.request), snapshot)

@@ -276,7 +276,9 @@ func (p *Pool) worker(runCtx, workerCtx context.Context) {
 		if outcome.State == "" {
 			outcome.State = "succeeded"
 		}
-		p.emit(job, outcome.State, outcome.Reason)
+		if !outcome.Silent {
+			p.emit(job, outcome.State, outcome.Reason)
+		}
 		p.complete(job.ID)
 		if job.After != nil {
 			job.After(outcome)

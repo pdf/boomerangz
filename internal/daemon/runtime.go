@@ -990,6 +990,14 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 		}
 		r.markDirty("remote:" + dataset + ":" + remote)
 	}
+	// Inside a backoff window an attempt would short-circuit on the deadline
+	// without touching the transport. Running it anyway costs a transfer
+	// worker and two status transitions every reconcile, and the last real
+	// attempt already scheduled the retry for the deadline itself. Any newly
+	// due snapshot is protected and coalesced above, so that retry carries it.
+	if r.now().Before(road.coordinator.NotBefore()) {
+		return true
+	}
 	ticket, err := r.gate.Queue(context.Background(), dataset, lifecycle.Transfer)
 	if err != nil {
 		return snapshot == ""
@@ -1016,6 +1024,11 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 		}
 		if outcome.Status == "succeeded" {
 			r.enqueueDestinationPrune(dataset, effective, road.request.CanonicalTarget, "")
+		}
+		if outcome.Status == "waiting-retry" {
+			// The backoff deadline has not passed, so nothing was attempted.
+			// The state the last real attempt reported still stands.
+			return Outcome{State: outcome.Status, Reason: outcome.Reason, Silent: true}
 		}
 		return Outcome{State: outcome.Status, Reason: outcome.Reason}
 	}
