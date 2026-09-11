@@ -84,7 +84,7 @@ resolves policy from `ListDatasets` output rather than a literal.
 | --- | --- |
 | Full bootstrap over `ssh` direct, `ssh-shell` and `native`, with transport recorded in the target binding | `TestGuestSSHTransfer` |
 | Full bootstrap, `-i` vs `-I` with a foreign intermediate, receive overrides and namespace isolation, bookmark base after the source snapshot is pruned, resume after an interrupted receive, unrelated-destination refusal, and reseed recovery through the transport's `zfs.ReseedExecutor` - each run over `local`, `ssh-direct`, `ssh-shell` and `native` | `TestGuestTransportParity/<transport>` |
-| Recursive `replicate` with `discard=first` and `discard=all` over a remote transport | **Not covered** - chunk G |
+| Recursive `replicate` with `discard=first` and `discard=all` over a remote transport | **Not covered** - chunk H |
 
 `TestGuestTransportParity` carries `local` as a control arm rather than as
 coverage: the local engine already owns those behaviours in the table above, so

@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: in progress. Chunks 0-3 and A-F have landed; G and H are outstanding.
+Status: in progress. Chunks 0-3 and A-F have landed; G, H and I are outstanding.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -107,7 +107,7 @@ foreign-snapshot refusal - is untested over any remote transport, even though
 those paths go through a different `Executor` and `Stream` implementation.
 
 Chunk B closed all of that except recursive `replicate`, which is a large
-enough shape of its own to be chunk G rather than a phase appended to work
+enough shape of its own to be chunk H rather than a phase appended to work
 already landed.
 
 **Pairing and native credentials end to end.** `runNative` builds a pairing
@@ -849,7 +849,63 @@ sender's half of that error is `stream pipeline: write |1: broken pipe` plus
 `signal: killed`, so the only actionable sentence is the receiver's, and it
 arrives at the end of a three-line message.
 
-### Chunk G - recursive replication over a remote
+### Chunk G - focused integration runs
+
+Every chunk since 0 has been paid for one guest boot at a time, and chunks H
+and I are both made of small edits that will each want their own iteration.
+A full run is currently about 14.5 minutes, of which roughly 11.8 is the tests
+themselves and 2.7 is image preparation, boot, provisioning and the
+cross-compile. So filtering, not faster setup, is where the time is.
+
+| Scope | Measured or estimated |
+| --- | --- |
+| Full run today | ~14.5 min |
+| One stage (`control`) | ~6 min |
+| One test (`TestGuestDatasetContention`) | ~4 min |
+
+The single most expensive test is `TestGuestTransportParity` at 168s - four
+transports by six phases - followed by the concurrency and outage tests at
+around 70-80s each.
+
+The plumbing already exists and needs no new path.
+`BOOMERANGZ_INTEGRATION_MODE` is threaded Makefile -> `host/run.sh` ->
+`ssh_guest` ([run.sh:268](../test/integration/host/run.sh)) ->
+`targets/<target>/run.sh` -> `guest/run-common.sh`, and two more variables ride
+it unchanged: one naming the stages to run, one carrying a `-test.run` regex
+for them. `run_stage` skips a stage that was not selected and appends the
+filter to the ones that were.
+
+**The part that needs care is chunk 0, not the filtering.** Chunk 0 deleted
+the `-test.run` allowlists precisely because a test that quietly stopped
+running was indistinguishable from a passing one, and the per-stage pass
+floors exist to make that loud. A filtered run breaks both properties by
+construction - the floor cannot hold once the package has been narrowed - so
+the design has to make a partial run impossible to mistake for a verifying
+one:
+
+- bypass the floors when a filter is set, explicitly, rather than letting them
+  miscount
+- print an unmissable `PARTIAL RUN - NOT VERIFICATION` banner at both ends of
+  the run, and carry it into the stage summary
+- leave CI alone: it sets neither variable, so it always runs the whole suite
+- give `AGENTS.md` the same language it already uses for
+  `integration-test-compile` - a development aid, and work is not verified
+  against it
+
+Done when: a named stage or a single test can be run without editing a runner
+script, a filtered run says loudly that it is not verification, an unfiltered
+run is byte-for-byte the behaviour it has today, and `AGENTS.md` says which
+one a claim of "verified" requires.
+
+**A second, larger optimisation, deliberately not in scope here.** Guest
+provisioning runs on every boot rather than being baked into the cached image.
+Folding it into the cache would take the remaining ~2.7 minutes down to a boot,
+but it changes what the cache key has to cover - the provisioning script, the
+package set, the target adapter - and a stale provisioned image is a much
+worse failure than a slow run. Worth its own chunk if the setup cost ever
+dominates again; it does not today.
+
+### Chunk H - recursive replication over a remote
 
 Starting point for a fresh session: chunk B built
 `TestGuestTransportParity`, which runs six behaviours against `local`,
@@ -893,7 +949,7 @@ transport, with the received subtree, the prepared ancestors and the
 foreign-destination refusal asserted on the destination - and the ledger row
 under "Remote transports" names it.
 
-### Chunk H - refusals that do not discriminate
+### Chunk I - refusals that do not discriminate
 
 Chunk F produced three variants of one error: asserting the thing that is easy
 to observe rather than the thing under test. The worst was a negative
