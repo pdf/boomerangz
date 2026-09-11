@@ -165,7 +165,7 @@ run_stage transfer-local 5 \
 BOOMERANGZ_TRANSFER_GUEST_RUN="$run_id" \
 	"$artifact_dir/transfer.test"
 
-run_stage transfer-remote 2 \
+run_stage transfer-remote 3 \
 BOOMERANGZ_REMOTE_GUEST_RUN="$run_id" \
 BOOMERANGZ_REMOTE_GUEST_KEY="$loopback_key" \
 BOOMERANGZ_REMOTE_GUEST_CLI="/usr/bin/boomerangz" \

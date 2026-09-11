@@ -75,7 +75,12 @@ resolves policy from `ListDatasets` output rather than a literal.
 | Behaviour | Owned by |
 | --- | --- |
 | Full bootstrap over `ssh` direct, `ssh-shell` and `native`, with transport recorded in the target binding | `TestGuestSSHTransfer` |
-| Everything the local engine is tested for, over a remote transport | **Not covered** - chunk B |
+| Full bootstrap, `-i` vs `-I` with a foreign intermediate, receive overrides and namespace isolation, bookmark base after the source snapshot is pruned, resume after an interrupted receive, unrelated-destination refusal, and reseed recovery through the transport's `zfs.ReseedExecutor` - each run over `local`, `ssh-direct`, `ssh-shell` and `native` | `TestGuestTransportParity/<transport>` |
+
+`TestGuestTransportParity` carries `local` as a control arm rather than as
+coverage: the local engine already owns those behaviours in the table above, so
+running the identical table over the local transport is what makes a remote
+failure attributable to the transport instead of to the test.
 
 ### Scheduler and daemon
 

@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: in progress. Chunks 0-3, A and C-F have landed; B is outstanding.
+Status: in progress. Chunks 0-3 and A-F have landed.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -415,22 +415,96 @@ an operator has no indication that `zfs load-key` is the fix. That is a
 diagnostics gap rather than a correctness one, and it belongs with the other
 "usable error" work rather than in this chunk.
 
-### Chunk B - remote transport parity
-
-Starting point for a fresh session: the harness is repaired and the ledger in
-`test/integration/README.md` is current, so nothing here needs archaeology.
-Read that ledger, this section, and the `t`-capture note in the README's "How
-a run is structured" before writing a test. Stage pass floors currently sit at
-lifecycle 2, transfer-local 5, transfer-remote 2, daemon 6, control 6, and a
-new test in an already-running stage means raising its floor. Base images
-cache under `~/.cache/boomerangz-integration`, so the first run is not slow.
-
+### Chunk B - remote transport parity (done)
 
 Parameterise the local engine's behaviour table over `local`, `ssh-direct`,
 `ssh-shell` and `native`, and run the incremental, bookmark, resume and
 foreign-refusal cases against each. Expect this to be the chunk that finds the
 most bugs, because these paths differ in implementation and have only ever
 seen a full bootstrap.
+
+**How it landed.** `TestGuestTransportParity` in the transfer package: six
+phases - `full-bootstrap`, `incremental-modes`, `bookmark-incremental`,
+`unrelated-destination-refused`, `reseed-recovery`,
+`resume-after-interruption` - run against each of the four transports, 24
+subtests in one top-level test. It joins the transfer-remote stage, whose
+floor goes 1 to 2.
+
+`local` is in the table as a control arm rather than as coverage: the local
+engine already owns every one of those behaviours in
+`TestGuestLocalTransfer`. Running the identical table over it is what makes a
+remote failure attributable to the transport rather than to the test, which
+matters here because the test had to be rebuilt around the remote shape -
+one source per transport, policy resolved from the pool on every request,
+and phases chained the way chunk 2 established.
+
+`reseed-recovery` was not in the plan above and is the phase most worth
+having. It is the only one that touches `zfs.ReseedExecutor`: `AbortReceive`
+and `DestroyDataset` are not part of `zfs.Executor`, and
+[reseed.go:82](../internal/cli/reseed.go) refuses the entire operation when an
+endpoint fails that type assertion. Nothing had ever run it against a real
+remote endpoint, so a transport whose executor did not satisfy the interface
+would have failed for the first time in front of an operator trying to
+recover a blocked target.
+
+Three structural decisions the transports forced. A target is per destination
+root, not per transport, because the root is part of the canonical target
+identity - two roots reached over one connection would collide in the
+source-side binding. One native listener serves every root instead, since the
+RPC server scopes with `scope.Inside` against its allowed roots while each
+connection still carries its own root. And destination state is asserted
+through the *local* executor throughout: the guest is both source and
+destination host, so that reads the pool the remote side actually wrote,
+where using the transport's own executor would let a broken remote view agree
+with itself.
+
+**The interruption is byte-exact, and finding where to put it took two tries.**
+The first attempt cut the stream from the progress callback, which is the only
+hook `transfer.Stream` exposes. That was wrong, and the first guest run showed
+why: both `RunPipeline` and the RPC stream emit one report as the copy opens
+and then sample no more often than every 250ms, and a local send moved 179MB
+inside that first window. A byte threshold there cuts wherever the sampling
+happens to land - 179MB, 47MB, 35MB and 75MB across the four transports on
+that run - and on a faster host it would not fire at all, failing the test
+without a defect behind it.
+
+The seam that does reach the transfer path is `zfsPath`. Every transport
+spawns its sender as `exec.Command(zfsPath, "send", ...)` and only the
+receiving half differs, and in all three remote constructors that path is the
+*local* sender only - the remote side's `zfs` is hardcoded or comes from
+server config. So the test writes a wrapper that pipes a send through
+`head -c` and execs the real `zfs` for anything else, and passes it as
+`zfsPath`. The cut is then an exact offset, chosen by the test, on the actual
+stream, for all four transports - the same fault `delegated-matrix.sh` and
+`TestGuestInterruptedTransferRecovery` already inject, applied from the
+sending side so it does not require owning the receiver. It also let the
+payload drop from 256MiB to the 32MiB the sibling tests use, since it only
+has to outrun the 4MiB cut, and it made the phase stricter: the truncating
+and intact engines are separate targets on one root, so the resume is picked
+up from the durable token alone.
+
+**It found no product bugs, across three guest runs.** That is the result, not
+a gap in the assertions. `endpoint.Mode` is checked against the requested mode
+so `ssh-shell` cannot silently fall back to `direct`; the binding transport is
+asserted per mode; the refusal and resume phases both go through the remote
+destination inspection path. Every one of the 24 phases passed. The prediction
+at the top of this section was wrong, and the useful reading is that the
+`Executor`/`Stream` abstraction is doing its job - the engine really is
+transport-agnostic, and the remote implementations really are interchangeable
+with the local one across every behaviour tested here. What the chunk buys is
+that this is now asserted rather than assumed, and a regression in any of the
+three remote implementations fails a named phase.
+
+**Verified by three real runs, each answering a different question.** The
+first established the table and exposed the sampling problem above. The
+second added `reseed-recovery` and confirmed all four endpoint executors
+satisfy `zfs.ReseedExecutor` against a live remote. The third ran the
+truncating sender: 24 phases green, every stage at or above its floor
+(lifecycle 1, transfer-local 4, transfer-remote 2, daemon 3, control 2), and
+the packaged systemd checks still passing. The parity test costs ~185s of a
+~10 minute run, which is the price of four transports times six phases;
+almost all of it is snapshot, hold and property work rather than bytes, so
+the payload size is not what to trim if that ever needs to come down.
 
 ### Chunk C - daemon and remote (done)
 
