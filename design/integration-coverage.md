@@ -432,18 +432,84 @@ foreign-refusal cases against each. Expect this to be the chunk that finds the
 most bugs, because these paths differ in implementation and have only ever
 seen a full bootstrap.
 
-### Chunk C - daemon and remote
+### Chunk C - daemon and remote (done)
 
 Once chunk 0 has revived the outage test: add daemon-driven native replication
 through an imported credential, assert a `prune:` job reaches `succeeded`, and
 assert the retry/backoff state sequence rather than only its endpoints.
 
-### Chunk D - pairing and access control
+**How it landed.** Three self-contained tests in `test/integration/daemon`
+rather than phases of one, because each needs a differently arranged daemon and
+none consumes the state another leaves. All three scope discovery with the
+existing `scopedDaemonBackend`: the stage's other fixtures stay in the pools,
+and an unscoped daemon would try to replicate them through remotes this
+configuration does not define.
+
+`TestGuestDaemonNativeReplication` is the credential path end to end. The
+pairing is issued, written through `control.ImportPairingBundle`, and then
+named only by `credential = "backup"` in the remote configuration, so
+`buildRemoteClients` resolving it off disk is what makes the transfer possible
+at all. Destination state is read with the local `zfs.Direct`, not the
+transport's executor, for the reason chunk B established.
+
+`TestGuestDaemonPruneJob` asserts the job does work, not just that it reports
+success. The grid's smallest unit is a minute, so a daemon cannot be driven
+through several retention cycles inside a test; instead three snapshots are
+created backdated well outside a `1x1m` horizon before the daemon starts, and
+the daemon's own snapshot becomes the single retained one. A prune that ran but
+retained everything now fails.
+
+`TestGuestDaemonRemoteBackoff` measures the sequence rather than the endpoints,
+and the seam that makes that possible is the reason field: a real attempt
+records its transport failure as the reason, while the reconciler's early
+return during a live backoff records none, so counting reasoned `waiting-retry`
+events counts attempts. The endpoint is named in the pairing bundle before
+anything binds the port - the managed server identity is keyed by advertised
+host, not port - so the outage is simply the listener not existing yet, and
+recovery is starting it under that same name. Observed delays were 4.59s then
+10.99s against the 5s-doubling policy with 20% jitter.
+
+### Chunk D - pairing and access control (done)
 
 `pairing create` / `import` / `list` / `revoke` against a real listener, then
 the negative cases: revoked credential refused, `ssh-shell` command outside
 its allowed set refused, replication root outside `ssh_shell.replication_roots`
 refused, missing `zfs allow` permission surfacing a usable error.
+
+**How it landed.** Split in two by what each half needs from the environment.
+`TestGuestPairingLifecycle` runs in the control stage, which has the CLI, and
+drives all four subcommands against a listener started in process from the same
+configuration file the CLI reads - a full daemon would have added nothing the
+pairing path exercises. Each step is proved by what the listener then does
+rather than by what the command printed: the imported credential replicates,
+and after `pairing revoke` the same credential is refused. The revocation
+assertion also checks the refusal is *final*: `native.IsUnavailable` must be
+false, because classifying a revoked credential as a transport outage would put
+the target into unbounded retry instead of surfacing it.
+
+`TestGuestAccessControlRefusals` runs in the transfer-remote stage, which has
+the loopback key and the installed CLI that `ssh-shell` re-executes. There is
+no command allowlist to test: `ssh_shell.replication_roots` is enforced by the
+RPC server scoping every operation and every receive root, so the test asserts
+at that seam - an operation on an allowed root's ancestor, an operation on an
+unrelated dataset, and a receive whose root is outside the set, with the
+destination confirmed absent afterwards.
+
+**One product bug, in the case the chunk was named for.** A destination anchor
+with nothing delegated at or above it produced `inspect delegated ZFS
+permissions on <pool>: delegation output contains no permission setpoint`
+instead of the intended `effective account <user> lacks delegated ZFS
+permissions on <pool>: create,destroy,...`. `zfs allow` prints nothing at all
+for such a dataset, and `parsePermissionBlocks` treated empty output as
+malformed, conflating "nothing is delegated" with "I could not read the
+delegation table" - and losing the only diagnostic an operator can act on.
+Empty output is unambiguous, and any non-empty line outside a setpoint block is
+already rejected earlier in the parser, so the check removed nothing. Fixed in
+`internal/zfs/permissions.go` with a unit test that fails before it; root is
+authorised by the kernel before the query runs, so this only ever bit a
+delegated deployment. Reaching it needed the local target configured on the
+source, because the planner refuses a destination the source properties do not
+name, which stops the permission preflight from running at all.
 
 ### Chunk E - CLI surface
 

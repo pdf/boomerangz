@@ -165,7 +165,7 @@ run_stage transfer-local 4 \
 BOOMERANGZ_TRANSFER_GUEST_RUN="$run_id" \
 	"$artifact_dir/transfer.test"
 
-run_stage transfer-remote 1 \
+run_stage transfer-remote 2 \
 BOOMERANGZ_REMOTE_GUEST_RUN="$run_id" \
 BOOMERANGZ_REMOTE_GUEST_KEY="$loopback_key" \
 BOOMERANGZ_REMOTE_GUEST_CLI="/usr/bin/boomerangz" \
@@ -173,7 +173,7 @@ BOOMERANGZ_REMOTE_DIRECT_SSH_USER="$direct_ssh_user" \
 BOOMERANGZ_REMOTE_GUEST_USER="$service_user" \
 	"$artifact_dir/transfer.test"
 
-run_stage daemon 3 \
+run_stage daemon 6 \
 BOOMERANGZ_DAEMON_GUEST_RUN="$run_id" \
 BOOMERANGZ_REMOTE_GUEST_HOST=127.0.0.1 \
 BOOMERANGZ_REMOTE_GUEST_PORT="$outage_port" \
@@ -184,7 +184,7 @@ BOOMERANGZ_REMOTE_GUEST_ENDPOINT=ssh-shell \
 BOOMERANGZ_REMOTE_GUEST_CLI="/usr/bin/boomerangz" \
 	"$artifact_dir/daemon.test"
 
-run_stage control 2 \
+run_stage control 3 \
 BOOMERANGZ_CONTROL_GUEST_RUN="$run_id" \
 BOOMERANGZ_CONTROL_GUEST_CLI="$artifact_dir/boomerangz" \
 BOOMERANGZ_CONTROL_GUEST_CONFIG="$config" \

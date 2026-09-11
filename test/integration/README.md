@@ -82,8 +82,9 @@ resolves policy from `ListDatasets` output rather than a literal.
 | Scheduling and retirement | `TestGuestDaemonSchedulingAndRetirement` |
 | Concurrent siblings, ancestor exclusion, conservative destination setup | `TestGuestLocalTransferConcurrency` |
 | Remote outage: `waiting-retry` with reason retained, pending-snapshot coalescing, reconnection, canonical target identity | `TestGuestRemoteOutageReconnection` |
-| `prune:<dataset>` jobs reaching `succeeded` | **Not covered** - chunk C |
-| Retry and backoff state sequence, rather than its endpoints | **Not covered** - chunk C |
+| Daemon-driven native replication through an imported pairing credential | `TestGuestDaemonNativeReplication` |
+| `prune:<dataset>` jobs reaching `succeeded`, and destroying what falls outside the grid | `TestGuestDaemonPruneJob` |
+| Retry and backoff state sequence, rather than its endpoints | `TestGuestDaemonRemoteBackoff` |
 
 ### Control plane and packaging
 
@@ -92,8 +93,11 @@ resolves policy from `ListDatasets` output rather than a literal.
 | Daemon control socket lifecycle | `TestGuestDaemonControl` |
 | Recovery after an abrupt restart | `TestGuestDaemonAbruptRestart` |
 | Packaged systemd unit start/reload/stop, not enabled by default | `targets/cachyos/run.sh` |
-| `pairing create` / `import` / `list` / `revoke` against a real listener | **Not covered** - chunk D |
-| Access control negatives: revoked credential, `ssh-shell` command outside its set, root outside `replication_roots`, missing delegation | **Not covered** - chunk D |
+| `pairing create` / `import` / `list` / `revoke` against a real listener | `TestGuestPairingLifecycle` |
+| A revoked credential refused by the listener, and refused finally rather than as an outage | `TestGuestPairingLifecycle/revoke` |
+| `ssh-shell` operations outside `ssh_shell.replication_roots` refused | `TestGuestAccessControlRefusals/operation-outside-replication-roots` |
+| A receive root outside `ssh_shell.replication_roots` refused before anything is created | `TestGuestAccessControlRefusals/receive-root-outside-replication-roots` |
+| A missing `zfs allow` grant reported with the account, dataset and permissions | `TestGuestAccessControlRefusals/missing-delegation` |
 | `dataset list`, `dataset inspect`, `dataset reseed`, `identity recover` | **Not covered** - chunk E |
 | Adversarial: destination out of space mid-receive, socket contention, power loss between snapshot and property write | **Not covered** - chunk F |
 
