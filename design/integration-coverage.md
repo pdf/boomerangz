@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: in progress. Chunks 0-3 and A-F have landed; G, H and I are outstanding.
+Status: in progress. Chunks 0-3, A-F and G-I have landed; J is outstanding.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -1089,9 +1089,110 @@ system produces anyway. `TestGuestTransportParity/<transport>/recursive-mapping`
 from chunk H was written with its control arm from the outset, which is what
 the convention in `test/integration/README.md` is for.
 
+### Chunk J - let the build tag be the gate
+
+Chunk 0 left the suite carrying a hand-maintained number per stage. That is
+double-entry bookkeeping: the tests are the record, and the floor is a second
+record of the tests that a human has to keep in agreement with the first.
+Projects do not normally do this, and the reason this one does is worth
+writing down, because the fix is to remove the need rather than to maintain
+the copy better.
+
+**Why the floors exist.** In the first integration commit (`aa403f9`) two
+mechanisms did two jobs. Stage selection was `-test.run
+'^TestGuest(LocalTransfer|InterruptedTransferRecovery)$'`. The
+`os.Getenv(...) == "" -> t.Skip` guard was something else - a host-safety
+interlock, documented at the time as "the `integration` build tag only makes
+the guest-side tests available to the Go tool; it does not authorize them to
+operate on the development host". In a real run that guard never fired.
+Skipping happened on developer machines, not in the suite.
+
+The transfer binary ran twice from the outset because the two passes need
+different *inputs*: the local pass needs only a run ID, the remote pass also
+needs the loopback key, the installed CLI path and two user accounts.
+Environment is per-process, so "different inputs" meant "different
+invocation". The env vars were an input channel; the process was the unit of
+configuration.
+
+Chunk 0 then dropped the allowlists - correctly, they were the mechanism that
+left `TestGuestRemoteOutageReconnection` dormant - and, in its own words, let
+"the existing os.Getenv guards be the only opt-in". That promoted the
+host-safety interlock into the stage selector, because after the allowlists
+were gone it was the only thing distinguishing the two transfer passes.
+Skipping went from incidental to load-bearing: one stage's tests must now skip
+for the other stage to mean anything. Once skipping is structural, "nothing
+skipped" stops being assertable, and the signal that exit status does not
+carry had to be replaced by something. The floors are that something. The
+bookkeeping is a second-order consequence of overloading a safety rail, not a
+decision anyone weighed on its merits.
+
+**Why the tag can take the job.** The guard is the weakest link in a chain
+that does not need it. `zfstest.VerifyGuestPool` checks, before touching
+anything, that `/run/boomerangz-vmtest/guest-marker` exists and matches the
+run ID, that the disk serial is the one derived from that run ID, and that the
+pool has exactly one vdev on the expected disk. On a developer host there is
+no marker, so even someone who exports a run ID by hand fails there having
+mutated nothing. Those layers are the real host protection and they fail
+closed; the `t.Skip` adds nothing to them, and is the only layer that is also
+load-bearing for stage selection.
+
+The compile check is not implicated. `make integration-test-compile` is `go
+test -run '^$' -tags=integration ./test/integration/...`, which matches zero
+tests, so no test body executes and it behaves identically with every guard
+deleted. It is also the right idiom for it, since `go test -c` takes one
+package at a time. Compiling the integration tests without a guest is free and
+independent of all of this.
+
+**The change.**
+
+- Turn `runID == ""` from `t.Skip` into `t.Fatal` in every guest test. The run
+  ID stops being a gate and becomes purely an input, whose absence is a
+  harness bug; fatal is the right response to a harness bug. Being compiled
+  with `-tags=integration` is the statement of intent.
+- Run `transfer.test` once with all of its variables set. Stages become
+  exactly the four packages, and `integration_stage_names` loses
+  `transfer-local`/`transfer-remote` in favour of `transfer`.
+  `BOOMERANGZ_INTEGRATION_FILTER` already covers narrowing below a stage.
+- Move `TestGuestInterruptedReceiveHelper` into `TestMain`, dispatching on
+  `BOOMERANGZ_INTERRUPTED_RECEIVE_ARGS`. It is a subprocess boundary, not a
+  test; the re-exec already targets it by name, and `TestMain` is the ordinary
+  Go idiom. This removes the last skip that is not a stage artifact.
+- Make the optional tail at `lifecycle/guest_test.go:254` unconditional. It
+  returns early when `BOOMERANGZ_LIFECYCLE_GUEST_CLI` is unset, which is the
+  same class of bug at smaller scale: a coverage reduction that reports as a
+  pass.
+- Delete the pass floors and the `min_passes` argument from `run_stage`, and
+  the sentence in `CLAUDE.md` that asks for a floor to be raised when a test
+  is added.
+
+**What it buys.** A stage whose environment wiring breaks currently passes
+green with everything skipped. After this it fails, because each test demands
+its input rather than excusing itself. A vacuous pass becomes structurally
+impossible rather than detectable after the fact, so exit status carries the
+whole signal and there is nothing left for a floor, a count or a name list to
+add. Adding, deleting, renaming or moving a test needs no edit to the runner.
+
+**Costs, stated plainly.**
+
+- `go test -tags=integration ./test/integration/...` on a developer host goes
+  from green-with-skips to red. That is more accurate - asking to run the
+  integration suite without a guest is a mistake and should look like one -
+  but it is a real change for anyone whose editor is configured with the tag.
+- It touches every guest test file, so it wants to land on its own rather than
+  mixed into behaviour work.
+- Merging the transfer stages makes that stage a coarser failure unit, and
+  runs the local and remote transfer tests in one process. Chunk 1 gave each
+  test its own tree, so that should be fine; it is the part a real run is
+  actually proving.
+
+Done when: no integration test calls `t.Skip` for a reason other than a
+narrowed development run, `run_stage` takes no expected count, and a stage
+with a deliberately removed environment variable fails rather than passes.
+
 ## 6. Keeping this from re-rotting
 
-Chunk 0 removes the mechanism that let a test go dormant. To keep section 3
+Chunk 0 removes the mechanism that let a test go dormant, and chunk J removes
+the bookkeeping chunk 0 introduced to do it. To keep section 3
 from going stale, add a short coverage ledger to
 `test/integration/README.md` - one line per behaviour axis, naming the test
 that owns it - and treat it the way `CLAUDE.md` already treats
