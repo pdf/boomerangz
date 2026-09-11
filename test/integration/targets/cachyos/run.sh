@@ -64,6 +64,22 @@ fi
 sudo systemctl daemon-reload
 sudo systemctl start boomerangz.service
 sudo systemctl is-active boomerangz.service
+# The unit is Type=simple, so start returns once the process is forked and
+# is-active says so before the daemon has necessarily created its control
+# socket. ExecReload is a client of that socket, so reloading immediately
+# makes this assertion a race against startup rather than a check of reload -
+# it has been seen to lose. sudo because RuntimeDirectoryMode is 0750 and the
+# harness account is not in the service group.
+for _ in $(seq 1 60); do
+	if sudo test -S /run/boomerangz/boomerangz.sock; then
+		break
+	fi
+	sleep 1
+done
+if ! sudo test -S /run/boomerangz/boomerangz.sock; then
+	printf 'packaged service did not create its control socket\n' >&2
+	exit 1
+fi
 sudo systemctl reload boomerangz.service
 sudo systemctl is-active boomerangz.service
 if sudo systemctl is-enabled boomerangz.service >/dev/null 2>&1; then
