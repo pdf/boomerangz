@@ -95,74 +95,82 @@ The CI failure that started this work was a starved management worker.
 
 ## 3. The contract change
 
-**3.1 A transition window on `StatusStore`.** Alongside the latest-per-job map,
-a bounded ring of transitions, each carrying the revision at which it was
-recorded, and:
+**3.1 Publish transitions to subscribers.** Both consumers are streams: one
+gRPC goroutine per `--watch` client, blocked in `Send`
+([internal/control/service.go:69](../internal/control/service.go)), and a test
+waiter that wants the next event matching a predicate. So the store publishes
+rather than retaining a history for someone to pull:
 
 ```go
-// Since returns transitions recorded after revision and the revision they are
-// current to. It fails with ErrCursorTooOld when the caller's revision is
-// older than the oldest transition retained, which is the only case in which
-// this stream is not complete.
-func (s *StatusStore) Since(revision uint64) (uint64, []Event, error)
+// Subscribe delivers transitions recorded after the call. The channel is
+// closed when the subscription ends; cancel releases it. A subscriber that
+// stops reading past the queue bound has its subscription terminated rather
+// than its events dropped - ErrSubscriberOverflow is delivered before the
+// close, and the subscriber must resync from a snapshot.
+func (s *StatusStore) Subscribe() (<-chan Event, func())
 ```
 
-Nothing is dropped while a consumer is reading. The bound exists for the
-consumer that stops: the report path runs on the pool's worker goroutines and
-the transfer progress callbacks
+The producer never blocks: publishing is a non-blocking send into each
+subscriber's bounded queue. That property is not negotiable, because the report
+path runs on the pool's worker goroutines and the transfer progress callbacks
 ([internal/daemon/pool.go:280](../internal/daemon/pool.go),
-[internal/daemon/runtime.go:1064](../internal/daemon/runtime.go)), so blocking
-the producer would let a wedged `status --watch` stall replication, and
-retaining without limit is a leak paced by whoever is not reading. Bounded, with
-a defined edge, is the only remaining option.
+[internal/daemon/runtime.go:1064](../internal/daemon/runtime.go)) - a status
+consumer must never apply backpressure to replication.
 
-The edge is terminal rather than advisory. A dropped count that a caller may
-ignore is this defect again with a counter attached; `ErrCursorTooOld` says the
-sequence is broken and the caller must resync from the snapshot the store keeps
-anyway. A test waiter fails on it rather than asserting across the hole.
+Overflow stays terminal, as with any lossy edge: a consumer that falls behind is
+told its sequence is broken rather than handed a gap with a counter beside it.
+The difference from a shared history is that the failure is now the slow
+consumer's alone, and the memory is per subscriber - 256 events each, with one
+or two subscribers in practice - rather than one global buffer sized for the
+worst of them.
 
-Capacity 4096 transitions, roughly 1.5MB at the string sizes these events carry.
-The busiest minute of a full integration run produced 103 transitions, from a
-daemon configured with a 100ms reconcile interval and one-minute cadences; a
-production daemon is far quieter, and a healthy consumer reads within
-milliseconds of a wake. The number is chosen to put the edge out of reach rather
-than to ration memory, and the store exposes its high-water mark so it can be
-revisited with evidence.
+**3.2 Bootstrapping without a gap.** Subscribe first, then take the snapshot,
+then discard queued events at or before the snapshot's revision. That ordering
+is why `Event` keeps the revision it was recorded at even though no caller now
+passes a cursor: it is what makes the seam between the snapshot and the stream
+exact rather than approximate.
 
-This is a delivery buffer, not a record. Losing nothing across a daemon restart,
-or across a consumer that was absent for an hour, is a durable status journal
-with retention and rotation of its own - a different feature with a different
-lifecycle. Nothing has asked for one. The ring should not be grown in its
-direction.
+A retained history would have papered over late subscription; publication does
+not, and the events a subscriber missed are gone. That is a real constraint, not a
+free simplification: a test must subscribe before the action it observes, where
+today its helpers look back at whatever `Status()` happens to hold. It is the
+better constraint, because "subscribe, act, wait" cannot silently observe the
+wrong occurrence of a repeated state the way a backward look can, but it does
+mean the helpers in chunk D are written around the subscription rather than
+around the assertion.
 
-**3.2 Progress updates do not enter the window.** `recordProgress` writes an
-event per progress callback with `State: "sending"`
-([internal/daemon/runtime.go:1064](../internal/daemon/runtime.go)); a large send
-would otherwise evict the window on its own. Split the store's entry points -
-`Record` for transitions, `RecordProgress` for progress - rather than filtering
-by content.
+**3.3 Progress is a separate topic.** `recordProgress` writes an event per
+progress callback with `State: "sending"`
+([internal/daemon/runtime.go:1064](../internal/daemon/runtime.go)), and the
+status UI reads bytes, rate and ETA from the current snapshot rather than from
+any sequence ([internal/statusui/status.go:169](../internal/statusui/status.go)).
+So transitions and progress are published as distinct topics, and a transition
+subscriber does not receive progress at all. The periodic snapshot carries the
+progress an operator is watching.
 
-Filtering by content is the tempting version and it is wrong: deduplicating
-consecutive identical events would erase the second of two identical failed
-attempts, which is exactly the sequence `TestGuestDaemonRemoteBackoff` counts.
-The two call paths are already distinct, so the distinction costs nothing.
+Filtering by content instead - deduplicating consecutive identical events -
+would erase the second of two identical failed attempts, which is the sequence
+`TestGuestDaemonRemoteBackoff` counts. The two call paths are already distinct,
+so the split costs nothing and the dedupe trap is avoided entirely.
 
-Capacity: 512 transitions, which at the observed rates is minutes of a busy
-daemon and well past any watcher's reconnect gap.
-
-**3.3 `WatchStatus` carries transitions.** Two additive fields on
+**3.4 `WatchStatus` sends what it receives.** Two additive fields on
 `WatchStatusResponse` ([proto/boomerangz/control/v1/control.proto:30](../proto/boomerangz/control/v1/control.proto)):
-the transitions since the revision of the previous message, and a flag marking
-the message as a resync - the server's cursor aged out, the snapshot is current,
-and the sequence between them was not retained. The snapshot stays exactly as it
-is, so existing clients are unaffected and the message remains self-describing
-for a client that joins mid-stream.
+the transitions observed since the previous message, and a flag marking a
+message as a resync after an overflow ended the server's subscription. The
+snapshot stays as it is, so existing clients are unaffected and a client joining
+mid-stream still gets a self-describing message. The handler subscribes, sends
+the snapshot, and then forwards from its channel, with the client's interval
+continuing to cap the heartbeat.
 
-The server already holds the revision it last sent
-([internal/control/service.go:69](../internal/control/service.go)); it becomes
-the cursor into `Since`.
+`Runtime.WaitStatus` exists for exactly this handler
+([internal/control/service.go:18](../internal/control/service.go),
+[:83](../internal/control/service.go)) and is retired with it, along with the
+revision-waiting on `StatusStore`. The interface the control service depends on
+gains `Subscribe` and loses `WaitStatus`; two test fakes follow
+([internal/control/control_test.go:55](../internal/control/control_test.go),
+[internal/cli/control_test.go:31](../internal/cli/control_test.go)).
 
-**3.4 The CLI shows them.** Interactive `--watch` gains a short transition tail
+**3.5 The CLI shows them.** Interactive `--watch` gains a short transition tail
 under the table - the thing an operator is actually watching for is a change,
 and today the only way to see one is to be looking at the right moment.
 Redirected `--json` includes the transitions in each object, which is additive
@@ -177,10 +185,10 @@ the half of the defect a user can hit.
 ## 4. What the tests then stop doing
 
 **4.1 In-process waiter.** A helper in `internal/testutil` taking a runtime, a
-predicate over `Event`, and a bound; looping `WaitStatus` and `Since` rather
-than sleeping; returning the first matching transition; and on expiry failing
-with the whole window it observed. Replaces the four helpers in 2.3. The bound
-stays a hard failure: this removes sampling, not deadlines.
+predicate over `Event`, and a bound; selecting on its subscription rather than
+sleeping; returning the first matching transition; and on expiry failing with
+every transition it received while waiting. Replaces the four helpers in 2.3.
+The bound stays a hard failure: this removes sampling, not deadlines.
 
 **4.2 Out-of-process waiter.** A client in the control test package that dials
 the socket those tests already hold credentials for and consumes `WatchStatus`,
@@ -224,6 +232,17 @@ assumed one, and when a zed path can be specified with the periodic scan still
 underneath it as the correctness floor. It wants its own document; this one
 should not pretend to have decided it.
 
+**Resumable watching.** A client that loses its stream and reconnects gets a
+fresh snapshot and the transitions from then on; whatever happened during the
+disconnect is not recoverable. Making it recoverable means retained history and
+a cursor the client presents on reconnect - the pull model this design started
+with, on top of the push one rather than instead of it. Neither consumer wants
+it today: the CLI does not reconnect at all, it returns the stream error
+([internal/cli/control.go:74](../internal/cli/control.go)), and a test subscribes
+for the duration of what it is watching. It becomes worth building when
+something consumes this stream as a record - an exporter, an audit trail - at
+which point the honest form is durable and on disk, not a larger queue.
+
 **Everything else stays as it is because it is already right.** `waitForDevice`
 ([internal/testutil/zfstest/fixture.go:116](../internal/testutil/zfstest/fixture.go))
 waits on udev, which is not ours to subscribe to. The scheduler's deadlines and
@@ -241,13 +260,14 @@ log if the bound expires.
 
 ## 6. Chunks
 
-**Chunk A - the transition window.** 3.1 and 3.2. Unit tests for ordering,
-eviction, the cursor-too-old boundary, and that a progress-heavy send cannot
-evict a transition. Done when `Since` is complete for any cursor it accepts and
-refuses the ones it cannot serve.
+**Chunk A - publication.** 3.1 through 3.3. Unit tests for delivery order, the
+non-blocking publish, overflow terminating one subscription without touching
+another or the producer, and that a progress-heavy send delivers nothing to a
+transition subscriber. Done when a subscriber receives every transition recorded
+after it subscribed, or is told its subscription ended.
 
-**Chunk B - the control plane carries transitions.** 3.3 and 3.4, with the docs
-in the same change. Done when `status --watch --json` emits every transition a
+**Chunk B - the control plane carries transitions.** 3.4 and 3.5, retiring
+`WaitStatus` with them, and the docs in the same change. Done when `status --watch --json` emits every transition a
 job made while the client was connected, and a test asserts that a sequence
 which collapses in the snapshot survives in the stream.
 
@@ -273,15 +293,21 @@ and each is independently droppable without leaving the contract half-changed.
 
 ## 7. Risks
 
-- **A silently lossy window is the original bug.** A broken cursor has to be
-  refused at every layer that carries the stream - `Since`, the RPC, the CLI -
+- **A silently lossy stream is the original bug.** Overflow has to end the
+  subscription at every layer that carries it - the channel, the RPC, the CLI -
   and a test waiter must fail on it rather than continue against a gap. The
   failure mode to design against is a consumer that keeps going.
-- **Ring capacity is bounded by evidence, not derived from it.** 4096 is sized
-  against a peak of 103 transitions a minute in a deliberately aggressive test
-  daemon. Chunk A exposes the high-water mark; if a real deployment ever
-  approaches it, that is the signal to look at what is producing transitions at
-  that rate before enlarging anything.
+- **Queue depth is bounded by evidence, not derived from it.** 256 per
+  subscriber is sized against a peak of 103 transitions a minute in a
+  deliberately aggressive test daemon, against consumers that read within
+  milliseconds of a wake. Chunk A exposes the high-water mark; a real deployment
+  approaching it is a signal to look at what is producing transitions at that
+  rate before enlarging anything.
+- **Subscribe-before-act is a requirement, not a convention.** A helper that
+  subscribes after the action it observes waits for an event that has already
+  been published, and the failure looks like the daemon never did the work.
+  Chunk D's waiter should take the subscription in its constructor so the
+  ordering is structural rather than remembered.
 - **Additive proto fields still change output.** `--json` consumers gain a
   field; that is compatible for anything selecting known keys and not for
   anything asserting an exact object. The docs change lands with the code.
