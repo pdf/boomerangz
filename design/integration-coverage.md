@@ -1260,6 +1260,25 @@ guarded pool teardown. `waitFor` in the daemon suite now prints
 `runtime.Status()` on timeout, which is what turns this failure from "the
 snapshot never arrived" into "another dataset's work was ahead of it".
 
+**What the clean pools then found.** With the leftovers gone the daemon stage
+runs faster, and two tests that had been racing a status event started losing.
+`TestGuestRemoteOutageReconnection` reads the remote job's `waiting-retry` event
+for its reason; the daemon was re-running the job every reconcile inside its own
+backoff window, and each of those attempts short-circuited on the deadline and
+reported `waiting-retry` with no error and so no reason, overwriting the event
+that named the transport failure in a store that keeps only the latest event per
+job. `TestGuestDaemonRemoteBackoff` reads the same events as the record of real
+attempts and times the gaps between them, so giving the short-circuit a reason
+would have made every no-op poll look like an attempt.
+
+Both are answered by not running the job at all until its deadline: `Roadwarrior`
+reports the deadline, `enqueueRemote` returns before queueing while it stands,
+and a newly due snapshot is protected and coalesced before that point so the
+scheduled retry carries it out at the same moment it would have. `Outcome.Silent`
+covers the residual interleaving, where a job reaches a worker just as another
+attempt sets a new deadline. The events are then exactly the real attempts, each
+carrying its reason, which is what both tests had assumed all along.
+
 ## 6. Keeping this from re-rotting
 
 Chunk 0 removes the mechanism that let a test go dormant, and chunk J removes
