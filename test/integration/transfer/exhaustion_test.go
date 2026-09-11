@@ -121,9 +121,12 @@ func TestGuestDestinationExhaustion(t *testing.T) {
 		if observed.Load() == 0 {
 			t.Fatalf("the transfer failed before any data moved: %v", applyErr)
 		}
+		// An operator has to be able to tell an exhausted destination from
+		// any other transfer failure, so the message naming it is part of the
+		// behaviour rather than incidental.
 		message := strings.ToLower(applyErr.Error())
 		if !strings.Contains(message, "space") && !strings.Contains(message, "quota") {
-			t.Logf("exhaustion surfaced without naming space or quota: %v", applyErr)
+			t.Fatalf("exhaustion surfaced without naming space or quota: %v", applyErr)
 		}
 		t.Logf("destination exhausted after %d bytes: %v", observed.Load(), applyErr)
 	})

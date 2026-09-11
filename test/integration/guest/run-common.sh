@@ -184,7 +184,7 @@ BOOMERANGZ_REMOTE_GUEST_ENDPOINT=ssh-shell \
 BOOMERANGZ_REMOTE_GUEST_CLI="/usr/bin/boomerangz" \
 	"$artifact_dir/daemon.test"
 
-run_stage control 6 \
+run_stage control 8 \
 BOOMERANGZ_CONTROL_GUEST_RUN="$run_id" \
 BOOMERANGZ_CONTROL_GUEST_CLI="$artifact_dir/boomerangz" \
 BOOMERANGZ_CONTROL_GUEST_CONFIG="$config" \
