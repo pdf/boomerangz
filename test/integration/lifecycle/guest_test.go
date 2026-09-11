@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -139,13 +140,41 @@ func TestGuestLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID+1); err == nil {
-			t.Fatal("accepted wrong destination GUID")
-		}
+		// The correct GUID first, as the control arm: a Checkpoint that fails
+		// for any reason - a missing hold, an unreadable state, a reference
+		// that never took - would satisfy the refusal below on its own, so
+		// the refusal is only attributable once the same call has been seen
+		// to succeed here.
+		//
 		// This phase tests the lifecycle hook; actual destination verification is
 		// the responsibility of the transfer implementation in phase 4.
 		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID); err != nil {
 			t.Fatal(err)
+		}
+		bookmark := ref.BookmarkName(root)
+		bookmarks := func(t *testing.T) []string {
+			t.Helper()
+			state, stateErr := direct.InspectState(t.Context(), root, true)
+			if stateErr != nil {
+				t.Fatal(stateErr)
+			}
+			var names []string
+			for _, object := range state.Objects {
+				if object.Type == "bookmark" {
+					names = append(names, object.Name)
+				}
+			}
+			return names
+		}
+		checkpointed := bookmarks(t)
+		if !slices.Contains(checkpointed, bookmark) {
+			t.Fatalf("checkpoint created no versioned bookmark: %v", checkpointed)
+		}
+		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID+1); err == nil {
+			t.Fatal("accepted wrong destination GUID")
+		}
+		if after := bookmarks(t); !slices.Equal(after, checkpointed) {
+			t.Fatalf("refused checkpoint changed the bookmarks: %v, was %v", after, checkpointed)
 		}
 		if err := service.ReleaseReference(t.Context(), root, ref); err != nil {
 			t.Fatal(err)

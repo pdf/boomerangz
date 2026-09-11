@@ -435,11 +435,20 @@ exec zfs "$@"
 			})
 
 			chain("unrelated-destination-refused", func(t *testing.T) {
-				command(t, "snapshot", latest+"@foreign-destination")
+				// The chain gives weak readiness control - this transport
+				// succeeded a phase ago - but nothing that attributes a
+				// failure here to the planted snapshot rather than to the
+				// transport. Previewing the identical request first, and
+				// requiring a plan back, is what does that.
 				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, false, now,
 					request(t, latestTarget, source, zfs.Filesystem, "").Policy); snapErr != nil {
 					t.Fatal(snapErr)
 				}
+				plan, previewErr := latestTarget.engine.Preview(t.Context(), request(t, latestTarget, source, zfs.Filesystem, ""))
+				if previewErr != nil || plan.Mode == "" {
+					t.Fatalf("control preview=%+v err=%v", plan, previewErr)
+				}
+				command(t, "snapshot", latest+"@foreign-destination")
 				if plan, previewErr := latestTarget.engine.Preview(t.Context(), request(t, latestTarget, source, zfs.Filesystem, "")); previewErr == nil {
 					t.Fatalf("accepted unrelated destination snapshot: %+v", plan)
 				}

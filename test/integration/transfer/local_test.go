@@ -291,12 +291,20 @@ func TestGuestLocalTransfer(t *testing.T) {
 
 	chain("unrelated-destination-refused", func(t *testing.T) {
 		// Existing unrelated destination history must be refused without starting send.
-		command(t, "snapshot", latest+"@foreign-destination")
+		//
+		// Preview the identical request before planting that history: an
+		// error alone is satisfied by any planner or inventory fault, and
+		// only a plan that came back a moment earlier attributes the refusal
+		// to the snapshot this phase planted.
 		if _, err := snapshots.CreateSnapshot(t.Context(), source, false, now, request(t, latest, "").Policy); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := engine.Preview(t.Context(), request(t, latest, "")); err == nil {
-			t.Fatal("accepted unrelated latest destination snapshot")
+		if plan, err := engine.Preview(t.Context(), request(t, latest, "")); err != nil || plan.Mode == "" {
+			t.Fatalf("control preview=%+v err=%v", plan, err)
+		}
+		command(t, "snapshot", latest+"@foreign-destination")
+		if plan, err := engine.Preview(t.Context(), request(t, latest, "")); err == nil {
+			t.Fatalf("accepted unrelated latest destination snapshot: %+v", plan)
 		}
 	})
 
@@ -363,12 +371,19 @@ func TestGuestLocalTransfer(t *testing.T) {
 				if err != nil || !result.Verified || result.Plan.Mode != "incremental-all" {
 					t.Fatalf("recursive incremental %s=%+v err=%v", discard, result, err)
 				}
-				command(t, "snapshot", result.Plan.Destination+"@foreign-destination")
+				// Control arm, as in unrelated-destination-refused above:
+				// the same request has to plan cleanly before the foreign
+				// snapshot is planted, or the refusal proves only that
+				// something went wrong.
 				if _, err := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(2*time.Minute), treePolicy); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := engine.Preview(t.Context(), req); err == nil {
-					t.Fatal("accepted foreign latest recursive destination snapshot")
+				if plan, err := engine.Preview(t.Context(), req); err != nil || plan.Mode == "" {
+					t.Fatalf("recursive %s control preview=%+v err=%v", discard, plan, err)
+				}
+				command(t, "snapshot", result.Plan.Destination+"@foreign-destination")
+				if plan, err := engine.Preview(t.Context(), req); err == nil {
+					t.Fatalf("accepted foreign latest recursive destination snapshot: %+v", plan)
 				}
 			})
 		}
