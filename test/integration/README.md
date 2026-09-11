@@ -147,13 +147,14 @@ turns on `term.IsTerminal`, and every stage gives the command a pipe.
 ### Not behaviour tests
 
 Two things in these packages own no axis, and their absence from the ledger
-above is deliberate rather than a gap. `TestGuestInterruptedReceiveHelper` is
-a subprocess the interrupted-receive test re-executes to sever a stream
-mid-flight; it skips unless its own environment variable is set, so it reports
-as skipped in a normal run. `BenchmarkGuestRemoteTransfer` measures remote
-transfer throughput and runs only under
-`BOOMERANGZ_INTEGRATION_MODE=benchmark` via `make integration-benchmark`,
-which is a separate mode that skips the test stages entirely.
+above is deliberate rather than a gap. The transfer package's `TestMain`
+doubles as a subprocess boundary: with `BOOMERANGZ_INTERRUPTED_RECEIVE_ARGS`
+set the binary is the receiver the interrupted-receive test re-executes to
+sever a stream mid-flight, and it never reaches the tests.
+`BenchmarkGuestRemoteTransfer` measures remote transfer throughput and runs
+only under `BOOMERANGZ_INTEGRATION_MODE=benchmark` via
+`make integration-benchmark`, which is a separate mode that skips the test
+stages entirely.
 
 ## How a run is structured
 
@@ -163,16 +164,19 @@ the raw capability probe and then each test binary package-wide, with no
 name filters: a test added to any package here runs without editing a runner
 script.
 
-Each stage declares a floor for the number of top-level passes it expects. A
-test that vanishes - deleted, renamed, or silently skipped by an unset
-environment guard - drops the count below the floor and fails the run rather
-than passing unnoticed. Raise the floor when adding a test whose environment
-guard is satisfied by that stage.
+The `integration` build tag is the gate, and a run ID is an input rather than
+an opt-in. A test compiled with the tag fails when the harness has not given
+it one, so a stage whose environment wiring broke goes red instead of passing
+with everything skipped, and exit status carries the whole signal. Host
+protection is unaffected: `zfstest.VerifyGuestPool` checks the guest marker
+file, the disk serial and the pool topology before any mutation, and those
+layers fail closed. Nothing in the runner needs editing when a test is added,
+renamed, moved or deleted.
 
 `BOOMERANGZ_INTEGRATION_STAGES` narrows a run to named stages and
 `BOOMERANGZ_INTEGRATION_FILTER` carries a `-test.run` regex into the stages
-that remain. Both exist for iteration only: a narrowed package cannot satisfy
-a pass floor, so a filtered run bypasses the floors outright and says
+that remain. Both exist for iteration only: fewer tests ran, and a green
+result no longer says which, so a narrowed run says
 `PARTIAL RUN - NOT VERIFICATION` at both ends and in each stage summary. See
 [AGENTS.md](../../AGENTS.md); an unfiltered run is what "verified" means.
 

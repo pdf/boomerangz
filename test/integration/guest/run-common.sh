@@ -6,7 +6,7 @@ set -euo pipefail
 # which names BOOMERANGZ_INTEGRATION_STAGES accepts; host/run.sh reads it back
 # with --list-stages so a misspelled stage is refused before the guest boots
 # rather than after it.
-readonly integration_stage_names=(lifecycle transfer-local transfer-remote daemon control)
+readonly integration_stage_names=(lifecycle transfer daemon control)
 
 if [[ ${1:-} == --list-stages ]]; then
 	printf '%s\n' "${integration_stage_names[@]}"
@@ -39,12 +39,11 @@ export BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE=$destination_device
 	exit 1
 }
 
-# A filtered run is a development aid, not verification. Chunk 0 removed the
-# -test.run allowlists because a test that had quietly stopped running looked
-# exactly like a passing one, and the per-stage pass floors exist to make that
-# loud. Narrowing the run breaks the floors by construction, so the floors are
-# bypassed explicitly - never miscounted - and every partial run says so at
-# both ends and in each stage summary.
+# A filtered run is a development aid, not verification. An unfiltered run is
+# the whole suite by construction - every test demands its environment rather
+# than excusing itself, so a stage that ran nothing fails - but narrowing just
+# runs fewer tests, and nothing in a green result then says which ones. So
+# every partial run says so at both ends and in each stage summary.
 readonly partial_run_banner='PARTIAL RUN - NOT VERIFICATION'
 readonly integration_stages=${BOOMERANGZ_INTEGRATION_STAGES:-}
 readonly integration_filter=${BOOMERANGZ_INTEGRATION_FILTER:-}
@@ -119,50 +118,32 @@ stage_filter() {
 	done
 }
 
-# Runs one test binary package-wide and asserts it reported at least
-# min_passes top-level results. Package-wide runs mean a new test is picked up
-# without editing this script; the pass floor means a test that vanishes -
-# skipped by an unset environment guard, renamed, deleted - fails the run
-# instead of passing silently.
+# Runs one test binary package-wide, so a new test is picked up without
+# editing this script. Exit status carries the whole signal: a test compiled
+# with -tags=integration demands its environment rather than skipping without
+# it, so a stage whose wiring broke cannot report success having run nothing.
 run_stage() {
 	local name=$1
-	local min_passes=$2
-	shift 2
+	shift
 	if ! stage_selected "$name"; then
 		printf 'integration stage %s: not selected (%s)\n' "$name" "$partial_run_banner"
 		return 0
 	fi
 	local status=0
-	local passes skipped log
 	local -a filter=()
 	if [[ -n $integration_filter ]]; then
 		filter=(-test.run "$integration_filter")
 	fi
-	# Scratch for the pass floor below, owned by the invoking user: this
-	# function does not run as the service account and $artifact_dir does.
-	# Nothing collects this file - its contents are already on stdout, which
-	# the host harness tees into the run's diagnostics.
-	log=$(mktemp)
-	run_as_service "$@" -test.v ${filter[@]+"${filter[@]}"} 2>&1 | stage_filter | tee "$log" || status=$?
-	passes=$(grep -c '^--- PASS: ' "$log" || true)
-	skipped=$(grep '^--- SKIP: ' "$log" || true)
-	rm -f -- "$log"
+	run_as_service "$@" -test.v ${filter[@]+"${filter[@]}"} 2>&1 | stage_filter || status=$?
 	if [[ $status -ne 0 ]]; then
 		printf 'integration stage %s failed with status %d\n' "$name" "$status" >&2
 		return "$status"
 	fi
 	if [[ $partial_run == yes ]]; then
-		printf 'integration stage %s: %d top-level passes, floor of %d not enforced (%s)\n' \
-			"$name" "$passes" "$min_passes" "$partial_run_banner"
+		printf 'integration stage %s: passed (%s)\n' "$name" "$partial_run_banner"
 		return 0
 	fi
-	if [[ $passes -lt $min_passes ]]; then
-		printf 'integration stage %s reported %d top-level passes, expected at least %d\n' \
-			"$name" "$passes" "$min_passes" >&2
-		printf '%s\n' "${skipped:-no skipped tests were reported}" >&2
-		return 1
-	fi
-	printf 'integration stage %s: %d top-level passes\n' "$name" "$passes"
+	printf 'integration stage %s: passed\n' "$name"
 }
 
 cleanup() {
@@ -229,17 +210,16 @@ if [[ $integration_mode == benchmark ]]; then
 	exit 0
 fi
 
-run_stage lifecycle 2 \
+run_stage lifecycle \
 BOOMERANGZ_LIFECYCLE_GUEST_RUN="$run_id" \
 BOOMERANGZ_LIFECYCLE_GUEST_CLI="$artifact_dir/boomerangz" \
 BOOMERANGZ_LIFECYCLE_GUEST_CONFIG="$config" \
 	"$artifact_dir/lifecycle.test"
 
-run_stage transfer-local 5 \
+# One pass over the whole transfer package: the local and remote tests differ
+# only in which variables they read, and those names are disjoint.
+run_stage transfer \
 BOOMERANGZ_TRANSFER_GUEST_RUN="$run_id" \
-	"$artifact_dir/transfer.test"
-
-run_stage transfer-remote 3 \
 BOOMERANGZ_REMOTE_GUEST_RUN="$run_id" \
 BOOMERANGZ_REMOTE_GUEST_KEY="$loopback_key" \
 BOOMERANGZ_REMOTE_GUEST_CLI="/usr/bin/boomerangz" \
@@ -247,7 +227,7 @@ BOOMERANGZ_REMOTE_DIRECT_SSH_USER="$direct_ssh_user" \
 BOOMERANGZ_REMOTE_GUEST_USER="$service_user" \
 	"$artifact_dir/transfer.test"
 
-run_stage daemon 6 \
+run_stage daemon \
 BOOMERANGZ_DAEMON_GUEST_RUN="$run_id" \
 BOOMERANGZ_REMOTE_GUEST_HOST=127.0.0.1 \
 BOOMERANGZ_REMOTE_GUEST_PORT="$outage_port" \
@@ -258,7 +238,7 @@ BOOMERANGZ_REMOTE_GUEST_ENDPOINT=ssh-shell \
 BOOMERANGZ_REMOTE_GUEST_CLI="/usr/bin/boomerangz" \
 	"$artifact_dir/daemon.test"
 
-run_stage control 8 \
+run_stage control \
 BOOMERANGZ_CONTROL_GUEST_RUN="$run_id" \
 BOOMERANGZ_CONTROL_GUEST_CLI="$artifact_dir/boomerangz" \
 BOOMERANGZ_CONTROL_GUEST_CONFIG="$config" \

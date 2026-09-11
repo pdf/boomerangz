@@ -153,7 +153,7 @@ func waitForTransferSuccesses(t *testing.T, runtime *daemon.Runtime, jobs []stri
 func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_DAEMON_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_DAEMON_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
 	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
@@ -256,7 +256,7 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 func TestGuestLocalTransferConcurrency(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_DAEMON_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_DAEMON_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
 	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
@@ -367,7 +367,7 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 func TestGuestRemoteOutageReconnection(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_DAEMON_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_DAEMON_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	remoteHost := os.Getenv("BOOMERANGZ_REMOTE_GUEST_HOST")
 	remoteRoot := os.Getenv("BOOMERANGZ_REMOTE_GUEST_ROOT")

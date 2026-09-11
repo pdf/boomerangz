@@ -88,9 +88,9 @@ record_failure() {
 	return "$status"
 }
 
-# A filtered run narrows the suite, so the per-stage pass floors cannot hold
-# and are bypassed in the guest. Say so at both ends of the run, where it
-# cannot be mistaken for the verifying run CI performs.
+# A filtered run narrows the suite, so a green result covers only the tests
+# that were selected. Say so at both ends of the run, where it cannot be
+# mistaken for the verifying run CI performs.
 announce_partial_run() {
 	[[ -n $integration_stages || -n $integration_filter ]] || return 0
 	printf '=== %s (%s) ===\n' "$partial_run_banner" "$1"

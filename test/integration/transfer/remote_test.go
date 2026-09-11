@@ -35,7 +35,7 @@ func BenchmarkGuestRemoteTransfer(b *testing.B) {
 func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 	runID := os.Getenv("BOOMERANGZ_REMOTE_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_REMOTE_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	key := os.Getenv("BOOMERANGZ_REMOTE_GUEST_KEY")
 	shellPath := os.Getenv("BOOMERANGZ_REMOTE_GUEST_CLI")

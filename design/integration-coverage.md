@@ -1089,7 +1089,7 @@ system produces anyway. `TestGuestTransportParity/<transport>/recursive-mapping`
 from chunk H was written with its control arm from the outset, which is what
 the convention in `test/integration/README.md` is for.
 
-### Chunk J - let the build tag be the gate
+### Chunk J - let the build tag be the gate (done)
 
 Chunk 0 left the suite carrying a hand-maintained number per stage. That is
 double-entry bookkeeping: the tests are the record, and the floor is a second
@@ -1188,6 +1188,45 @@ add. Adding, deleting, renaming or moving a test needs no edit to the runner.
 Done when: no integration test calls `t.Skip` for a reason other than a
 narrowed development run, `run_stage` takes no expected count, and a stage
 with a deliberately removed environment variable fails rather than passes.
+
+**How it landed.** Seventeen `t.Skip("disposable guest only")` guards became
+`t.Fatal`, each naming the variable the harness failed to supply, so the
+failure says which wiring broke rather than that something is missing. The
+`integration` build tag is now the only statement of intent; the run ID is an
+input.
+
+The two transfer passes merged into one `transfer` stage that exports both
+variable sets. They were disjoint in fact as well as in principle - no name
+carried a different value between the passes - so the merge was a straight
+concatenation, and `integration_stage_names` became the four package names.
+The transfer binary now runs once and reports the same eight top-level tests
+the two old floors expected between them, which is the arithmetic that says
+nothing was lost.
+
+`TestGuestInterruptedReceiveHelper` became `TestMain` plus an ordinary
+`runInterruptedReceiveHelper` function, dispatching on
+`BOOMERANGZ_INTERRUPTED_RECEIVE_ARGS` before `m.Run`. The re-exec dropped its
+`-test.run=^TestGuestInterruptedReceiveHelper$` argument, because `TestMain`
+runs before flag parsing and the process never reaches the tests. The helper's
+`t.Fatal` calls became a small `fail` closure that prints to stderr and exits
+non-zero - the same exit status `t.Fatal` produced, which is what `RunPipeline`
+reads as an interrupted receive.
+
+The lifecycle CLI tail is unconditional, and `run_stage` lost `min_passes`
+along with the scratch log, the `--- PASS:` count and the `--- SKIP:` report
+that existed only to feed it. It now forwards the stage's output and returns
+its status.
+
+**Verified by a real run.** `make integration-test` unfiltered is green: all
+four stages passed, twenty-four top-level passes, and - the point of the
+chunk - zero `--- SKIP:` lines anywhere in the run. The merged transfer stage
+ran the local and remote tests in one process for the first time and passed,
+so the per-test trees chunk 1 introduced do hold across the join.
+
+Then the negative control the chunk exists to make possible: with
+`BOOMERANGZ_DAEMON_GUEST_RUN` deleted from the daemon stage, the run fails.
+Before this chunk that same deletion was green with every daemon test
+skipped.
 
 ## 6. Keeping this from re-rotting
 

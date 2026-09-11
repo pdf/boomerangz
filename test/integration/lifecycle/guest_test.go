@@ -32,7 +32,7 @@ func activePolicy(dataset string) policy.Effective {
 func TestGuestLifecycle(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_LIFECYCLE_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_LIFECYCLE_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
 	if sourceDevice == "" {
@@ -249,12 +249,11 @@ func TestGuestLifecycle(t *testing.T) {
 		}
 	})
 
-	// Optional tail: builds its own dataset under root, so it needs the chain
-	// only to have got as far as creating root.
+	// Tail: builds its own dataset under root, so it needs the chain only to
+	// have got as far as creating root.
 	binary := os.Getenv("BOOMERANGZ_LIFECYCLE_GUEST_CLI")
 	if binary == "" {
-		t.Logf("verified lifecycle on %s", root)
-		return
+		t.Fatal("BOOMERANGZ_LIFECYCLE_GUEST_CLI is unset: the disposable guest harness did not provide a CLI binary")
 	}
 	chain("cli-adopt-and-clean", func(t *testing.T) {
 		cliRoot := root + "/cli"

@@ -26,7 +26,7 @@ func guestCLI(t *testing.T) (string, string, string) {
 	t.Helper()
 	runID := os.Getenv("BOOMERANGZ_CONTROL_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_CONTROL_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	binary := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CLI")
 	if binary == "" {

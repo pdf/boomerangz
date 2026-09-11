@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -35,55 +36,65 @@ func (interruptedReceiveStream) Run(ctx context.Context, send zfs.SendOptions, r
 			if err != nil {
 				panic(err)
 			}
-			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestGuestInterruptedReceiveHelper$")
+			command := exec.CommandContext(ctx, os.Args[0])
 			command.Env = append(os.Environ(), interruptedReceiveArgsEnv+"="+base64.RawStdEncoding.EncodeToString(encoded))
 			return command
 		},
 	)
 }
 
-// TestGuestInterruptedReceiveHelper is a subprocess boundary used by the
-// disposable-guest fault test. It is inert in ordinary test runs.
-func TestGuestInterruptedReceiveHelper(t *testing.T) {
-	encoded := os.Getenv(interruptedReceiveArgsEnv)
-	if encoded == "" {
-		t.Skip("helper process only")
+// TestMain doubles as the subprocess boundary for the disposable-guest fault
+// test: with BOOMERANGZ_INTERRUPTED_RECEIVE_ARGS set the process is a helper
+// receiver rather than a test binary, and never reaches the tests.
+func TestMain(m *testing.M) {
+	if encoded := os.Getenv(interruptedReceiveArgsEnv); encoded != "" {
+		runInterruptedReceiveHelper(encoded)
+	}
+	os.Exit(m.Run())
+}
+
+// runInterruptedReceiveHelper receives a truncated stream and always exits
+// non-zero, so that RunPipeline treats the transfer as an interrupted receive.
+// It never returns.
+func runInterruptedReceiveHelper(encoded string) {
+	fail := func(reason any) {
+		fmt.Fprintln(os.Stderr, "interrupted receive helper:", reason)
+		os.Exit(1)
 	}
 	raw, err := base64.RawStdEncoding.DecodeString(encoded)
 	if err != nil {
-		t.Fatal(err)
+		fail(err)
 	}
 	var args []string
 	if err := json.Unmarshal(raw, &args); err != nil {
-		t.Fatal(err)
+		fail(err)
 	}
-	receiver := exec.CommandContext(t.Context(), "zfs", args...)
+	receiver := exec.CommandContext(context.Background(), "zfs", args...)
 	input, err := receiver.StdinPipe()
 	if err != nil {
-		t.Fatal(err)
+		fail(err)
 	}
 	receiver.Stdout = os.Stdout
 	receiver.Stderr = os.Stderr
 	if err := receiver.Start(); err != nil {
-		t.Fatal(err)
+		fail(err)
 	}
 	if _, err := io.CopyN(input, os.Stdin, 4*1024*1024); err != nil {
-		t.Fatal(err)
+		fail(err)
 	}
 	if err := input.Close(); err != nil {
-		t.Fatal(err)
+		fail(err)
 	}
 	if err := receiver.Wait(); err == nil {
-		t.Fatal("truncated receive unexpectedly succeeded")
+		fail("truncated receive unexpectedly succeeded")
 	}
-	// The helper must fail so RunPipeline treats this as an interrupted receive.
 	os.Exit(1)
 }
 
 func TestGuestLocalTransfer(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_TRANSFER_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_TRANSFER_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
 	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
@@ -438,7 +449,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 func TestGuestInterruptedTransferRecovery(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_TRANSFER_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_TRANSFER_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
 	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")

@@ -23,7 +23,7 @@ import (
 func TestGuestDaemonControl(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_CONTROL_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_CONTROL_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	binary := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CLI")
 	configPath := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CONFIG")
@@ -184,7 +184,7 @@ func TestGuestDaemonControl(t *testing.T) {
 func TestGuestDaemonAbruptRestart(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_CONTROL_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_CONTROL_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	binary := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CLI")
 	configPath := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CONFIG")

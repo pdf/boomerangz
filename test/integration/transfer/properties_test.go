@@ -40,7 +40,7 @@ import (
 func TestGuestReceivedPropertyLayers(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_TRANSFER_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_TRANSFER_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
 	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
