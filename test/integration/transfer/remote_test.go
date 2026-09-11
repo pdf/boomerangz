@@ -160,6 +160,7 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 			continue
 		}
 		root := destinationPool + "/data/remote-" + mode + "-" + suffix
+		zfstest.RegisterCleanup(t, root)
 		result := runSSH(t, mode, root)
 		if result.Plan.TargetBinding.Transport != "ssh" || !strings.HasPrefix(result.Plan.TargetBinding.CanonicalTarget, "ssh://") {
 			t.Fatalf("%s target binding=%+v", mode, result.Plan.TargetBinding)
@@ -238,6 +239,7 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 		return
 	}
 	nativeRoot := destinationPool + "/data/remote-native-" + suffix
+	zfstest.RegisterCleanup(t, nativeRoot)
 	runNative(t, []string{nativeRoot}, func(_ int, transferRoot func(string) transfer.Result) {
 		transferRoot(nativeRoot)
 	})

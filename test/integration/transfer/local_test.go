@@ -129,6 +129,8 @@ func TestGuestLocalTransfer(t *testing.T) {
 	suffix := time.Now().UTC().Format("150405")
 	latest := destinationPool + "/data/latest-" + suffix
 	all := destinationPool + "/data/all-" + suffix
+	zfstest.RegisterCleanup(t, latest)
+	zfstest.RegisterCleanup(t, all)
 	command(t, "set", policy.Namespace+"enabled=on", policy.Namespace+"local="+latest+","+all, source)
 	request := func(t *testing.T, root, snapshot string) transfer.Request {
 		t.Helper()
@@ -184,6 +186,8 @@ func TestGuestLocalTransfer(t *testing.T) {
 		retentionSource := sourcePool + "/data/retention-" + suffix
 		retentionDestination := destinationPool + "/data/retention-" + suffix
 		command(t, "create", "-u", retentionSource)
+		zfstest.RegisterCleanup(t, retentionSource)
+		zfstest.RegisterCleanup(t, retentionDestination)
 		command(t, "set", policy.Namespace+"enabled=on", policy.Namespace+"local="+retentionDestination, policy.Namespace+"policy=1x5m", retentionSource)
 		retentionRequest := func() transfer.Request {
 			t.Helper()
@@ -359,6 +363,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 				tree := sourcePool + "/data/tree-" + discard + "-" + suffix
 				command(t, "create", "-u", tree)
 				command(t, "create", "-u", tree+"/child")
+				zfstest.RegisterCleanup(t, tree)
 				command(t, "snapshot", "-r", tree+"@foreign-recursive")
 				command(t, "set", policy.Namespace+"enabled=on", policy.Namespace+"replicate=on", policy.Namespace+"discard="+discard, policy.Namespace+"local="+destinationPool+"/data", tree)
 				rows, err := direct.GetStoredProperties(t.Context(), []string{tree})
@@ -375,6 +380,9 @@ func TestGuestLocalTransfer(t *testing.T) {
 					t.Fatalf("recursive %s=%+v err=%v", discard, result, err)
 				}
 				t.Logf("recursive %s mapping verified: %s", discard, result.Plan.Destination)
+				// The mapped destination is only known once the plan resolves
+				// it; discard=first keeps a path component the other mode drops.
+				zfstest.RegisterCleanup(t, result.Plan.Destination)
 				if _, err := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(time.Minute), treePolicy); err != nil {
 					t.Fatal(err)
 				}
@@ -409,9 +417,11 @@ func TestGuestLocalTransfer(t *testing.T) {
 		for _, dataset := range []string{strings.TrimSuffix(linuxSource, "/home/pdf"), strings.TrimSuffix(linuxSource, "/pdf"), linuxSource} {
 			command(t, "create", "-u", dataset)
 		}
+		zfstest.RegisterCleanup(t, strings.TrimSuffix(linuxSource, "/home/pdf"))
 		linuxRoot := destinationPool + "/data/linux-root-" + suffix
 		ordinaryMountpoint := "/mnt/boomerangz-linux-root-" + suffix
 		command(t, "create", "-u", "-o", "mountpoint="+ordinaryMountpoint, linuxRoot)
+		zfstest.RegisterCleanup(t, linuxRoot)
 		command(t, "set", policy.Namespace+"enabled=on", policy.Namespace+"discard=first", policy.Namespace+"local="+linuxRoot, linuxSource)
 		rows, err := direct.GetStoredProperties(t.Context(), []string{linuxSource})
 		if err != nil {
@@ -482,6 +492,7 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 	for _, mode := range []string{"all", "latest"} {
 		t.Run(mode, func(t *testing.T) {
 			destination := destinationPool + "/data/interrupted-" + mode + "-" + suffix
+			zfstest.RegisterCleanup(t, destination)
 			output, err := exec.CommandContext(t.Context(), "zfs", "set", policy.Namespace+"enabled=on", policy.Namespace+"incremental="+mode, policy.Namespace+"local="+destination, source).CombinedOutput()
 			if err != nil {
 				t.Fatalf("configure source: %v: %s", err, output)

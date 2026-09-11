@@ -194,3 +194,11 @@ Tests own their fixtures. `zfstest.FixtureName` names a dataset for one test,
 `zfstest.RegisterCleanup` destroys the tree afterwards, releasing holds first.
 `bootstrap.sh` creates pools and delegates permissions; it builds no fixtures,
 so stage order carries no meaning and can be shuffled.
+
+A fixture left behind is not just untidy. The pools live for the whole run, so
+an abandoned source root that still carries `enabled=on` and a cadence is work
+the next stage's daemon adopts as its own: it discovers every dataset on the
+host, and with bounded management workers, one stale root whose transfer is
+still running holds a worker for the length of that send. That is how the
+transfer stage once starved the first daemon test of a worker for 30 seconds.
+Register cleanup for every dataset a test creates, on both pools.

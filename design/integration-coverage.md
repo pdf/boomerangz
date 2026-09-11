@@ -1,6 +1,6 @@
 # Design: integration test coverage review
 
-Status: in progress. Chunks 0-3, A-F and G-I have landed; J is outstanding.
+Status: in progress. Chunks 0-3, A-F and G-K have landed.
 
 This document is a work plan for auditing `test/integration/` and closing the
 gaps it finds. It is written to be executed in independent chunks: chunk 0-3
@@ -1227,6 +1227,38 @@ Then the negative control the chunk exists to make possible: with
 `BOOMERANGZ_DAEMON_GUEST_RUN` deleted from the daemon stage, the run fails.
 Before this chunk that same deletion was green with every daemon test
 skipped.
+
+### Chunk K - finish fixture cleanup (done)
+
+Chunk 1 gave tests their own fixtures and said cleanup would destroy the tree
+afterwards. Only the zvol helper ever did. `zfstest.PayloadVolume` registers
+cleanup for the volume it creates, and the suites written after chunk 1 call
+`zfstest.RegisterCleanup` themselves, but the datasets `TestGuestLocalTransfer`
+creates with a bare `zfs create` - the retention pair, both recursive trees,
+the Linux ancestor tree, the receive roots - were never registered, and neither
+were the daemon suite's own roots. Nothing noticed, because within a stage the
+leak is invisible.
+
+CI found it across stages. In [run 34612764846](https://github.com/pdf/boomerangz/actions/runs/34612764846)
+`TestGuestDaemonSchedulingAndRetirement` timed out after 30 seconds waiting for
+the first snapshot of a dataset it had just created. The daemon discovers every
+dataset on the host, and the pools still held four schedulable roots from the
+transfer stage. Discovery made all of them due at once, the two management
+workers took them in queue order, and the last two picked up recursive
+snapshots of the transfer stage's trees - each of which blocked in `ProtectSet`
+on the lifecycle lock its own still-running local send held, for around 25
+seconds. The test's own snapshot jobs sat sixth and seventh in a fair queue
+that never reached them. Nothing about the daemon was wrong; it was doing the
+work it had been handed.
+
+**How it landed.** Every dataset those tests create is now registered for
+cleanup on both pools, including the recursive mapping's destination, whose
+name is only known once the plan resolves it. The lifecycle suite's root is
+deliberately left alone: it carries no cadence, so no daemon will ever schedule
+it, and the suite's comment already says the fixture is retained for the
+guarded pool teardown. `waitFor` in the daemon suite now prints
+`runtime.Status()` on timeout, which is what turns this failure from "the
+snapshot never arrived" into "another dataset's work was ahead of it".
 
 ## 6. Keeping this from re-rotting
 
