@@ -100,14 +100,40 @@ a bounded ring of transitions, each carrying the revision at which it was
 recorded, and:
 
 ```go
-// Since returns transitions recorded after revision, the revision they are
-// current to, and how many were evicted before the caller read them.
-func (s *StatusStore) Since(revision uint64) (uint64, []Event, int)
+// Since returns transitions recorded after revision and the revision they are
+// current to. It fails with ErrCursorTooOld when the caller's revision is
+// older than the oldest transition retained, which is the only case in which
+// this stream is not complete.
+func (s *StatusStore) Since(revision uint64) (uint64, []Event, error)
 ```
 
-The dropped count is the load-bearing part. A window that silently loses the
-beginning is the defect again with more steps; a caller that fell behind must be
-able to say so.
+Nothing is dropped while a consumer is reading. The bound exists for the
+consumer that stops: the report path runs on the pool's worker goroutines and
+the transfer progress callbacks
+([internal/daemon/pool.go:280](../internal/daemon/pool.go),
+[internal/daemon/runtime.go:1064](../internal/daemon/runtime.go)), so blocking
+the producer would let a wedged `status --watch` stall replication, and
+retaining without limit is a leak paced by whoever is not reading. Bounded, with
+a defined edge, is the only remaining option.
+
+The edge is terminal rather than advisory. A dropped count that a caller may
+ignore is this defect again with a counter attached; `ErrCursorTooOld` says the
+sequence is broken and the caller must resync from the snapshot the store keeps
+anyway. A test waiter fails on it rather than asserting across the hole.
+
+Capacity 4096 transitions, roughly 1.5MB at the string sizes these events carry.
+The busiest minute of a full integration run produced 103 transitions, from a
+daemon configured with a 100ms reconcile interval and one-minute cadences; a
+production daemon is far quieter, and a healthy consumer reads within
+milliseconds of a wake. The number is chosen to put the edge out of reach rather
+than to ration memory, and the store exposes its high-water mark so it can be
+revisited with evidence.
+
+This is a delivery buffer, not a record. Losing nothing across a daemon restart,
+or across a consumer that was absent for an hour, is a durable status journal
+with retention and rotation of its own - a different feature with a different
+lifecycle. Nothing has asked for one. The ring should not be grown in its
+direction.
 
 **3.2 Progress updates do not enter the window.** `recordProgress` writes an
 event per progress callback with `State: "sending"`
@@ -126,9 +152,11 @@ daemon and well past any watcher's reconnect gap.
 
 **3.3 `WatchStatus` carries transitions.** Two additive fields on
 `WatchStatusResponse` ([proto/boomerangz/control/v1/control.proto:30](../proto/boomerangz/control/v1/control.proto)):
-the transitions since the revision of the previous message, and the dropped
-count. The snapshot stays exactly as it is, so existing clients are unaffected
-and the message remains self-describing for a client that joins mid-stream.
+the transitions since the revision of the previous message, and a flag marking
+the message as a resync - the server's cursor aged out, the snapshot is current,
+and the sequence between them was not retained. The snapshot stays exactly as it
+is, so existing clients are unaffected and the message remains self-describing
+for a client that joins mid-stream.
 
 The server already holds the revision it last sent
 ([internal/control/service.go:69](../internal/control/service.go)); it becomes
@@ -139,8 +167,8 @@ under the table - the thing an operator is actually watching for is a change,
 and today the only way to see one is to be looking at the right moment.
 Redirected `--json` includes the transitions in each object, which is additive
 for anything reading `.datasets` or `.jobs` today. `docs/reference/cli.md` and
-the operations guide say what the new field is and that the dropped count means
-the consumer fell behind. No flag changes, so the completions in `contrib/` are
+the operations guide say what the new field is, and that a resync marks the one
+case where the stream is not continuous. No flag changes, so the completions in `contrib/` are
 untouched; the man page gains a sentence with the docs.
 
 This is the part I would have cut for being bigger than the tests needed. It is
@@ -214,9 +242,9 @@ log if the bound expires.
 ## 6. Chunks
 
 **Chunk A - the transition window.** 3.1 and 3.2. Unit tests for ordering,
-eviction, the dropped count, and that a progress-heavy send cannot evict a
-transition. Done when `Since` is lossless up to capacity and says so when it is
-not.
+eviction, the cursor-too-old boundary, and that a progress-heavy send cannot
+evict a transition. Done when `Since` is complete for any cursor it accepts and
+refuses the ones it cannot serve.
 
 **Chunk B - the control plane carries transitions.** 3.3 and 3.4, with the docs
 in the same change. Done when `status --watch --json` emits every transition a
@@ -245,12 +273,15 @@ and each is independently droppable without leaving the contract half-changed.
 
 ## 7. Risks
 
-- **A silently lossy window is the original bug.** The dropped count has to be
-  reported at every layer that carries the stream - `Since`, the RPC, the CLI -
-  and a test waiter must fail on it rather than continue against a gap.
-- **Ring capacity is a guess until it is measured.** 512 is chosen against
-  observed transition rates, not derived. Chunk A should log or expose the
-  high-water mark so the number can be revisited with evidence.
+- **A silently lossy window is the original bug.** A broken cursor has to be
+  refused at every layer that carries the stream - `Since`, the RPC, the CLI -
+  and a test waiter must fail on it rather than continue against a gap. The
+  failure mode to design against is a consumer that keeps going.
+- **Ring capacity is bounded by evidence, not derived from it.** 4096 is sized
+  against a peak of 103 transitions a minute in a deliberately aggressive test
+  daemon. Chunk A exposes the high-water mark; if a real deployment ever
+  approaches it, that is the signal to look at what is producing transitions at
+  that rate before enlarging anything.
 - **Additive proto fields still change output.** `--json` consumers gain a
   field; that is compatible for anything selecting known keys and not for
   anything asserting an exact object. The docs change lands with the code.
