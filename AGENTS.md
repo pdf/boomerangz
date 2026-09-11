@@ -26,6 +26,25 @@ exercise. It takes a guest boot per run, so `make integration-test-compile`
 is the quick check that they still build - it is a compile gate, not
 verification, and work is not verified against it.
 
+Clean up after every run, including interrupted ones. The harness destroys the
+pools inside the guest but never removes its own run root, so each run leaves
+roughly 1.7 GiB under `$RUNNER_TEMP/boomerangz-integration/<run-id>/` - a copy
+of the guest system image, both pool disks, and the cross-compiled test
+binaries - and nothing prunes it. Only `diagnostics/` is worth keeping
+afterwards: the console logs, the guest environment, and `failure.txt` when a
+run failed. Delete the rest. `RUNNER_TEMP` therefore wants real storage with a
+few GiB free rather than tmpfs, and `~/.cache/boomerangz-integration` is not
+scratch - it is the base image cache, and removing it costs a full image
+download and provision on the next run.
+
+Stop what you started. A run is a QEMU guest plus whatever is watching its
+log, and neither ends on its own: when a run finishes, is superseded, or is
+abandoned, stop the run and the watcher in the same breath. A tail left on a
+finished run's log reports nothing and hides nothing, but an orphaned QEMU
+holds a multi-gigabyte image open and a stalled shell can hold a pending
+`git` invocation behind a prompt that will never be answered. Check for both
+before starting the next run rather than after the third one.
+
 `test/integration/README.md` carries the coverage ledger: one line per
 behavior axis, naming the test that owns it, and naming the axes nothing owns
 yet. A change that adds, moves, or removes an integration behavior updates the
