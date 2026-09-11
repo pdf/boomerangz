@@ -56,6 +56,32 @@ printf 'kernel=%s\n' "$(uname -r)"
 pacman -Q linux-cachyos-lts linux-cachyos-lts-zfs zfs-utils
 printf 'zfs_module=%s\n' "$(modinfo -F version zfs)"
 
+# The probes below need a volume child carrying real bulk: the recursive send
+# has to move a zvol as well as a filesystem, and the resume probe truncates
+# that stream at 4M to force an interrupted receive. The suites no longer share
+# a payload built by bootstrap.sh, so this script owns one for its own run.
+# Creating it here as the service account also exercises the delegated
+# volsize/volblocksize/refreservation permissions before any Go test does.
+readonly payload=$source/matrix-payload
+readonly payload_device=/dev/zvol/$payload
+readonly child=$source/matrix-child
+cleanup_fixtures() {
+	zfs destroy -R "$payload" 2>/dev/null || true
+	zfs destroy -R "$child" 2>/dev/null || true
+}
+trap cleanup_fixtures EXIT
+# mountpoint=none is inherited from $source, so this needs no mountpoint
+# permission the service account has not been delegated.
+zfs create -u "$child"
+zfs create -s -V 256M -b 128K "$payload"
+udevadm settle
+for _ in {1..50}; do
+	[[ -e $payload_device ]] && break
+	sleep 0.1
+done
+[[ -e $payload_device ]] || fail "zvol device was not created: $payload_device"
+dd if=/dev/urandom of="$payload_device" bs=1M count=32 status=none
+
 zfs snapshot -o org.boomerangz:state:snapshot=matrix "$source@lifecycle"
 zfs hold boomerangz-matrix "$source@lifecycle"
 if zfs destroy "$source@lifecycle" 2>/dev/null; then
@@ -82,7 +108,7 @@ zfs snapshot -r "$source@recursive-a"
 zfs send -R "$source@recursive-a" | zfs receive -u "$destination/recursive"
 [[ $(zfs get -H -o value mountpoint "$destination/recursive") == none ]] ||
 	fail "recursive receive did not retain mountpoint=none"
-zfs list -H -o name "$destination/recursive/child" "$destination/recursive/payload" >/dev/null
+zfs list -H -o name "$destination/recursive/matrix-child" "$destination/recursive/matrix-payload" >/dev/null
 printf 'recursive=pass\n'
 
 zfs snapshot "$source@properties-a"

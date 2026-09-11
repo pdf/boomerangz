@@ -79,6 +79,22 @@ func TestCheckPermissionsReportsSortedMissingPermissions(t *testing.T) {
 	}
 }
 
+// A dataset with nothing delegated at or above it makes `zfs allow` print
+// nothing. Reporting that as unreadable output hides the one diagnostic an
+// operator can act on: which account is missing which permissions where.
+func TestCheckPermissionsReportsEveryPermissionMissingWhenNothingIsDelegated(t *testing.T) {
+	zfsRunner := &fakeRunner{output: []byte("")}
+	identity := &sequenceRunner{outputs: [][]byte{[]byte("1000\n"), []byte("boomerangz\n"), []byte("boomerangz storage\n")}}
+	direct, err := NewDirectWithRunnersAndIdentity(zfsRunner, &fakeRunner{}, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = direct.CheckPermissions(t.Context(), "tank", []string{"create", "receive:append"})
+	if err == nil || err.Error() != "effective account boomerangz lacks delegated ZFS permissions on tank: create,receive:append" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestCheckPermissionsAllowsRootWithoutDelegationQuery(t *testing.T) {
 	zfsRunner := &fakeRunner{}
 	identity := &sequenceRunner{outputs: [][]byte{[]byte("0\n")}}

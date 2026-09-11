@@ -181,9 +181,10 @@ func parsePermissionBlocks(output []byte) ([]permissionBlock, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	if len(blocks) == 0 {
-		return nil, fmt.Errorf("delegation output contains no permission setpoint")
-	}
+	// A dataset with no delegations at or above it prints nothing at all.
+	// That is a well-formed answer meaning "nothing is granted here", not
+	// unreadable output: any non-empty line outside a setpoint block has
+	// already been rejected above.
 	return blocks, nil
 }
 

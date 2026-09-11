@@ -153,7 +153,7 @@ func waitForTransferSuccesses(t *testing.T, runtime *daemon.Runtime, jobs []stri
 func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_DAEMON_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_DAEMON_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
 	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
@@ -177,6 +177,7 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 	child := source + "/child"
 	command("create", "-u", source)
 	command("create", "-u", child)
+	zfstest.RegisterCleanup(t, source)
 	command("set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x1m", source)
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
@@ -204,7 +205,10 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		t.Fatalf("timed out waiting for %s", description)
+		// The queue view says which job the daemon is actually on, which is
+		// the difference between "the behaviour is wrong" and "another
+		// dataset's work was ahead of this one".
+		t.Fatalf("timed out waiting for %s: %+v", description, runtime.Status())
 	}
 	waitFor("scheduled source and descendant snapshots", func() bool {
 		sourceState, sourceErr := direct.InspectState(t.Context(), source, false)
@@ -256,7 +260,7 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 func TestGuestLocalTransferConcurrency(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_DAEMON_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_DAEMON_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
 	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
@@ -285,6 +289,8 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	command("create", "-u", left)
 	command("create", "-u", right)
 	command("create", "-u", target)
+	zfstest.RegisterCleanup(t, root)
+	zfstest.RegisterCleanup(t, target)
 	command("set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x1h", policy.Namespace+"local="+target, policy.Namespace+"discard=first", root)
 
 	direct, err := zfs.NewDirect("zfs")
@@ -367,7 +373,7 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 func TestGuestRemoteOutageReconnection(t *testing.T) {
 	runID := os.Getenv("BOOMERANGZ_DAEMON_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_DAEMON_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	remoteHost := os.Getenv("BOOMERANGZ_REMOTE_GUEST_HOST")
 	remoteRoot := os.Getenv("BOOMERANGZ_REMOTE_GUEST_ROOT")
@@ -408,6 +414,7 @@ func TestGuestRemoteOutageReconnection(t *testing.T) {
 	}
 	source := sourcePool + "/data/outage-" + time.Now().UTC().Format("150405000")
 	command("create", "-u", source)
+	zfstest.RegisterCleanup(t, source)
 	command("set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x1m", policy.Namespace+"remote=home", source)
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {

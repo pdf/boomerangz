@@ -35,7 +35,7 @@ func BenchmarkGuestRemoteTransfer(b *testing.B) {
 func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 	runID := os.Getenv("BOOMERANGZ_REMOTE_GUEST_RUN")
 	if runID == "" {
-		t.Skip("disposable guest only")
+		t.Fatal("BOOMERANGZ_REMOTE_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
 	}
 	key := os.Getenv("BOOMERANGZ_REMOTE_GUEST_KEY")
 	shellPath := os.Getenv("BOOMERANGZ_REMOTE_GUEST_CLI")
@@ -67,7 +67,17 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sshDirectory, "known_hosts"), hostKey, 0600); err != nil {
+	// Append: known_hosts is shared with the runner, which seeds entries for
+	// ports this test does not use. Truncating it here made the daemon stage
+	// depend on running after this one.
+	knownHosts, err := os.OpenFile(filepath.Join(sshDirectory, "known_hosts"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := knownHosts.Write(hostKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := knownHosts.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -80,7 +90,7 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := sourcePool + "/data/payload"
+	source := zfstest.PayloadVolume(t, zfstest.FixtureName(sourcePool, "remote"), 256, 32)
 	suffix := time.Now().UTC().Format("150405")
 	command := func(args ...string) {
 		t.Helper()
@@ -107,7 +117,7 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 	if restrictedUser == "" {
 		restrictedUser = directUser
 	}
-	runSSH := func(mode, root string) transfer.Result {
+	runSSH := func(t testing.TB, mode, root string) transfer.Result {
 		t.Helper()
 		user := directUser
 		if mode == "ssh-shell" {
@@ -142,7 +152,7 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 				b.ResetTimer()
 				for index := range b.N {
 					root := destinationPool + "/data/benchmark-" + mode + "-" + benchmarkSuffix + "-" + strconv.Itoa(index)
-					result := runSSH(mode, root)
+					result := runSSH(b, mode, root)
 					b.SetBytes(int64(result.Progress.Bytes))
 				}
 				b.StopTimer()
@@ -150,15 +160,18 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 			continue
 		}
 		root := destinationPool + "/data/remote-" + mode + "-" + suffix
-		result := runSSH(mode, root)
+		zfstest.RegisterCleanup(t, root)
+		result := runSSH(t, mode, root)
 		if result.Plan.TargetBinding.Transport != "ssh" || !strings.HasPrefix(result.Plan.TargetBinding.CanonicalTarget, "ssh://") {
 			t.Fatalf("%s target binding=%+v", mode, result.Plan.TargetBinding)
 		}
 	}
 
-	runNative := func(roots []string, execute func(int, func(string) transfer.Result)) {
-		t.Helper()
-		pkiDir := t.TempDir()
+	// Takes the TB to report against: under benchmark.Run the failures below
+	// belong to the sub-benchmark, not to the parent that built the closure.
+	runNative := func(tb testing.TB, roots []string, execute func(int, func(string) transfer.Result)) {
+		tb.Helper()
+		pkiDir := tb.TempDir()
 		nativeConfig := config.Defaults()
 		nativeConfig.Paths.SocketPath = filepath.Join(pkiDir, "control.sock")
 		nativeConfig.Paths.IdentityDir = filepath.Join(pkiDir, "identity")
@@ -166,42 +179,42 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 		nativeConfig.Listeners["replication"] = listenerConfig
 		server, startErr := control.StartServerWithReplication(nativeConfig, nil, direct, "zfs", nil)
 		if startErr != nil {
-			t.Fatal(startErr)
+			tb.Fatal(startErr)
 		}
 		defer func() { _ = server.Close() }()
 		addresses := server.Addresses("tcp")
 		if len(addresses) != 1 {
-			t.Fatalf("native listener addresses=%v", addresses)
+			tb.Fatalf("native listener addresses=%v", addresses)
 		}
 		_, port, splitErr := net.SplitHostPort(addresses[0])
 		if splitErr != nil {
-			t.Fatal(splitErr)
+			tb.Fatal(splitErr)
 		}
 		listenerConfig.AdvertisedAddress = net.JoinHostPort("localhost", port)
 		store, storeErr := control.NewTokenStore(nativeConfig.Paths.IdentityDir)
 		if storeErr != nil {
-			t.Fatal(storeErr)
+			tb.Fatal(storeErr)
 		}
 		bundle, pairingErr := control.CreateListenerPairing(store, nativeConfig.Paths.IdentityDir, "replication", listenerConfig, "", "", []string{"replicate"}, nil)
 		if pairingErr != nil {
-			t.Fatal(pairingErr)
+			tb.Fatal(pairingErr)
 		}
 		transferRoot := func(root string) transfer.Result {
-			nativeEndpoint, openErr := replicationnative.Open(t.Context(), bundle, root, "zfs")
+			nativeEndpoint, openErr := replicationnative.Open(tb.Context(), bundle, root, "zfs")
 			if openErr != nil {
-				t.Fatal(openErr)
+				tb.Fatal(openErr)
 			}
 			nativeRequest := transfer.Request{Source: source, DestinationRoot: root, Snapshot: source + "@" + metadata.Name(), Policy: effective, Transport: "native", RemoteName: "home", CanonicalTarget: nativeEndpoint.CanonicalTarget()}
 			nativeEngine, engineErr := transfer.NewRemote(direct, nativeEndpoint.Executor(), nativeEndpoint.Stream(), installation)
 			if engineErr != nil {
-				t.Fatal(engineErr)
+				tb.Fatal(engineErr)
 			}
-			nativeResult, applyErr := nativeEngine.Apply(t.Context(), nativeRequest, nil)
+			nativeResult, applyErr := nativeEngine.Apply(tb.Context(), nativeRequest, nil)
 			if applyErr != nil || !nativeResult.Verified || nativeResult.Plan.TargetBinding.Transport != "native" {
-				t.Fatalf("native result=%+v err=%v", nativeResult, applyErr)
+				tb.Fatalf("native result=%+v err=%v", nativeResult, applyErr)
 			}
 			if closeErr := nativeEndpoint.Close(); closeErr != nil {
-				t.Fatal(closeErr)
+				tb.Fatal(closeErr)
 			}
 			return nativeResult
 		}
@@ -214,7 +227,7 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 			for index := range b.N {
 				roots[index] = destinationPool + "/data/benchmark-native-" + benchmarkSuffix + "-" + strconv.Itoa(index)
 			}
-			runNative(roots, func(count int, transferRoot func(string) transfer.Result) {
+			runNative(b, roots, func(count int, transferRoot func(string) transfer.Result) {
 				b.ResetTimer()
 				for index := range count {
 					result := transferRoot(roots[index])
@@ -226,7 +239,8 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 		return
 	}
 	nativeRoot := destinationPool + "/data/remote-native-" + suffix
-	runNative([]string{nativeRoot}, func(_ int, transferRoot func(string) transfer.Result) {
+	zfstest.RegisterCleanup(t, nativeRoot)
+	runNative(t, []string{nativeRoot}, func(_ int, transferRoot func(string) transfer.Result) {
 		transferRoot(nativeRoot)
 	})
 

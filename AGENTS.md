@@ -13,10 +13,54 @@ repo is held to - `go test`, a `CGO_ENABLED=1 -race` build, `go vet`,
 and `shellcheck`. A bare `go test ./...` is a narrower bar; do not report
 work as verified against it.
 
-Integration tests under `test/integration/` need the `integration` build tag,
-a real ZFS pool, and a disposable QEMU guest. They are never part of
-`go test ./...`. Use `make integration-test-compile` to check they still
-build without running them.
+Integration tests under `test/integration/` carry the `integration` build tag
+and are never part of `go test ./...`. Run them with `make integration-test`,
+which builds a disposable QEMU guest, creates real pools inside it, and
+destroys them on the way out - it needs QEMU and `/dev/kvm`, but not root on
+the host and not a pool on the host. `make integration-package-test` and
+`make integration-benchmark` drive the same harness in their other modes.
+
+Run the suite for any change under `test/integration/`, and for changes to
+replication, transfer, or lifecycle behavior that a real kernel module would
+exercise. It takes a guest boot per run, so `make integration-test-compile`
+is the quick check that they still build - it is a compile gate, not
+verification, and work is not verified against it.
+
+A run can be narrowed while iterating.
+`BOOMERANGZ_INTEGRATION_STAGES=control make integration-test` runs one stage
+(`lifecycle`, `transfer`, `daemon`, `control`, comma- or space-separated), and
+`BOOMERANGZ_INTEGRATION_FILTER=<regex>` passes a `-test.run` regex to the
+stages that do run. Narrowing the suite means a green result covers only the
+tests that were selected, so a filtered run prints
+`PARTIAL RUN - NOT VERIFICATION` at both ends and in every stage summary. Like
+`integration-test-compile` it is a development aid, not verification, and work
+is not verified against it - only an unfiltered `make integration-test` is.
+CI sets neither variable.
+
+Clean up after every run, including interrupted ones. The harness destroys the
+pools inside the guest but never removes its own run root, so each run leaves
+roughly 1.7 GiB under `$RUNNER_TEMP/boomerangz-integration/<run-id>/` - a copy
+of the guest system image, both pool disks, and the cross-compiled test
+binaries - and nothing prunes it. Only `diagnostics/` is worth keeping
+afterwards: the console logs, the guest environment, and `failure.txt` when a
+run failed. Delete the rest. `RUNNER_TEMP` therefore wants real storage with a
+few GiB free rather than tmpfs, and `~/.cache/boomerangz-integration` is not
+scratch - it is the base image cache, and removing it costs a full image
+download and provision on the next run.
+
+Stop what you started. A run is a QEMU guest plus whatever is watching its
+log, and neither ends on its own: when a run finishes, is superseded, or is
+abandoned, stop the run and the watcher in the same breath. A tail left on a
+finished run's log reports nothing and hides nothing, but an orphaned QEMU
+holds a multi-gigabyte image open and a stalled shell can hold a pending
+`git` invocation behind a prompt that will never be answered. Check for both
+before starting the next run rather than after the third one.
+
+`test/integration/README.md` carries the coverage ledger: one line per
+behavior axis, naming the test that owns it, and naming the axes nothing owns
+yet. A change that adds, moves, or removes an integration behavior updates the
+ledger in the same change - it is how "is this tested?" gets answered without
+reading the suite, and it is worth reading only while it is true.
 
 Generated protobuf `.pb.go` files are committed. Regenerate with
 `go tool buf generate` (covered by `make test`'s diff-check) rather than
@@ -71,3 +115,5 @@ tooling or assistant attribution in commit messages or PR descriptions.
   properties, ownership, and lifecycle semantics; its Section 12 package tree
   is stale. Prefer the code and ARCHITECTURE.md for current structure.
 - `internal/cli/commands.go` - the whole CLI surface at a glance.
+- [test/integration/README.md](test/integration/README.md) - what the
+  integration suite owns, what it does not, and how a run is structured.

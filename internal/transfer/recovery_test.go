@@ -136,9 +136,24 @@ func TestRoadwarriorRetriesOnlyTemporaryFailures(t *testing.T) {
 	if err == nil || outcome.Status != "waiting-retry" || !outcome.NotBefore.Equal(now.Add(5*time.Second)) {
 		t.Fatalf("outcome=%+v err=%v", outcome, err)
 	}
+	if outcome.Reason != "offline" {
+		t.Fatalf("temporary failure did not carry its reason: %+v", outcome)
+	}
+	// An attempt before the deadline reports no error of its own. It must still
+	// name the failure that set the deadline: the daemon keeps only the latest
+	// event per job, so a bare status here erases the cause from status output.
 	outcome, err = recovery.Reconcile(t.Context(), nil)
 	if err != nil || outcome.Status != "waiting-retry" || len(engine.calls) != 1 {
 		t.Fatalf("early retry outcome=%+v err=%v calls=%d", outcome, err, len(engine.calls))
+	}
+	if outcome.Reason != "offline" {
+		t.Fatalf("early retry lost the failure reason: %+v", outcome)
+	}
+
+	// The caller that owns scheduling reads the deadline rather than running
+	// an attempt to be told there is one.
+	if !recovery.NotBefore().Equal(now.Add(5 * time.Second)) {
+		t.Fatalf("backoff deadline not reported: %s", recovery.NotBefore())
 	}
 
 	blocked := &scriptedApply{results: []Result{{}}, errors: []error{errors.New("identity mismatch")}}
@@ -146,5 +161,9 @@ func TestRoadwarriorRetriesOnlyTemporaryFailures(t *testing.T) {
 	outcome, err = recovery.Reconcile(t.Context(), nil)
 	if err == nil || outcome.Status != "blocked" || !outcome.NotBefore.IsZero() {
 		t.Fatalf("blocked outcome=%+v err=%v", outcome, err)
+	}
+	// A target that will not be retried has no deadline to wait for.
+	if !recovery.NotBefore().IsZero() {
+		t.Fatal("a blocked target must not report a retry deadline")
 	}
 }

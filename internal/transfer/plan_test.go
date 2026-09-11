@@ -335,3 +335,35 @@ func TestBuildRecursiveEndpointsAndNamespaceExclusions(t *testing.T) {
 		t.Fatalf("recursive plan=%v", plan)
 	}
 }
+
+// An encrypted source with props=on must be refused unless raw is also on,
+// because a property stream carries the encryption parameters the receiving
+// side is not allowed to reinterpret. policy.Resolve forces raw on for an
+// encrypted source, so reaching this guard takes an explicit raw=off, and the
+// planner is the last thing standing between that combination and a send.
+func TestBuildRefusesEncryptedPropertyStreamWithoutRaw(t *testing.T) {
+	t.Parallel()
+	request, view := testFixture(t)
+	source := zfs.Dataset{Name: "tank/data", Type: zfs.Filesystem, EncryptionRoot: "tank/data"}
+	view.Inventory[1] = source
+	properties := append(view.Source.Properties,
+		zfs.Property{Dataset: source.Name, Name: policy.Namespace + "props", Value: "on", Source: zfs.SourceLocal},
+		zfs.Property{Dataset: source.Name, Name: policy.Namespace + "raw", Value: "off", Source: zfs.SourceLocal},
+	)
+	request.Policy = policy.Resolve(source, nil, properties, nil)
+	if !request.Policy.Send.Props || request.Policy.Send.Raw {
+		t.Fatalf("fixture did not reach the guard: props=%t raw=%t", request.Policy.Send.Props, request.Policy.Send.Raw)
+	}
+	if _, err := Build(request, view, fixtureInstallation); err == nil || !strings.Contains(err.Error(), "raw mode") {
+		t.Fatalf("encrypted props without raw: err=%v", err)
+	}
+	// The same source with raw restored must plan normally, so the refusal is
+	// attributable to the combination rather than to encryption alone.
+	request.Policy = policy.Resolve(source, nil, view.Source.Properties, nil)
+	if !request.Policy.Send.Raw {
+		t.Fatal("raw was not defaulted on for an encrypted source")
+	}
+	if _, err := Build(request, view, fixtureInstallation); err != nil {
+		t.Fatalf("encrypted raw plan: %v", err)
+	}
+}

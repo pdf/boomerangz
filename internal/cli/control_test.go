@@ -112,3 +112,26 @@ func TestControlCommandsUseRunningDaemon(t *testing.T) {
 		t.Fatalf("reload=%s", reloadOutput.String())
 	}
 }
+
+// TestStatusRendererSelection pins the rule that decides between the terminal
+// and JSON renderings of `status`.
+//
+// The terminal rendering itself is covered in internal/statusui, and the
+// integration suite cannot reach it at all: a test harness gives the command
+// a pipe, not a terminal. What is left to pin here is the selector, and the
+// property that matters operationally is its negative half - a redirected or
+// piped `status` stays machine-readable.
+func TestStatusRendererSelection(t *testing.T) {
+	t.Parallel()
+	if interactive, width := terminalWidth(&bytes.Buffer{}); interactive || width != 0 {
+		t.Fatalf("a writer that is not a file reported interactive=%v width=%d", interactive, width)
+	}
+	file, err := os.CreateTemp(t.TempDir(), "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	if interactive, width := terminalWidth(file); interactive || width != 0 {
+		t.Fatalf("a redirected file reported interactive=%v width=%d", interactive, width)
+	}
+}

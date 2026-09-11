@@ -10,6 +10,9 @@ readonly repository
 readonly target=${1:?usage: run.sh TARGET}
 readonly release_dir=${BOOMERANGZ_RELEASE_DIR:-}
 readonly integration_mode=${BOOMERANGZ_INTEGRATION_MODE:-test}
+readonly integration_stages=${BOOMERANGZ_INTEGRATION_STAGES:-}
+readonly integration_filter=${BOOMERANGZ_INTEGRATION_FILTER:-}
+readonly partial_run_banner='PARTIAL RUN - NOT VERIFICATION'
 
 [[ $target =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
 	printf 'boomerangz integration: invalid target %q\n' "$target" >&2
@@ -19,6 +22,22 @@ readonly integration_mode=${BOOMERANGZ_INTEGRATION_MODE:-test}
 	printf 'boomerangz integration: invalid mode %q\n' "$integration_mode" >&2
 	exit 1
 }
+if [[ -n $integration_stages || -n $integration_filter ]]; then
+	[[ $integration_mode == test ]] || {
+		printf 'boomerangz integration: stage and test filters apply to test mode only, not %q\n' \
+			"$integration_mode" >&2
+		exit 1
+	}
+fi
+readonly stage_lister=$repository/test/integration/guest/run-common.sh
+for requested in ${integration_stages//,/ }; do
+	"$stage_lister" --list-stages | grep -qxF -- "$requested" || {
+		printf 'boomerangz integration: unknown stage %q; known stages: %s\n' \
+			"$requested" "$("$stage_lister" --list-stages | tr '\n' ' ')" >&2
+		exit 1
+	}
+done
+
 readonly target_dir=$repository/test/integration/targets/$target
 [[ -f $target_dir/config.sh ]] || {
 	printf 'boomerangz integration: unknown target %q\n' "$target" >&2
@@ -40,6 +59,11 @@ readonly source_image=$run_root/source.qcow2
 readonly destination_image=$run_root/destination.qcow2
 readonly seed_image=$run_root/seed.img
 readonly guest_artifacts=/var/tmp/boomerangz-integration-$run_id
+# Base images are shared across runs rather than re-downloaded per run ID.
+# On CI this is a per-job directory and so always a miss, which is fine - the
+# point is local iteration, where the run root is fresh every time.
+readonly image_cache=${BOOMERANGZ_IMAGE_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/boomerangz-integration}
+readonly base_image=$image_cache/$target_image_name
 
 qemu_pid=
 boot_index=0
@@ -62,6 +86,16 @@ record_failure() {
 	trap - ERR
 	printf 'failed_command=%q\nfailed_line=%s\nexit_status=%s\n' "$BASH_COMMAND" "$1" "$status" >"$diagnostics/failure.txt"
 	return "$status"
+}
+
+# A filtered run narrows the suite, so a green result covers only the tests
+# that were selected. Say so at both ends of the run, where it cannot be
+# mistaken for the verifying run CI performs.
+announce_partial_run() {
+	[[ -n $integration_stages || -n $integration_filter ]] || return 0
+	printf '=== %s (%s) ===\n' "$partial_run_banner" "$1"
+	printf 'stages: %s\nfilter: %s\n' \
+		"${integration_stages:-all}" "${integration_filter:-none}"
 }
 
 stop_qemu() {
@@ -188,10 +222,30 @@ done
 
 uname -a >"$diagnostics/host-uname.txt"
 "$target_qemu_binary" --version >"$diagnostics/qemu-version.txt"
-curl --fail --location --silent --show-error "$target_image_url" --output "$run_root/$target_image_name"
-printf '%s  %s\n' "$target_image_sha256" "$run_root/$target_image_name" | sha256sum --check
-chmod 0444 "$run_root/$target_image_name"
-"$target_dir/prepare-image.sh" "$run_root/$target_image_name" "$system_image" "$target_system_size"
+# The adapter pins the base image's sha256, so that check doubles as the cache
+# validator: a cached file is used only while it still matches, and a version
+# bump changes both the name and the hash. prepare-image.sh makes system.img a
+# qcow2 backing-file reference to this path, so it must stay readable for the
+# whole run rather than be consumed like scratch.
+mkdir -p "$image_cache"
+if printf '%s  %s\n' "$target_image_sha256" "$base_image" | sha256sum --status --check - 2>/dev/null; then
+	printf 'boomerangz integration: reusing cached %s\n' "$target_image_name"
+else
+	download=$(mktemp "$image_cache/.$target_image_name.XXXXXX")
+	curl --fail --location --silent --show-error "$target_image_url" --output "$download" || {
+		rm -f -- "$download"
+		fail "could not download $target_image_url"
+	}
+	printf '%s  %s\n' "$target_image_sha256" "$download" | sha256sum --check || {
+		rm -f -- "$download"
+		fail "base image checksum mismatch for $target_image_name"
+	}
+	chmod 0444 "$download"
+	# Rename inside the cache directory so a concurrent run sees either the
+	# previous file or the complete new one, never a partial download.
+	mv -f -- "$download" "$base_image"
+fi
+"$target_dir/prepare-image.sh" "$base_image" "$system_image" "$target_system_size"
 qemu-img create -f qcow2 "$source_image" 2G
 qemu-img create -f qcow2 "$destination_image" 2G
 
@@ -226,7 +280,6 @@ ssh_guest 'uname -a; cat /etc/os-release; lsblk -o NAME,SIZE,TYPE,SERIAL' >"$dia
 if [[ $integration_mode != package ]]; then
 	cp "$repository/test/integration/guest/bootstrap.sh" "$artifacts/"
 	cp "$repository/test/integration/guest/delegated-matrix.sh" "$artifacts/"
-	cp "$repository/test/integration/guest/property-layers.sh" "$artifacts/"
 	cp "$repository/test/integration/guest/run-common.sh" "$artifacts/"
 	cp "$repository/contrib/systemd/boomerangz.service" "$artifacts/"
 	cp "$repository/contrib/boomerangz-shell" "$artifacts/"
@@ -241,7 +294,11 @@ fi
 copy_to_guest "$artifacts" "$target_dir/run.sh"
 ssh_guest "mv /home/$target_guest_user/integration/run.sh /home/$target_guest_user/integration/target/run.sh"
 ssh_guest "sudo mv /home/$target_guest_user/integration/artifacts $guest_artifacts"
-ssh_guest "BOOMERANGZ_INTEGRATION_RUN=$run_id BOOMERANGZ_INTEGRATION_MODE=$integration_mode /home/$target_guest_user/integration/target/run.sh $guest_artifacts $run_id $target_source_device $target_destination_device" | tee "$diagnostics/test-output.txt"
+announce_partial_run start
+ssh_guest "BOOMERANGZ_INTEGRATION_RUN=$run_id BOOMERANGZ_INTEGRATION_MODE=$integration_mode \
+ BOOMERANGZ_INTEGRATION_STAGES=$(printf '%q' "$integration_stages") \
+ BOOMERANGZ_INTEGRATION_FILTER=$(printf '%q' "$integration_filter") \
+ /home/$target_guest_user/integration/target/run.sh $guest_artifacts $run_id $target_source_device $target_destination_device" | tee "$diagnostics/test-output.txt"
 
 ssh_guest "$target_poweroff_command" || true
 for _ in {1..60}; do
@@ -249,3 +306,4 @@ for _ in {1..60}; do
 	sleep 1
 done
 stop_qemu
+announce_partial_run end
