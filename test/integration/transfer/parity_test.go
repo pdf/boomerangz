@@ -513,6 +513,109 @@ exec zfs "$@"
 					t.Fatalf("successful recovery retained resume token: %v", state.ResumeTokens)
 				}
 			})
+
+			// Self-contained: its own root, its own source tree, and its own
+			// canonical target, so it reports whatever the chain above did.
+			// TestGuestLocalTransfer/recursive-mapping owns this behaviour
+			// locally; what a remote adds is that the destination inventory,
+			// the ancestor preparation and the scope filters all run through
+			// the transport - and a recursive receive is the first thing that
+			// asks those filters about children rather than about the root.
+			t.Run("recursive-mapping", func(t *testing.T) {
+				for _, discard := range []string{"first", "all"} {
+					t.Run(discard, func(t *testing.T) {
+						// Mapping is part of the persistent target binding,
+						// so each discard mode gets its own source root and
+						// its own destination root rather than rebinding one
+						// source when its policy changes.
+						recursiveRoot := root + "/recursive-" + discard
+						command(t, "create", "-u", recursiveRoot)
+						tree := zfstest.FixtureName(sourcePool, "parity-recursive-"+discard)
+						command(t, "create", "-u", tree)
+						command(t, "create", "-u", tree+"/child")
+						zfstest.RegisterCleanup(t, tree)
+						// A recursive snapshot boomerangz does not own, taken
+						// before the ones it does.
+						command(t, "snapshot", "-r", tree+"@foreign-recursive")
+						command(t, "set",
+							policy.Namespace+"enabled=on",
+							policy.Namespace+"replicate=on",
+							policy.Namespace+"discard="+discard,
+							policy.Namespace+"remote=home",
+							policy.Namespace+"local="+recursiveRoot,
+							tree)
+						target := transport.open(t, recursiveRoot, "zfs")
+						recursiveRequest := func(t *testing.T) transfer.Request {
+							t.Helper()
+							return request(t, target, tree, zfs.Filesystem, "")
+						}
+						bootstrap, snapErr := snapshots.CreateSnapshot(t.Context(), tree, true, now,
+							recursiveRequest(t).Policy)
+						if snapErr != nil {
+							t.Fatal(snapErr)
+						}
+						result, applyErr := target.engine.Apply(t.Context(), recursiveRequest(t), nil)
+						if applyErr != nil || !result.Verified || result.Plan.Mode != "full" {
+							t.Fatalf("recursive %s bootstrap=%+v err=%v", discard, result, applyErr)
+						}
+						mapped := result.Plan.Destination
+						// Read the destination with the local executor: the
+						// guest is both hosts, so this reads the pool the
+						// remote side wrote rather than trusting the view
+						// that wrote it. command fatals on a missing dataset,
+						// so naming the snapshot is the assertion.
+						for _, dataset := range []string{mapped, mapped + "/child"} {
+							command(t, "list", "-H", "-o", "name", dataset+"@"+bootstrap.Name())
+						}
+						// discard=first maps below an intermediate that does
+						// not exist yet, so the transport has to create it;
+						// discard=all maps directly under the root, which is
+						// the case CreateReceiveParent must refuse to touch.
+						ancestor, prepared := recursiveRoot+"/data", discard == "first"
+						if prepared != strings.HasPrefix(mapped, ancestor+"/") {
+							t.Fatalf("discard=%s mapped to %s, want an ancestor of %s prepared=%v", discard, mapped, ancestor, prepared)
+						}
+						if prepared {
+							if got := command(t, "get", "-H", "-o", "value", "canmount", ancestor); got != "noauto" {
+								t.Fatalf("prepared receive ancestor %s canmount=%s, want noauto", ancestor, got)
+							}
+						}
+
+						follow, snapErr := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(time.Minute),
+							recursiveRequest(t).Policy)
+						if snapErr != nil {
+							t.Fatal(snapErr)
+						}
+						result, applyErr = target.engine.Apply(t.Context(), recursiveRequest(t), nil)
+						if applyErr != nil || !result.Verified || result.Plan.Mode != "incremental-all" {
+							t.Fatalf("recursive %s incremental=%+v err=%v", discard, result, applyErr)
+						}
+						// The sibling bases a recursive incremental gathers
+						// come from the destination inventory the transport
+						// reports, so the child carrying the follow-up is
+						// what proves that inventory was right.
+						for _, dataset := range []string{mapped, mapped + "/child"} {
+							command(t, "list", "-H", "-o", "name", dataset+"@"+follow.Name())
+						}
+
+						// The refusal below has to be attributable to the
+						// planted snapshot rather than to any fault in the
+						// transport, so preview the identical request first
+						// and require a real plan back.
+						if _, snapErr := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(2*time.Minute),
+							recursiveRequest(t).Policy); snapErr != nil {
+							t.Fatal(snapErr)
+						}
+						if plan, previewErr := target.engine.Preview(t.Context(), recursiveRequest(t)); previewErr != nil || plan.Mode != "incremental-all" {
+							t.Fatalf("recursive %s control preview=%+v err=%v", discard, plan, previewErr)
+						}
+						command(t, "snapshot", mapped+"@foreign-destination")
+						if plan, previewErr := target.engine.Preview(t.Context(), recursiveRequest(t)); previewErr == nil {
+							t.Fatalf("accepted a foreign snapshot on the recursive destination: %+v", plan)
+						}
+					})
+				}
+			})
 		})
 	}
 }
