@@ -8,6 +8,13 @@
 [![Release](https://img.shields.io/github/v/release/pdf/boomerangz)](https://github.com/pdf/boomerangz/releases/latest)
 [![License](https://img.shields.io/github/license/pdf/boomerangz)](LICENSE)
 [![AUR](https://img.shields.io/aur/version/boomerangz?logo=archlinux)](https://aur.archlinux.org/packages/boomerangz)
+[![Status: alpha](https://img.shields.io/badge/status-alpha-orange)](#alpha-software)
+
+> [!WARNING]
+> <a id="alpha-software"></a>**Alpha software.** Boomerangz is under active
+> development. Commands, configuration, and on-disk state may change
+> incompatibly between releases, and it has not yet seen wide production use.
+> Keep independent backups of anything you protect with it.
 
 Boomerangz manages OpenZFS snapshots and local or remote replication, including
 systems whose backup destinations are not always online.

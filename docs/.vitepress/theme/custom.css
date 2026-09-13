@@ -30,3 +30,25 @@
   display: table;
   width: 100%;
 }
+
+.home-alpha-notice {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 24px 24px 0;
+}
+
+@media (min-width: 640px) {
+  .home-alpha-notice {
+    padding: 24px 48px 0;
+  }
+}
+
+@media (min-width: 960px) {
+  .home-alpha-notice {
+    padding: 32px 64px 0;
+  }
+}
+
+.home-alpha-notice .alpha-notice {
+  margin: 0;
+}
