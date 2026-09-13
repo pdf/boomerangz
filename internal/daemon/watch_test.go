@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -200,38 +201,50 @@ func nextWatchMessage(t *testing.T, stream controlrpc.StatusService_WatchStatusC
 	}
 }
 
-// TestWatchStatusReflectsViewChangesWithoutATransition holds a watch while a
-// queue drops work and the runtime activates a dataset, neither of which is a
-// job transition. The watcher's snapshot reflects each as it happens rather
-// than when some unrelated job next moves.
-func TestWatchStatusReflectsViewChangesWithoutATransition(t *testing.T) {
-	t.Parallel()
-	status := NewStatus(nil)
-	// The pool is never started, so its jobs stay queued until removed.
+// queuedJobs returns the job IDs a snapshot lists for one queue.
+func queuedJobs(snapshot *controlrpc.StatusSnapshot, name string) []string {
+	for _, queue := range snapshot.GetQueues() {
+		if queue.GetName() == name {
+			return queue.GetJobIds()
+		}
+	}
+	return nil
+}
+
+// managementPool returns a status pool that is never started, holding one
+// queued job per dataset, so its jobs leave the queue only when the test
+// removes or pops them.
+func managementPool(t *testing.T, status *Status, datasets ...string) *Pool {
+	t.Helper()
 	pool, err := newStatusPool("management", "management", 1, defaultQueueCapacity, status)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, dataset := range []string{"tank/a", "tank/b"} {
+	for _, dataset := range datasets {
 		job := Job{ID: "reconcile:" + dataset, Group: dataset, Scope: dataset, LockKey: dataset, StartState: "reconciling", Run: func(context.Context) Outcome { return Outcome{} }}
 		if added, err := pool.Submit(job); err != nil || !added {
 			t.Fatalf("submit %s: added=%t err=%v", dataset, added, err)
 		}
 	}
+	return pool
+}
+
+// TestWatchStatusReflectsViewChangesWithoutATransition holds a watch while a
+// job is popped from its queue and the runtime activates a dataset, neither of
+// which is a job transition. The watcher's snapshot reflects each as it
+// happens rather than when some unrelated job next moves.
+func TestWatchStatusReflectsViewChangesWithoutATransition(t *testing.T) {
+	t.Parallel()
+	status := NewStatus(nil)
+	pool := managementPool(t, status, "tank/a", "tank/b")
 	_, stream := watchStatus(t, status)
-	queued := func(snapshot *controlrpc.StatusSnapshot) []string {
-		for _, queue := range snapshot.GetQueues() {
-			if queue.GetName() == "management" {
-				return queue.GetJobIds()
-			}
-		}
-		return nil
-	}
-	if removed := pool.RemoveScope("tank/a"); removed != 1 {
-		t.Fatalf("removed %d jobs", removed)
+	// A worker reports the job it popped once it starts it; the pop itself is
+	// only a queue view.
+	if job, ok := pool.queue.Pop(t.Context()); !ok || job.ID != "reconcile:tank/a" {
+		t.Fatalf("popped %q ok=%t", job.ID, ok)
 	}
 	nextWatchMessage(t, stream, func(snapshot *controlrpc.StatusSnapshot) bool {
-		return strings.Join(queued(snapshot), ",") == "reconcile:tank/b"
+		return strings.Join(queuedJobs(snapshot, "management"), ",") == "reconcile:tank/b"
 	})
 	runtime := &Runtime{status: status, known: map[string]bool{"tank/new": true}, active: map[string]bool{"tank/new": true}, recursive: map[string]bool{}}
 	runtime.mu.Lock()
@@ -241,4 +254,46 @@ func TestWatchStatusReflectsViewChangesWithoutATransition(t *testing.T) {
 		datasets := snapshot.GetDatasets()
 		return len(datasets) == 1 && datasets[0].GetName() == "tank/new" && datasets[0].GetActive()
 	})
+}
+
+// TestWatchStatusDeliversRemovedJobsWithTheQueueView removes queued work and
+// requires the message whose queue view no longer lists a job to carry that
+// job's cancelled transition, so no watcher holds a pending row for a job that
+// has left the queue.
+func TestWatchStatusDeliversRemovedJobsWithTheQueueView(t *testing.T) {
+	t.Parallel()
+	status := NewStatus(nil)
+	pool := managementPool(t, status, "tank/a", "tank/b", "tank/c")
+	_, stream := watchStatus(t, status)
+	removal := func(remove func() int, removed []string, reason, remaining string) {
+		t.Helper()
+		if count := remove(); count != len(removed) {
+			t.Fatalf("removed %d jobs, want %d", count, len(removed))
+		}
+		response, err := stream.Recv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(queuedJobs(response.GetStatus(), "management"), ","); got != remaining {
+			t.Fatalf("queue lists %q, want %q", got, remaining)
+		}
+		var cancelled []string
+		for _, transition := range response.GetTransitions() {
+			if transition.GetState() != "cancelled" || transition.GetReason() != reason {
+				t.Fatalf("removal transition = %v", transition)
+			}
+			cancelled = append(cancelled, transition.GetJob())
+		}
+		slices.Sort(cancelled)
+		if !slices.Equal(cancelled, removed) {
+			t.Fatalf("cancelled %v, want %v", cancelled, removed)
+		}
+		for _, job := range removed {
+			if rows := jobRows(response.GetStatus(), job); len(rows) != 1 || rows[0].GetState() != "cancelled" || rows[0].GetQueuePosition() != 0 {
+				t.Fatalf("row for removed job %s = %v", job, rows)
+			}
+		}
+	}
+	removal(func() int { return pool.RemoveScope("tank/a", "dataset deactivated") }, []string{"reconcile:tank/a"}, "dataset deactivated", "reconcile:tank/b,reconcile:tank/c")
+	removal(func() int { return pool.DiscardPending("daemon shutting down") }, []string{"reconcile:tank/b", "reconcile:tank/c"}, "daemon shutting down", "")
 }

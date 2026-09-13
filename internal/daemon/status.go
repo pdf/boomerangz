@@ -75,6 +75,7 @@ type Status struct {
 
 type statusMessage struct {
 	event     *Event        // a transition
+	queued    []Event       // transitions a queue change produced, with its view
 	queue     *queueView    // a pool's queue view, sent under the queue lock
 	deadlines *deadlineView // scheduler deadlines, sent under the scheduler lock
 	runtime   *runtimeView  // the runtime's dataset view, sent under the runtime lock
@@ -131,13 +132,13 @@ func (s *Status) record(event Event) {
 	s.input <- statusMessage{event: &event}
 }
 
-// publishQueue sends a queue view, and the pending transition for the job an
-// offer added, as one message. Callers hold the queue lock.
-func (s *Status) publishQueue(name string, snapshot QueueSnapshot, pending *Event) {
+// publishQueue sends a queue view, and the transitions of the jobs the change
+// added or dropped, as one message. Callers hold the queue lock.
+func (s *Status) publishQueue(name string, snapshot QueueSnapshot, transitions []Event) {
 	if s == nil {
 		return
 	}
-	s.input <- statusMessage{queue: &queueView{name: name, snapshot: snapshot}, event: pending}
+	s.input <- statusMessage{queue: &queueView{name: name, snapshot: snapshot}, queued: transitions}
 }
 
 // publishDeadlines sends detached scheduler deadlines. Callers hold the
@@ -371,16 +372,16 @@ func (o *statusOwner) handle(m statusMessage) {
 		}
 		o.fanOut(nil, nil)
 	default:
-		if transition, discovery, changed := o.apply(m); changed {
-			o.fanOut(transition, discovery)
+		if transitions, discovery, changed := o.apply(m); changed {
+			o.fanOut(transitions, discovery)
 		}
 	}
 }
 
-// apply updates owned state from one input message. It returns the transition
-// to deliver, if the message carried one, the discovery generation to log, if
-// the message applied a new one, and whether the state changed.
-func (o *statusOwner) apply(m statusMessage) (*Event, *discoveryRecord, bool) {
+// apply updates owned state from one input message. It returns the transitions
+// to deliver, in order, the discovery generation to log, if the message
+// applied a new one, and whether the state changed.
+func (o *statusOwner) apply(m statusMessage) ([]Event, *discoveryRecord, bool) {
 	changed := false
 	if m.queue != nil {
 		o.queues[m.queue.name] = m.queue.snapshot
@@ -398,23 +399,29 @@ func (o *statusOwner) apply(m statusMessage) (*Event, *discoveryRecord, bool) {
 		o.runtime = *m.runtime
 		changed = true
 	}
-	var transition *Event
-	if m.event != nil && m.event.Kind == EventTransition {
-		event := *m.event
+	incoming := m.queued
+	if m.event != nil {
+		incoming = append(slices.Clone(incoming), *m.event)
+	}
+	var transitions []Event
+	for _, event := range incoming {
+		if event.Kind != EventTransition {
+			continue
+		}
 		if m.queue != nil {
 			o.jobQueues[event.Job] = m.queue.name
 		}
 		o.stamp(&event)
 		// A transition replaces the row, so leaving sending clears progress.
 		o.jobs[event.Job] = event
-		transition = &event
+		transitions = append(transitions, event)
 		changed = true
 	}
 	if changed {
 		o.revision++
 		o.current = nil
 	}
-	return transition, discovery, changed
+	return transitions, discovery, changed
 }
 
 // applyProgress keeps a sample only while its job is sending, and only under
@@ -481,7 +488,7 @@ func (o *statusOwner) hasRefused() bool {
 // gap in its place, and any other subscription ends. A newly applied discovery
 // generation is delivered to the log alone, which writes it as a record of its
 // own; every other subscriber sees it as state.
-func (o *statusOwner) fanOut(transition *Event, discovery *discoveryRecord) {
+func (o *statusOwner) fanOut(transitions []Event, discovery *discoveryRecord) {
 	for f, record := range o.subscribers {
 		select {
 		case <-f.exited:
@@ -493,21 +500,27 @@ func (o *statusOwner) fanOut(transition *Event, discovery *discoveryRecord) {
 			if discovery != nil {
 				o.deliverLog(f, record, &delivery{discovery: discovery})
 			}
-			var next *delivery
-			if transition != nil {
-				next = &delivery{event: *transition, revision: o.revision}
+			for _, transition := range transitions {
+				o.deliverLog(f, record, &delivery{event: transition, revision: o.revision})
 			}
-			o.deliverLog(f, record, next)
+			// With nothing new, re-offer what the log refused earlier.
+			o.deliverLog(f, record, nil)
 			continue
 		}
-		if transition != nil {
+		refused := false
+		for _, transition := range transitions {
 			select {
-			case f.transitions <- delivery{event: *transition, revision: o.revision}:
-			default:
-				f.overflow()
-				delete(o.subscribers, f)
+			case f.transitions <- delivery{event: transition, revision: o.revision}:
 				continue
+			default:
 			}
+			refused = true
+			break
+		}
+		if refused {
+			f.overflow()
+			delete(o.subscribers, f)
+			continue
 		}
 		// The state channel holds one value and only the owner sends to it,
 		// so once an unread state is taken back the send cannot block.

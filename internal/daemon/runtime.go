@@ -181,7 +181,7 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 	runtime.safety = newSafety(gate, source, clients, liveConfig.Remotes)
 	for _, pool := range []*Pool{management, local, remote} {
 		pool.queue.mu.Lock()
-		pool.queue.observeLocked(nil)
+		pool.queue.observeLocked(queueChange{})
 		pool.queue.mu.Unlock()
 	}
 	runtime.mu.Lock()
@@ -282,7 +282,9 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	_ = r.local.Resize(effective.Daemon.LocalTransferWorkers)
 	_ = r.remote.Resize(effective.Daemon.RemoteTransferWorkers)
 	_ = r.scanner.Reconfigure(effective.Daemon.ReconcileInterval.Duration, prepared.remotes)
-	r.remote.DiscardPending()
+	// Remote work queued under the previous configuration is discarded; a
+	// reload that changed the remotes requeues it below.
+	r.remote.DiscardPending("configuration reloaded")
 	type remoteReconcile struct {
 		dataset string
 		remote  string
@@ -528,9 +530,9 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 
 func (r *Runtime) deactivate(dataset string) {
 	_ = r.gate.SetEnabled(dataset, false)
-	r.management.RemoveScope(dataset)
-	r.local.RemoveScope(dataset)
-	r.remote.RemoveScope(dataset)
+	r.management.RemoveScope(dataset, "dataset deactivated")
+	r.local.RemoveScope(dataset, "dataset deactivated")
+	r.remote.RemoveScope(dataset, "dataset deactivated")
 }
 
 func (r *Runtime) enqueueInactive(dataset string, active bool) {
@@ -1203,9 +1205,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 	for _, dataset := range known {
 		_ = r.gate.SetEnabled(dataset, false)
 	}
-	r.management.DiscardPending()
-	r.local.DiscardPending()
-	r.remote.DiscardPending()
+	r.management.DiscardPending("daemon shutting down")
+	r.local.DiscardPending("daemon shutting down")
+	r.remote.DiscardPending("daemon shutting down")
 	transferCancel()
 	r.management.Close()
 	r.local.Close()

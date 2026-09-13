@@ -48,7 +48,7 @@ func TestFairQueueRemovesDeactivatedScope(t *testing.T) {
 	job.Drop = func() { dropped++ }
 	_, _ = queue.Offer(job)
 	_, _ = queue.Offer(queueJob("b", "b", "other"))
-	if removed := queue.RemoveScope("root"); removed != 1 || dropped != 1 {
+	if removed := queue.RemoveScope("root", "dataset deactivated"); removed != 1 || dropped != 1 {
 		t.Fatalf("removed=%d dropped=%d", removed, dropped)
 	}
 	remaining, ok := queue.Pop(t.Context())

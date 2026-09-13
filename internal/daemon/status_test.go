@@ -349,7 +349,7 @@ func TestStatusStampsQueueFieldsFromTheNewestView(t *testing.T) {
 	t.Parallel()
 	status := NewStatus(time.Now)
 	pending := transition("b", "pending-management", "")
-	status.publishQueue("management", QueueSnapshot{Capacity: 4, Pending: 2, IDs: []string{"a", "b"}}, &pending)
+	status.publishQueue("management", QueueSnapshot{Capacity: 4, Pending: 2, IDs: []string{"a", "b"}}, []Event{pending})
 	jobs := status.Snapshot().Jobs
 	if len(jobs) != 1 || jobs[0].Pending != 2 || jobs[0].Position != 2 {
 		t.Fatalf("queued status = %+v", jobs)
@@ -622,5 +622,36 @@ func TestStatusLogCountsDiscoveryGenerationsInAGap(t *testing.T) {
 	status.flush(t.Context())
 	if gaps := checkLogSequence(t, log.snapshot(), total); gaps == 0 {
 		t.Fatal("a stalled log writer wrote no gap line")
+	}
+}
+
+func TestStatusAppliesEveryTransitionAQueueViewCarriesInOrder(t *testing.T) {
+	t.Parallel()
+	log := &lineLog{}
+	status := NewStatus(time.Now)
+	status.subscribeLog(slog.New(log))
+	subscription := subscribe(t, status)
+	a, b := transition("a", "pending-management", ""), transition("b", "pending-management", "")
+	status.publishQueue("management", QueueSnapshot{Capacity: 4, Pending: 1, IDs: []string{"a"}}, []Event{a})
+	status.publishQueue("management", QueueSnapshot{Capacity: 4, Pending: 2, IDs: []string{"a", "b"}}, []Event{b})
+	collect(t, subscription, 2)
+	// One change drops both jobs: one message, both transitions, one view.
+	status.publishQueue("management", QueueSnapshot{Capacity: 4}, []Event{transition("b", "cancelled", "gone"), transition("a", "cancelled", "gone")})
+	transitions, last := collect(t, subscription, 2)
+	if transitions[0].Job != "b" || transitions[1].Job != "a" {
+		t.Fatalf("transitions = %+v", transitions)
+	}
+	for _, job := range last.State.Jobs {
+		if job.State != "cancelled" || job.Position != 0 || job.Pending != 0 {
+			t.Fatalf("row after the drop = %+v", job)
+		}
+	}
+	status.flush(t.Context())
+	var logged []string
+	for _, line := range log.snapshot() {
+		logged = append(logged, line["job"]+"/"+line["state"])
+	}
+	if want := []string{"a/pending-management", "b/pending-management", "b/cancelled", "a/cancelled"}; !slices.Equal(logged, want) {
+		t.Fatalf("log = %v, want %v", logged, want)
 	}
 }

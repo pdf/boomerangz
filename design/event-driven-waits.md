@@ -1071,16 +1071,28 @@ a stalled stream reports zero within four samples. Keepalive lives in
 `internal/control/keepalive.go` and is applied wherever a listener has TLS,
 which is every TCP listener and no Unix socket. Its loopback test holds the
 suite for the full 40 seconds, running in parallel with the rest of the
-package. The view-change test drives a real pool's `RemoveScope` and the
-runtime's view publication rather than `applyGeneration`, because a newly
-enabled dataset also enqueues reconciliation, whose `pending` transition would
-make "without any job transitioning" untestable there.
+package. The view-change test drives a real queue pop and the runtime's view
+publication rather than `applyGeneration`, because a newly enabled dataset
+also enqueues reconciliation, whose `pending` transition would make "without
+any job transitioning" untestable there.
 
-Read from the code while building this, not addressed here: a job that
-`RemoveScope` or `DiscardAll` drops from a queue records no transition, so its
-row keeps the `pending-<pool>` state it was queued with until the job next
-runs. The queue view no longer lists it, but the row itself goes stale - the
-same shape as 3.8's gaps, for a job rather than a view.
+Building this found that a job `RemoveScope` or `DiscardAll` dropped from a
+queue recorded no transition, so its row kept the `pending-<pool>` state it was
+queued with until the job next ran: the queue view no longer listed it, but the
+row itself went stale - the same shape as 3.8's gaps, for a job rather than a
+view. Fixed after chunk D: a dropped job records `cancelled`, with a reason
+the caller gives - "dataset deactivated" from deactivation, "configuration
+reloaded" for the queued remote work every reload discards, and "daemon shutting
+down" from `Runtime.Run` - sent in the same message as the queue view that no
+longer lists it, under `FairQueue.mu`, the way an offer sends `pending-<pool>`
+(3.1). A queue message therefore carries any number of transitions, applied and
+delivered in order under one revision. A worker that pops a job after its pool
+was stopped records `cancelled` too, rather than dropping it silently. So
+removing a queue entry is no longer a change without a transition; a pop still
+is, until the worker reports the job's start (3.8). A reload now logs
+`cancelled` for each queued remote job, followed by `pending-transfer` where a
+reload that changed the remotes requeues it, which chunk G's occurrence
+counting has to allow for.
 
 **Chunk E - the listener drain.** Section 5's last paragraph, independent of the
 rest. Done when a call in flight across a reload completes, the retired listener

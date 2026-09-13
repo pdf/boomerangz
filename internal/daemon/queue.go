@@ -52,10 +52,18 @@ type FairQueue struct {
 	notify   chan struct{}
 	closed   bool
 	// observe, when set, is called with the lock held after every change to
-	// the pending set, with the job an offer added. Holding the lock orders
-	// the views, and orders an offer's view before anything a worker reports
-	// for the job, since Pop must take the lock first.
-	observe func(view QueueSnapshot, offered *Job)
+	// the pending set, with the jobs the change added or dropped. Holding the
+	// lock orders the views, and orders an offer's view before anything a
+	// worker reports for the job, since Pop must take the lock first.
+	observe func(view QueueSnapshot, change queueChange)
+}
+
+// queueChange names the jobs a change to the pending set added or dropped. A
+// pop names neither: the worker that took the job reports it.
+type queueChange struct {
+	offered *Job
+	dropped []Job
+	reason  string // why the dropped jobs left the queue
 }
 
 // NewFairQueue creates an in-memory queue with a strict pending-job bound.
@@ -94,7 +102,7 @@ func (q *FairQueue) Offer(job Job) (bool, error) {
 	q.ids[job.ID] = true
 	q.count++
 	q.signal()
-	q.observeLocked(&job)
+	q.observeLocked(queueChange{offered: &job})
 	return true, nil
 }
 
@@ -116,7 +124,7 @@ func (q *FairQueue) Pop(ctx context.Context) (Job, bool) {
 			}
 			delete(q.ids, job.ID)
 			q.count--
-			q.observeLocked(nil)
+			q.observeLocked(queueChange{})
 			q.mu.Unlock()
 			return job, true
 		}
@@ -134,8 +142,9 @@ func (q *FairQueue) Pop(ctx context.Context) (Job, bool) {
 	}
 }
 
-// RemoveScope discards all queued work for one deactivated scheduling root.
-func (q *FairQueue) RemoveScope(scope string) int {
+// RemoveScope discards all queued work for one deactivated scheduling root,
+// giving reason as why it left the queue.
+func (q *FairQueue) RemoveScope(scope, reason string) int {
 	q.mu.Lock()
 	var dropped []Job
 	for group, jobs := range q.groups {
@@ -158,7 +167,7 @@ func (q *FairQueue) RemoveScope(scope string) int {
 	}
 	if len(dropped) > 0 {
 		q.signal()
-		q.observeLocked(nil)
+		q.observeLocked(queueChange{dropped: dropped, reason: reason})
 	}
 	q.mu.Unlock()
 	for _, job := range dropped {
@@ -169,8 +178,9 @@ func (q *FairQueue) RemoveScope(scope string) int {
 	return len(dropped)
 }
 
-// DiscardAll removes every job that has not started.
-func (q *FairQueue) DiscardAll() int {
+// DiscardAll removes every job that has not started, giving reason as why it
+// left the queue.
+func (q *FairQueue) DiscardAll(reason string) int {
 	q.mu.Lock()
 	dropped := make([]Job, 0, q.count)
 	for _, jobs := range q.groups {
@@ -182,7 +192,7 @@ func (q *FairQueue) DiscardAll() int {
 	q.count = 0
 	if len(dropped) > 0 {
 		q.signal()
-		q.observeLocked(nil)
+		q.observeLocked(queueChange{dropped: dropped, reason: reason})
 	}
 	q.mu.Unlock()
 	for _, job := range dropped {
@@ -203,9 +213,9 @@ func (q *FairQueue) Close() {
 	}
 }
 
-func (q *FairQueue) observeLocked(offered *Job) {
+func (q *FairQueue) observeLocked(change queueChange) {
 	if q.observe != nil {
-		q.observe(q.snapshotLocked(), offered)
+		q.observe(q.snapshotLocked(), change)
 	}
 }
 

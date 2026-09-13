@@ -289,3 +289,86 @@ func TestPoolRecordsPendingBeforeAJobPoppedImmediatelyStarts(t *testing.T) {
 	pool.Close()
 	pool.Wait()
 }
+
+// recordingPool is a pool whose reporter records each transition as
+// job:state:reason.
+func recordingPool(t *testing.T) (*Pool, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var recorded []string
+	pool, err := NewPool("transfer", 1, 4, func(event Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		recorded = append(recorded, event.Job+":"+event.State+":"+event.Reason)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pool, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(recorded)
+	}
+}
+
+func TestPoolRecordsCancelledForJobsDroppedFromItsQueue(t *testing.T) {
+	t.Parallel()
+	pool, recorded := recordingPool(t)
+	dropped := 0
+	for _, id := range []string{"a", "b", "c"} {
+		job := queueJob(id, id, id)
+		job.Drop = func() { dropped++ }
+		if added, err := pool.Submit(job); err != nil || !added {
+			t.Fatalf("submit %s: added=%v err=%v", id, added, err)
+		}
+	}
+	if removed := pool.RemoveScope("b", "dataset deactivated"); removed != 1 {
+		t.Fatalf("removed %d", removed)
+	}
+	if removed := pool.DiscardPending("daemon shutting down"); removed != 2 {
+		t.Fatalf("discarded %d", removed)
+	}
+	got := recorded()
+	if want := []string{"a:pending-transfer:", "b:pending-transfer:", "c:pending-transfer:", "b:cancelled:dataset deactivated"}; !slices.Equal(got[:4], want) {
+		t.Fatalf("recorded %v, want %v first", got, want)
+	}
+	// DiscardAll takes groups in map order, so only the set is fixed.
+	discarded := slices.Sorted(slices.Values(got[4:]))
+	if want := []string{"a:cancelled:daemon shutting down", "c:cancelled:daemon shutting down"}; !slices.Equal(discarded, want) {
+		t.Fatalf("discard recorded %v, want %v", discarded, want)
+	}
+	if dropped != 3 {
+		t.Fatalf("dropped %d jobs, want 3", dropped)
+	}
+	// A dropped job is no longer known, so it can be submitted again.
+	if added, err := pool.Submit(queueJob("b", "b", "b")); err != nil || !added {
+		t.Fatalf("resubmit: added=%v err=%v", added, err)
+	}
+}
+
+func TestPoolRecordsCancelledForAPoppedJobItDoesNotStart(t *testing.T) {
+	t.Parallel()
+	pool, recorded := recordingPool(t)
+	ran := false
+	job := queueJob("a", "a", "a")
+	job.Run = func(context.Context) Outcome {
+		ran = true
+		return Outcome{}
+	}
+	if added, err := pool.Submit(job); err != nil || !added {
+		t.Fatal(err)
+	}
+	// A worker whose pool is already stopped pops the job and must not run
+	// it, and must not leave it reported as pending either.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := pool.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	pool.Wait()
+	want := []string{"a:pending-transfer:", "a:cancelled:worker pool stopped before the job started"}
+	if got := recorded(); ran || !slices.Equal(got, want) {
+		t.Fatalf("ran=%t recorded %v, want %v", ran, got, want)
+	}
+}

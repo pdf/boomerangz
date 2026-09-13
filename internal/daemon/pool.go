@@ -175,19 +175,25 @@ func newStatusPool(name, view string, workers, queueCapacity int, status *Status
 }
 
 // observeQueue runs under the queue lock. An offer's pending transition is
-// reported there, before a worker can pop the job and report its start.
-func (p *Pool) observeQueue(view QueueSnapshot, offered *Job) {
-	var pending *Event
-	if offered != nil {
-		event := p.event(*offered, "pending-"+p.name, "")
-		pending = &event
+// reported there, before a worker can pop the job and report its start, and
+// so is the cancelled transition of each job the change dropped, so that no
+// job keeps a pending state after it has left the queue.
+func (p *Pool) observeQueue(view QueueSnapshot, change queueChange) {
+	var transitions []Event
+	if change.offered != nil {
+		transitions = append(transitions, p.event(*change.offered, "pending-"+p.name, ""))
+	}
+	for _, job := range change.dropped {
+		transitions = append(transitions, p.event(job, "cancelled", change.reason))
 	}
 	if p.status != nil {
-		p.status.publishQueue(p.view, view, pending)
+		p.status.publishQueue(p.view, view, transitions)
 		return
 	}
-	if pending != nil && p.report != nil {
-		p.report(*pending)
+	if p.report != nil {
+		for _, transition := range transitions {
+			p.report(transition)
+		}
 	}
 }
 
@@ -286,6 +292,9 @@ func (p *Pool) worker(runCtx, workerCtx context.Context) {
 			return
 		}
 		if err := runCtx.Err(); err != nil {
+			// The job has left the queue without starting, so it reports that
+			// rather than keeping the pending state it was queued with.
+			p.emit(job, "cancelled", "worker pool stopped before the job started")
 			if job.Drop != nil {
 				job.Drop()
 			}
@@ -324,11 +333,13 @@ func (p *Pool) worker(runCtx, workerCtx context.Context) {
 	}
 }
 
-// RemoveScope removes work that has not started for a deactivated root.
-func (p *Pool) RemoveScope(scope string) int { return p.queue.RemoveScope(scope) }
+// RemoveScope removes work that has not started for a deactivated root. Each
+// removed job records cancelled, with reason.
+func (p *Pool) RemoveScope(scope, reason string) int { return p.queue.RemoveScope(scope, reason) }
 
-// DiscardPending removes all work that has not started.
-func (p *Pool) DiscardPending() int { return p.queue.DiscardAll() }
+// DiscardPending removes all work that has not started. Each removed job
+// records cancelled, with reason.
+func (p *Pool) DiscardPending(reason string) int { return p.queue.DiscardAll(reason) }
 
 // Close stops submissions and drains queued work unless the worker context is cancelled.
 func (p *Pool) Close() { p.queue.Close() }
