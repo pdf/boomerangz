@@ -28,10 +28,14 @@ type cliControlRuntime struct {
 func (*cliControlRuntime) ControlStatus() daemon.ControlSnapshot {
 	return daemon.ControlSnapshot{Revision: 3, Observed: time.Unix(20, 0), Generation: 9, Datasets: []daemon.DatasetStatus{{Name: "tank/data", Active: true}}, Queues: map[string]daemon.QueueSnapshot{}}
 }
-func (*cliControlRuntime) WaitStatus(ctx context.Context, _ uint64) error {
-	<-ctx.Done()
-	return ctx.Err()
+func (*cliControlRuntime) SubscribeStatus(context.Context) (daemonstate.Subscription, error) {
+	return idleSubscription{}, nil
 }
+
+type idleSubscription struct{}
+
+func (idleSubscription) Updates() <-chan daemonstate.Update { return nil }
+func (idleSubscription) Err() error                         { return nil }
 func (r *cliControlRuntime) Trigger(names []string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

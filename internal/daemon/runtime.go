@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pdf/boomerangz/internal/config"
@@ -56,19 +57,6 @@ type roadState struct {
 	request     transfer.Request
 }
 
-func reportWorkerState(logger *slog.Logger, status *StatusStore, event Event) {
-	status.Record(event)
-	args := []any{"pool", event.Pool, "job", event.Job, "scope", event.Scope, "target", event.Target, "state", event.State, "reason", event.Reason, "pending", event.Pending}
-	switch event.State {
-	case "failed":
-		logger.Error("worker state", args...)
-	case "blocked", "waiting-retry":
-		logger.Warn("worker state", args...)
-	default:
-		logger.Info("worker state", args...)
-	}
-}
-
 func blockedOrCancelled(err error) Outcome {
 	if errors.Is(err, context.Canceled) {
 		return Outcome{State: "cancelled", Reason: err.Error()}
@@ -93,7 +81,8 @@ type Runtime struct {
 	remotes      map[string]remoteClient
 	safety       *Safety
 	locks        *keyLocks
-	status       *StatusStore
+	status       *Status
+	sends        atomic.Uint64 // numbers each sending transition; see transferReporter
 	logger       *slog.Logger
 	lifecycle    *lifecycle.Service
 	now          func() time.Time
@@ -159,19 +148,19 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 	if err != nil {
 		return nil, err
 	}
-	status := &StatusStore{}
-	report := func(event Event) {
-		reportWorkerState(logger, status, event)
-	}
-	management, err := NewPool("management", cfg.Daemon.EffectiveManagementWorkers(), defaultQueueCapacity, report)
+	// The log subscribes before any producer exists, so it holds every
+	// transition from here on.
+	status := NewStatus(time.Now)
+	status.subscribeLog(logger)
+	management, err := newStatusPool("management", "management", cfg.Daemon.EffectiveManagementWorkers(), defaultQueueCapacity, status)
 	if err != nil {
 		return nil, err
 	}
-	local, err := NewPool("transfer", cfg.Daemon.LocalTransferWorkers, defaultQueueCapacity, report)
+	local, err := newStatusPool("transfer", "local_transfer", cfg.Daemon.LocalTransferWorkers, defaultQueueCapacity, status)
 	if err != nil {
 		return nil, err
 	}
-	remote, err := NewPool("transfer", cfg.Daemon.RemoteTransferWorkers, defaultQueueCapacity, report)
+	remote, err := newStatusPool("transfer", "remote_transfer", cfg.Daemon.RemoteTransferWorkers, defaultQueueCapacity, status)
 	if err != nil {
 		return nil, err
 	}
@@ -179,15 +168,25 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 	management.locks, local.locks, remote.locks = sharedLocks, sharedLocks, sharedLocks
 	gate := &lifecycle.Gate{}
 	liveConfig := cfg.Clone()
+	scheduler := NewScheduler()
+	scheduler.status = status
 	runtime := &Runtime{
 		config: liveConfig, backend: source, installation: installation,
-		gate: gate, scanner: scanner, scheduler: NewScheduler(), management: management,
+		gate: gate, scanner: scanner, scheduler: scheduler, management: management,
 		local: local, remote: remote, localStream: stream, pending: &transfer.PendingSet{},
 		remotes: clients, logger: logger, lifecycle: lifecycleService, status: status, locks: sharedLocks, now: time.Now, known: make(map[string]bool), active: make(map[string]bool),
 		recursive: make(map[string]bool), policies: make(map[string]policy.Effective),
 		roads: make(map[string]roadState), retireFailures: make(map[string]int), delayed: make(map[string]time.Time), dirty: make(map[string]bool), configGeneration: 1,
 	}
 	runtime.safety = newSafety(gate, source, clients, liveConfig.Remotes)
+	for _, pool := range []*Pool{management, local, remote} {
+		pool.queue.mu.Lock()
+		pool.queue.observeLocked(nil)
+		pool.queue.mu.Unlock()
+	}
+	runtime.mu.Lock()
+	runtime.publishRuntimeLocked()
+	runtime.mu.Unlock()
 	return runtime, nil
 }
 
@@ -318,6 +317,7 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	r.safety.setTargets(&TargetChecker{local: r.backend, remotes: prepared.clients, settings: effective.Remotes})
 	r.configGeneration++
 	generation := r.configGeneration
+	r.publishRuntimeLocked()
 	r.mu.Unlock()
 	for _, reconcile := range reconciles {
 		jobID := "remote:" + reconcile.dataset + ":" + reconcile.remote
@@ -327,7 +327,7 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 		}
 	}
 	r.scanner.Request()
-	r.status.Record(Event{Pool: "configuration", Job: "config:reload", State: "succeeded", At: r.now().UTC()})
+	r.status.record(Event{Kind: EventTransition, Pool: "configuration", Job: "config:reload", State: "succeeded", At: r.now().UTC()})
 	return daemonstate.ReloadResult{Generation: generation, Applied: slices.Clone(prepared.applied), RestartRequired: slices.Clone(prepared.restart)}
 }
 
@@ -495,6 +495,7 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 		r.recursive[name] = entry.Policy.Send.Replicate
 		r.policies[name] = entry.Policy.Clone()
 	}
+	r.publishRuntimeLocked()
 	r.mu.Unlock()
 	for _, name := range active {
 		if changed[name] {
@@ -587,6 +588,7 @@ func (r *Runtime) enqueueRetirement(dataset string) {
 			delete(r.known, dataset)
 			delete(r.recursive, dataset)
 			delete(r.policies, dataset)
+			r.publishRuntimeLocked()
 			r.mu.Unlock()
 			r.scanner.Request()
 			return Outcome{State: "succeeded"}
@@ -1060,25 +1062,53 @@ func (r *Runtime) isDirty(key string) bool {
 // transferReporter turns one running job's transfer reports into status. A
 // phase change is a transition the pool emits for the job, as it emits the
 // job's start state and outcome; a progress sample updates the job's progress.
+//
+// Each sending transition takes a new number, carried by the samples that
+// follow it, so the status owner can tell a late sample from an earlier stream
+// - a resume's first pass - from one belonging to the current stream.
 func (r *Runtime) transferReporter(pool *Pool, job Job) transfer.Reporter {
+	var send uint64
 	return func(report transfer.Report) {
 		switch {
 		case report.Phase != "":
-			pool.emit(job, string(report.Phase), "")
+			event := pool.event(job, string(report.Phase), "")
+			if report.Phase == transfer.PhaseSending {
+				send = r.sends.Add(1)
+				event.Send = send
+			}
+			if pool.report != nil {
+				pool.report(event)
+			}
 		case report.Progress != nil:
-			r.recordProgress(pool.name, job, *report.Progress)
+			r.recordProgress(pool.name, job, send, *report.Progress)
 		}
 	}
 }
 
-// recordProgress records a sample under the sending state, which is the only
-// phase in which a stream runs and so the state the preceding transition set.
-func (r *Runtime) recordProgress(pool string, job Job, progress zfs.Progress) {
-	event := Event{Pool: pool, Job: job.ID, Scope: job.Scope, Target: job.LockKey, State: string(transfer.PhaseSending), At: r.now().UTC(), Bytes: progress.Bytes, TotalBytes: progress.Estimate.Bytes, BytesPerSecond: progress.BytesPerSecond, TotalKnown: progress.Estimate.Known}
+// recordProgress offers a progress sample. It never changes the job's state:
+// the status owner keeps it only while the job's latest transition is the
+// sending transition numbered send.
+func (r *Runtime) recordProgress(pool string, job Job, send uint64, progress zfs.Progress) {
+	event := Event{Kind: EventProgress, Send: send, Pool: pool, Job: job.ID, Scope: job.Scope, Target: job.LockKey, At: r.now().UTC(), Bytes: progress.Bytes, TotalBytes: progress.Estimate.Bytes, BytesPerSecond: progress.BytesPerSecond, TotalKnown: progress.Estimate.Known}
 	if progress.ETA != nil {
 		event.ETA = *progress.ETA
 	}
-	r.status.Record(event)
+	r.status.record(event)
+}
+
+// publishRuntimeLocked sends the runtime's dataset view to the status owner.
+// Callers hold r.mu, which orders the views.
+func (r *Runtime) publishRuntimeLocked() {
+	names := mapsKeys(r.known)
+	slices.Sort(names)
+	view := runtimeView{configGeneration: r.configGeneration, datasets: make([]DatasetStatus, 0, len(names))}
+	if r.generation != nil {
+		view.generation = r.generation.ID()
+	}
+	for _, name := range names {
+		view.datasets = append(view.datasets, DatasetStatus{Name: name, Active: r.active[name], Recursive: r.recursive[name]})
+	}
+	r.status.publishRuntime(view)
 }
 
 func (r *Runtime) schedule(key string, at time.Time, run func()) {
@@ -1185,7 +1215,12 @@ func (r *Runtime) Run(ctx context.Context) error {
 	r.remote.Wait()
 	r.management.Wait()
 	r.delayWait.Wait()
-	r.logger.Info("daemon stopped")
+	// Transitions reach the log on its own goroutine; let the shutdown's
+	// transitions land before the line that says the daemon stopped.
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	r.status.flush(flushCtx)
+	flushCancel()
+	r.logger.Info("daemon stopped", "status_backlog_peak", r.status.BacklogPeak())
 	return nil
 }
 
@@ -1235,27 +1270,16 @@ type DatasetStatus = daemonstate.DatasetStatus
 // ControlSnapshot is an immutable daemon status generation.
 type ControlSnapshot = daemonstate.ControlSnapshot
 
-// ControlStatus builds a cheap in-memory status snapshot.
-func (r *Runtime) ControlStatus() ControlSnapshot {
-	revision, jobs := r.status.SnapshotRevision()
-	deadlines := r.scheduler.Entries()
-	r.mu.Lock()
-	names := mapsKeys(r.known)
-	slices.Sort(names)
-	result := ControlSnapshot{Revision: revision, Observed: r.now().UTC(), Queues: r.QueueStatus(), Jobs: jobs, ConfigGeneration: r.configGeneration}
-	if r.generation != nil {
-		result.Generation = r.generation.ID()
-	}
-	for _, name := range names {
-		result.Datasets = append(result.Datasets, DatasetStatus{Name: name, Active: r.active[name], Recursive: r.recursive[name], NextSnapshot: deadlines[name]})
-	}
-	r.mu.Unlock()
-	return result
-}
+// ControlStatus returns the status owner's current state.
+func (r *Runtime) ControlStatus() ControlSnapshot { return r.status.Snapshot() }
 
-// WaitStatus waits for a worker transition after revision.
-func (r *Runtime) WaitStatus(ctx context.Context, revision uint64) error {
-	return r.status.Wait(ctx, revision)
+// SubscribeStatus subscribes to the daemon's status; see Status.Subscribe.
+func (r *Runtime) SubscribeStatus(ctx context.Context) (daemonstate.Subscription, error) {
+	subscription, err := r.status.Subscribe(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return subscription, nil
 }
 
 // Clean runs explicit preview-first decommissioning inside the daemon's live
@@ -1366,13 +1390,9 @@ func (r *Runtime) Clean(ctx context.Context, names []string, recursive, all, des
 	return plans, nil
 }
 
-// QueueStatus exposes detached worker-pool pressure.
-func (r *Runtime) QueueStatus() map[string]QueueSnapshot {
-	return map[string]QueueSnapshot{"management": r.management.Snapshot(), "local_transfer": r.local.Snapshot(), "remote_transfer": r.remote.Snapshot()}
-}
-
-// Status returns the latest stable job transitions for control-plane consumers.
-func (r *Runtime) Status() []Event { return r.status.Snapshot() }
+// Status returns the latest transition for each job, with the newest progress
+// of every running transfer.
+func (r *Runtime) Status() []Event { return r.status.Snapshot().Jobs }
 
 // Ensure compile-time safety conformance.
 var _ lifecycle.CleanSafety = (*Safety)(nil)

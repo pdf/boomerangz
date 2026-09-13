@@ -152,11 +152,12 @@ messages.
 `StatusStore` is replaced by a status owner: one goroutine that owns job states,
 latest progress, the runtime's dataset view, deadlines, queue views, and the
 subscriber set. No other goroutine reads or writes that memory. Producers send
-values on one input channel:
+transitions and views on one input channel, and progress samples on a second
+(3.3):
 
 ```go
 type statusMessage struct {
-	event     *Event               // a transition or a progress sample; Kind says which (3.3)
+	event     *Event               // a transition (3.3)
 	runtime   *runtimeView         // discovery and configuration generations; known, active, recursive datasets
 	deadlines map[string]time.Time // scheduler next-snapshot deadlines
 	queue     *queueView           // pool name and a detached QueueSnapshot
@@ -198,7 +199,17 @@ answered after that change is applied, while a request on its own channel could
 be answered first. Today a status read after `config reload` returns sees the
 new configuration generation, because `commitConfig` bumps it and records the
 reload before returning ([internal/daemon/runtime.go:319-331](../internal/daemon/runtime.go),
-[:353](../internal/daemon/runtime.go)); one channel keeps that true.
+[:353](../internal/daemon/runtime.go)); one channel keeps that true. A flush
+request, which waits until the log writer has taken everything sent before it
+(3.9), rides the same channel for the same reason.
+
+Progress samples are the exception, and they take a second channel so that
+replication never waits on status for one. A producer offers a sample without
+blocking and drops it when that channel is full; the next sample replaces it
+anyway. The owner reads the progress channel only when the input channel is
+empty, with a nested `select` that checks input first. A sample therefore has no
+order against the transitions around it, and does not need one: it names the
+sending transition it belongs to (3.3).
 
 The loop holds no lock and holds no reference to any other component, so it
 never calls out. That is what lets a producer send while holding its own lock
@@ -241,14 +252,13 @@ pool's worker goroutines and the transfer progress callbacks
 [internal/daemon/runtime.go:1064](../internal/daemon/runtime.go)), and a status
 consumer must never apply backpressure to replication. A send on the owner's
 buffered input can block, but only on the owner's in-memory work: the owner never
-waits on a consumer, because fan-out into forwarders is non-blocking and
-forwarders always accept input. That is weaker than "the producer never blocks"
-and it is the guarantee this design offers.
+waits on a consumer, because every send into a forwarder is non-blocking (3.2).
+That is weaker than "the producer never blocks" and it is the guarantee this
+design offers for transitions and views. A progress sample never blocks at all.
 
 **3.2 Delivery: a forwarder per subscriber.** Each subscriber gets a forwarder
-goroutine that decouples the owner from the consumer's pace. It always accepts
-from the owner and offers to the consumer only when it has something to send,
-using a nil channel to disable the send case:
+goroutine that decouples the owner from the consumer's pace, fed by two
+channels:
 
 ```go
 // Update is one delivery to a subscriber.
@@ -257,19 +267,55 @@ type Update struct {
 	State       Snapshot // newest state as of the last merged message
 }
 
+type forwarder struct {
+	transitions chan delivery  // capacity transitionBound; a transition and the revision it produced
+	state       chan *Snapshot // capacity one; conflated by the owner
+	out         chan Update
+}
+```
+
+The owner sends a transition before the state it produced, and sends both
+without blocking. A refused transition means the subscriber has fallen behind.
+State cannot be refused: the owner is the only sender on a one-slot channel, so
+it takes back any state the forwarder has not read and sends the newest in its
+place. A state is an immutable snapshot the owner builds once per change and
+shares; the forwarder clones it into the `Update` it delivers.
+
+The forwarder prefers transitions, with a nested `select` that drains the
+transition channel first, and stops taking them while it holds
+`transitionBound` undelivered, so that a consumer which stops reading fills the
+channel and the owner's refused send is what ends the subscription. After
+taking a state it drains the transition channel without blocking. That is sound
+because the single owner sent every transition a state includes before the
+state itself, so they are already in the channel. Each transition carries the
+revision it produced, and the forwarder offers an `Update` only once its state's
+revision covers the newest transition it holds, so an `Update` never pairs a
+transition with a state from before it:
+
+```go
 for {
+	if len(pending) < transitionBound {
+		select {
+		case d := <-f.transitions:
+			take(d) // append to pending; covered = d.revision
+			continue
+		default:
+		}
+	}
 	var out chan<- Update
-	if pending.ready() {
+	if state != nil && (len(pending) > 0 && state.Revision >= covered || len(pending) == 0 && stateDue()) {
 		out = f.out
 	}
 	select {
-	case m := <-f.in:
-		pending.merge(m) // append transitions; overwrite state and progress
-		if len(pending.Transitions) > transitionBound {
-			f.fail(ErrSubscriberOverflow)
-			return
-		}
-	case out <- pending.take():
+	case d := <-f.transitions: // nil while holding a full bound
+		take(d)
+	case state = <-f.state:
+		drainTransitions()
+	case out <- Update{Transitions: pending, State: clone(state)}:
+		pending = nil
+	case <-f.overflowed: // closed by the owner on a refused transition
+		f.fail(ErrSubscriberOverflow)
+		return
 	case <-f.done:
 		return
 	}
@@ -291,17 +337,18 @@ func (u *Subscription) Err() error
 Three properties follow from the owner handling `subscribe` between two input
 messages. The initial state reflects everything already applied and the
 forwarder receives everything after it, so the seam between snapshot and stream
-is exact with no revision filtering. Each `Update` pairs its transitions with
-the state they produced in one value, so no subscriber reconciles two channels.
-And overflow is detected in one forwarder and ends one subscription.
+is exact. Each `Update` pairs its transitions with the state they produced in
+one value, so no subscriber reconciles two channels: the forwarder does that
+once, by revision. And overflow is detected at one forwarder's channel and ends
+one subscription.
 
 Overflow stays terminal, as with any lossy edge: a consumer that falls behind is
 told its sequence is broken rather than handed a gap with a counter beside it.
 The one exception is the daemon's own log, which cannot be ended and marks its
 gaps instead (3.9).
 The failure is the slow consumer's alone, and the memory is per subscriber -
-256 transitions each until chunk B measures it (7), with one or two subscribers in practice - rather than one
-global buffer sized for the worst of them. A forwarder holds back state-only
+256 transitions each, set from chunk B's measurement (7), with one or two
+subscribers in practice - rather than one global buffer sized for the worst of them. A forwarder holds back state-only
 updates to one per 250ms and sends transitions immediately (3.6).
 
 The events a subscriber missed before subscribing are gone. That is a real
@@ -344,11 +391,23 @@ is not information, it is a wrong number - so progress is conflated. The owner
 applies two rules. A progress sample for a job whose latest transition is not
 `sending` is discarded, so a sample that arrives late can never overwrite a
 finished job. A transition that moves a job out of `sending` clears that job's
-progress. Held progress is therefore bounded by the transfers running at once,
+progress.
+
+`sending` alone does not identify a stream, and samples have no order against
+transitions (3.1). A resume reports `sending` twice (3.4), so a first-pass
+sample read after the second `sending` would pass that rule and overwrite the
+new stream's progress. So the daemon numbers each `sending` transition, and
+every sample carries the number of the `sending` it was taken under: the
+transfer reporter takes a new number from a runtime-wide counter on each
+`PhaseSending` and stamps it on the transition and on each sample until the
+next one. The owner stores the number on the row and discards a sample whose
+number differs. A runtime-wide counter rather than one per job keeps the number
+distinct across runs of the same job too. Held progress is therefore bounded by the transfers running at once,
 which the transfer worker counts bound
-([internal/config/config.go:16-17](../internal/config/config.go)), and a
-forwarder merges progress by overwriting, so progress cannot overflow a
-subscription.
+([internal/config/config.go:16-17](../internal/config/config.go)). A sample
+reaches a subscriber only as the state it changed, on the conflated state
+channel, never on the transition channel, so progress cannot overflow a
+subscription however many samples a slow consumer misses.
 
 Progress cannot share the transition queue. Deduplicating consecutive identical
 events to keep samples from crowding it out would erase the second of two
@@ -484,7 +543,8 @@ back.
 
 `Runtime.WaitStatus` exists for exactly this handler
 ([internal/control/service.go:18](../internal/control/service.go),
-[:83](../internal/control/service.go)) and is retired with it, along with
+[:83](../internal/control/service.go)) and is retired with it - in chunk B,
+which removes the store it waited on - along with
 `StatusStore` and its revision waiting. `StatusSnapshot.Revision` is already on
 the wire and stays; the owner counts it. The interface the control service
 depends on gains `Subscribe` and loses `WaitStatus`; two test fakes follow
@@ -633,12 +693,31 @@ The log subscriber cannot end on overflow, because nothing would replace it. Its
 forwarder marks the gap instead. It uses the same transition bound as every
 other subscriber (3.2): one bound, set once from chunk B's measurement (7),
 rather than a second number for the same kind of delay. When its held
-transitions pass that bound, or the owner's non-blocking send to it fails, it
-discards what it holds, counts the
-discarded transitions and the span of their times, and keeps accepting. When the
-writer next takes an `Update`, it first writes one error-level line - "status log
-dropped transitions", with the count and the span - and then the transitions
-that followed. That line is the only place the log is not the complete sequence.
+When the owner's send to the log is refused, it keeps what was refused, in
+order, on its record of the log subscriber: consecutive refused transitions
+become one gap, counting them and the span of their times, and a refused flush
+is held as itself. It offers those again, in order, on every later fan-out and
+on a short retry tick while any are held, and offers nothing new past one still
+refused, so the log's order holds. The gap reaches the writer in the position
+of the transitions it replaces, and the writer writes it as one error-level
+line - "status log dropped transitions", with the count and the span. A flush
+is never closed by the owner; the writer closes it on reaching it, after every
+transition and gap before it. A writer held for a long time while transitions
+keep arriving can write several gap lines, one per run of refused transitions,
+with the transitions it did take between them.
+
+Two gap lines can also be written back to back, with no transition between
+them. It happens in two ways, both known and left as they are. When a re-offered
+gap takes the only free slot in the log's channel, the next transition finds the
+channel full again and opens a new gap. And a flush held between two runs of
+refused transitions separates them into two gaps, but writes no line of its own.
+Nothing is lost or miscounted either way - the two counts add up to the run -
+so a reader summing adjacent gap lines gets the right total. Merging them would
+mean reserving a slot for the transition after a gap, and letting a gap absorb
+refusals across a held flush. Neither is worth doing until a log shows it
+happening outside a writer stalled on purpose in a test.
+
+That line is the only place the log is not the complete sequence.
 It is not the in-band flag 3.6 rejects: a flag rides on a message that is
 otherwise read normally, while this is a line of its own at error level, and a
 test reading the log fails on it. Forwarders take this policy only when the
@@ -928,8 +1007,23 @@ line, and the log forwarder marks gaps rather than ending. The "discovery
 complete" line moves with the runtime view in chunk D. Unit tests: every
 transition recorded after `daemon.New` appears in the log in owner order; a
 stalled log writer does not block a producer; a log that falls past its bound
-writes one gap line with the count and resumes. The operations guide documents
+accounts, in order, for every transition it did not write with gap lines
+carrying the count, and resumes; and a flush returns only once the writer has
+taken what preceded it. The operations guide documents
 the event lines and the gap line in the same change.
+
+As built, chunk B took three things this plan placed later, because leaving
+them would have kept a read of shared memory or a silent gap in place. The
+runtime view (3.8) is a message: `ControlStatus` is a request to the owner and
+no longer takes `r.mu`, and every view message reaches subscribers, so a
+watcher's snapshot already reflects a newly enabled dataset or a removed queue
+entry without a job transitioning. The "discovery complete" line itself still
+moves in chunk D. `WaitStatus` is retired here, since the store it waited on is
+gone; the handler subscribes. And a watch whose subscription ends on overflow
+already returns `codes.Aborted` rather than continuing, since continuing would
+be the defect; chunk C still owns the transitions field, its tests, and the
+docs. A progress sample no longer moves a job's `changed` time, which is the
+time of its latest transition.
 
 **Chunk C - the control plane carries transitions.** 3.6 and 3.7, retiring
 `WaitStatus` with them, and the docs in the same change. Done when
@@ -1007,13 +1101,27 @@ half-changed.
   daemon log is the one consumer that cannot end, so it marks its gap with a
   line of its own (3.9), and a log reader must fail on that line. The failure
   mode to design against is a consumer that keeps going.
-- **Queue depth is set by measurement, not asserted.** 256 per subscriber is a
-  placeholder. Chunk B exposes the forwarder high-water mark, records it across
-  an unfiltered `make integration-test`, sets the one bound every subscriber
-  and the log share (3.9) from that peak with the run named here, and replaces
-  this sentence with the result. A real deployment
-  approaching the bound is a signal to look at what is producing transitions at
-  that rate before enlarging anything.
+- **Queue depth is set by measurement, not asserted.** Chunk B exposes the
+  forwarder high-water mark as `Status.BacklogPeak`: the most transitions a
+  forwarder has held undelivered, counting what it has taken and what is still
+  in its channel. It is logged as `status_backlog_peak` on "daemon stopped".
+  It was measured across an unfiltered `make integration-test` on 2026-09-13
+  against the two-channel forwarder (3.2), run `ci-67391269765534e8`, with all
+  four stages passing. Temporary instrumentation, not committed, printed the
+  peak from each daemon's log writer goroutine, never from the owner, whenever
+  it had risen. The control stage's subprocesses, including the ones it kills,
+  were covered by copying those lines out of their captured output. The
+  highest peak was 5 undelivered transitions, reached in both the daemon and
+  control stages. No run wrote a "status log dropped transitions" line. An
+  earlier run against the superseded mailbox forwarder
+  (`ci-54d74eb7d72ee36a`) also peaked at 5. The suite runs no
+  `status --watch`, so the peak is the log subscriber's: it is how far a log
+  writer on the same host falls behind under the suite's bursts. The bound
+  stays at 256, about fifty times that peak. The cost of the headroom is up to
+  twice 256 `Event` values per slow subscriber (3.2); the cost of too little is
+  a remote watcher over TCP ended by a burst it would have absorbed. A real
+  deployment approaching the bound is a signal to look at what is producing
+  transitions at that rate before enlarging anything.
 - **The owner must never call out.** Producers send while holding their own
   locks (3.1), which is safe only because the owner's loop holds no lock and
   references no component. A change that has the owner consult the scheduler,
@@ -1047,7 +1155,7 @@ half-changed.
   anything asserting an exact object. The docs change lands with the code.
 - **A long-running watch can now end with an error.** Today a watch ends only on
   cancellation, a transport failure, or `codes.Unavailable` when a reload
-  retires its listener (chunk E); after chunk C it also ends with
+  retires its listener (chunk E); since chunk B it also ends with
   `codes.Aborted` when it falls behind. A script that runs `status --watch
   --json` unattended has to treat that exit as "resubscribe", not as the daemon
   failing.

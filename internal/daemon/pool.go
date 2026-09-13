@@ -138,6 +138,8 @@ type Pool struct {
 	workers int
 	queue   *FairQueue
 	report  Reporter
+	status  *Status
+	view    string
 	locks   *keyLocks
 	mu      sync.Mutex
 	known   map[string]bool
@@ -156,7 +158,37 @@ func NewPool(name string, workers, queueCapacity int, report Reporter) (*Pool, e
 	if err != nil {
 		return nil, err
 	}
-	return &Pool{name: name, workers: workers, queue: queue, report: report, locks: &keyLocks{}, known: make(map[string]bool)}, nil
+	pool := &Pool{name: name, workers: workers, queue: queue, report: report, locks: &keyLocks{}, known: make(map[string]bool)}
+	queue.observe = pool.observeQueue
+	return pool, nil
+}
+
+// newStatusPool constructs a pool that reports its transitions and its queue
+// views, under the name view, to status.
+func newStatusPool(name, view string, workers, queueCapacity int, status *Status) (*Pool, error) {
+	pool, err := NewPool(name, workers, queueCapacity, status.record)
+	if err != nil {
+		return nil, err
+	}
+	pool.status, pool.view = status, view
+	return pool, nil
+}
+
+// observeQueue runs under the queue lock. An offer's pending transition is
+// reported there, before a worker can pop the job and report its start.
+func (p *Pool) observeQueue(view QueueSnapshot, offered *Job) {
+	var pending *Event
+	if offered != nil {
+		event := p.event(*offered, "pending-"+p.name, "")
+		pending = &event
+	}
+	if p.status != nil {
+		p.status.publishQueue(p.view, view, pending)
+		return
+	}
+	if pending != nil && p.report != nil {
+		p.report(*pending)
+	}
 }
 
 // Start begins worker execution once.
@@ -225,9 +257,6 @@ func (p *Pool) Submit(job Job) (bool, error) {
 	if err != nil || !added {
 		p.complete(job.ID)
 	}
-	if added {
-		p.emit(job, "pending-"+p.name, "")
-	}
 	return added, err
 }
 
@@ -237,9 +266,15 @@ func (p *Pool) complete(id string) {
 	p.mu.Unlock()
 }
 
+// event builds a job transition. Its queue fields are stamped by the status
+// owner from the newest view of the pool's queue.
+func (p *Pool) event(job Job, state, reason string) Event {
+	return Event{Kind: EventTransition, Pool: p.name, Job: job.ID, Scope: job.Scope, Target: job.LockKey, State: state, Reason: reason, At: time.Now().UTC()}
+}
+
 func (p *Pool) emit(job Job, state, reason string) {
 	if p.report != nil {
-		p.report(Event{Pool: p.name, Job: job.ID, Scope: job.Scope, Target: job.LockKey, State: state, Reason: reason, At: time.Now().UTC(), Pending: p.queue.Snapshot().Pending, Position: p.queue.Position(job.ID)})
+		p.report(p.event(job, state, reason))
 	}
 }
 
@@ -300,6 +335,3 @@ func (p *Pool) Close() { p.queue.Close() }
 
 // Wait waits until every worker has exited.
 func (p *Pool) Wait() { p.wait.Wait() }
-
-// Snapshot returns the current pending queue view.
-func (p *Pool) Snapshot() QueueSnapshot { return p.queue.Snapshot() }

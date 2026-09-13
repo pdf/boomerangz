@@ -13,6 +13,39 @@ journalctl -u boomerangz.service
 
 The daemon logs to the system journal when run by systemd.
 
+### Job state lines
+
+Every job state change is written as one `worker state` line, in the order
+the daemon recorded it. The line carries these keys:
+
+| Key | Meaning |
+|---|---|
+| `pool` | The worker pool: `management`, `transfer`, or `configuration` for a configuration reload |
+| `job` | The job, for example `snapshot:tank/data` or `remote:tank/data:offsite` |
+| `scope` | The dataset the job belongs to |
+| `target` | The shared resource the job locks, such as a transfer target |
+| `state` | The state the job moved to |
+| `reason` | Why, when the state carries one |
+| `pending` | Jobs waiting in the job's queue when the change was recorded |
+
+A `failed` state is logged at error level, `blocked` and `waiting-retry` at
+warning level, and every other state at info level. A successful
+`boomerangz config reload` is logged as job `config:reload` in pool
+`configuration`. Transfer progress is not logged.
+
+The log is complete from the moment the daemon starts. If writing to the log
+falls far enough behind that the daemon has to discard state changes rather
+than hold them, it writes an error-level `status log dropped transitions`
+line in place of each run of discarded changes, with `count`, the number of
+changes in the run, and `first` and `last`, the times of the earliest and
+latest of them. The line appears where those changes would have been, and the
+state changes that follow are written after it. Anything reading the log as a
+record should treat that line as a gap in it.
+
+When the daemon stops, the `daemon stopped` line carries
+`status_backlog_peak`: the most state changes any status consumer, including
+the log, has had waiting to be delivered at once.
+
 ## View status
 
 Show one current status snapshot:

@@ -300,12 +300,6 @@ func (l *transitionLog) Handle(_ context.Context, record slog.Record) error {
 	if l.states == nil {
 		l.states = make(map[string][]string)
 	}
-	// Pool.Submit emits pending after the queue offer, so a worker can log the
-	// start state first (design/event-driven-waits.md 3.1). Until that is
-	// ordered, pending says nothing about the sequence a transfer reports.
-	if strings.HasPrefix(state, "pending-") {
-		return nil
-	}
 	if reason != "" {
 		state += ": " + reason
 	}
@@ -406,7 +400,7 @@ func TestRemoteJobReportsTransferPhases(t *testing.T) {
 		t.Fatal("remote job was not accepted")
 	}
 	states := log.waitRun(t, job, 0)
-	if want := []string{"probing", "sending", "verifying", "succeeded"}; !slices.Equal(states, want) {
+	if want := []string{"pending-transfer", "probing", "sending", "verifying", "succeeded"}; !slices.Equal(states, want) {
 		t.Fatalf("remote job states = %v, want %v", states, want)
 	}
 
@@ -417,7 +411,7 @@ func TestRemoteJobReportsTransferPhases(t *testing.T) {
 		t.Fatal("second remote job was not accepted")
 	}
 	states = log.waitRun(t, job, from)
-	if want := []string{"probing", "succeeded"}; !slices.Equal(states, want) {
+	if want := []string{"pending-transfer", "probing", "succeeded"}; !slices.Equal(states, want) {
 		t.Fatalf("up-to-date remote job states = %v, want %v", states, want)
 	}
 }
@@ -456,7 +450,7 @@ func TestRemoteResumeReportsEachSend(t *testing.T) {
 		t.Fatal("remote job was not accepted")
 	}
 	states := log.waitRun(t, job, 0)
-	if want := []string{"probing", "sending", "verifying", "sending", "verifying", "succeeded"}; !slices.Equal(states, want) {
+	if want := []string{"pending-transfer", "probing", "sending", "verifying", "sending", "verifying", "succeeded"}; !slices.Equal(states, want) {
 		t.Fatalf("resumed remote job states = %v, want %v", states, want)
 	}
 }
@@ -472,36 +466,54 @@ func TestLocalJobReportsPlanningBeforeSending(t *testing.T) {
 		t.Fatal("local job was not accepted")
 	}
 	states := log.waitRun(t, job, 0)
-	if want := []string{"planning", "sending", "verifying", "succeeded"}; !slices.Equal(states, want) {
+	if want := []string{"pending-transfer", "planning", "sending", "verifying", "succeeded"}; !slices.Equal(states, want) {
 		t.Fatalf("local job states = %v, want %v", states, want)
 	}
 }
 
 func TestTransferReporterRecordsProgressUnderSending(t *testing.T) {
 	t.Parallel()
-	status := &StatusStore{}
-	var events []Event
-	pool, err := NewPool("transfer", 1, 1, func(event Event) {
-		events = append(events, event)
-		status.Record(event)
-	})
+	status := NewStatus(time.Now)
+	pool, err := newStatusPool("transfer", "local_transfer", 1, 1, status)
 	if err != nil {
 		t.Fatal(err)
 	}
+	subscription := subscribe(t, status)
 	runtime := &Runtime{status: status, now: time.Now}
 	job := Job{ID: "local:tank/data:backup/data", Scope: reportSource, LockKey: "local:backup/data"}
 	report := runtime.transferReporter(pool, job)
+	sample := func(bytes uint64) {
+		report(transfer.Report{Progress: &zfs.Progress{Bytes: bytes, Estimate: zfs.Estimate{Bytes: 9, Known: true}}})
+	}
+	// waitBytes waits for the newest progress to show bytes; a sample may be
+	// read in any order against the transition before it.
+	waitBytes := func(bytes uint64) Event {
+		t.Helper()
+		for {
+			update := receive(t, subscription)
+			if len(update.State.Jobs) == 1 && update.State.Jobs[0].Bytes == bytes {
+				return update.State.Jobs[0]
+			}
+		}
+	}
 	report(transfer.Report{Phase: transfer.PhaseSending})
-	report(transfer.Report{Progress: &zfs.Progress{Bytes: 7, Estimate: zfs.Estimate{Bytes: 9, Known: true}}})
-	if len(events) != 1 || events[0].State != "sending" || events[0].Job != job.ID || events[0].Target != job.LockKey {
-		t.Fatalf("phase transition = %+v", events)
+	transitions, _ := collect(t, subscription, 1)
+	first := transitions[0]
+	if first.State != "sending" || first.Job != job.ID || first.Target != job.LockKey || first.Bytes != 0 || first.Send == 0 {
+		t.Fatalf("phase transition = %+v", first)
 	}
-	snapshot := status.Snapshot()
-	if len(snapshot) != 1 {
-		t.Fatalf("status = %+v", snapshot)
-	}
-	got := snapshot[0]
-	if got.State != "sending" || got.Pool != "transfer" || got.Scope != reportSource || got.Target != job.LockKey || got.Bytes != 7 || got.TotalBytes != 9 || !got.TotalKnown {
+	sample(7)
+	got := waitBytes(7)
+	if got.State != "sending" || got.Pool != "transfer" || got.Scope != reportSource || got.Target != job.LockKey || got.TotalBytes != 9 || !got.TotalKnown {
 		t.Fatalf("progress = %+v", got)
 	}
+	// A second stream takes a new send number, and its samples carry it.
+	report(transfer.Report{Phase: transfer.PhaseVerifying})
+	report(transfer.Report{Phase: transfer.PhaseSending})
+	transitions, _ = collect(t, subscription, 2)
+	if second := transitions[1]; second.State != "sending" || second.Send <= first.Send {
+		t.Fatalf("second sending transition = %+v after %+v", second, first)
+	}
+	sample(3)
+	waitBytes(3)
 }

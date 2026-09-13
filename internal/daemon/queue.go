@@ -51,6 +51,11 @@ type FairQueue struct {
 	ids      map[string]bool
 	notify   chan struct{}
 	closed   bool
+	// observe, when set, is called with the lock held after every change to
+	// the pending set, with the job an offer added. Holding the lock orders
+	// the views, and orders an offer's view before anything a worker reports
+	// for the job, since Pop must take the lock first.
+	observe func(view QueueSnapshot, offered *Job)
 }
 
 // NewFairQueue creates an in-memory queue with a strict pending-job bound.
@@ -89,6 +94,7 @@ func (q *FairQueue) Offer(job Job) (bool, error) {
 	q.ids[job.ID] = true
 	q.count++
 	q.signal()
+	q.observeLocked(&job)
 	return true, nil
 }
 
@@ -110,6 +116,7 @@ func (q *FairQueue) Pop(ctx context.Context) (Job, bool) {
 			}
 			delete(q.ids, job.ID)
 			q.count--
+			q.observeLocked(nil)
 			q.mu.Unlock()
 			return job, true
 		}
@@ -151,6 +158,7 @@ func (q *FairQueue) RemoveScope(scope string) int {
 	}
 	if len(dropped) > 0 {
 		q.signal()
+		q.observeLocked(nil)
 	}
 	q.mu.Unlock()
 	for _, job := range dropped {
@@ -174,6 +182,7 @@ func (q *FairQueue) DiscardAll() int {
 	q.count = 0
 	if len(dropped) > 0 {
 		q.signal()
+		q.observeLocked(nil)
 	}
 	q.mu.Unlock()
 	for _, job := range dropped {
@@ -194,10 +203,20 @@ func (q *FairQueue) Close() {
 	}
 }
 
+func (q *FairQueue) observeLocked(offered *Job) {
+	if q.observe != nil {
+		q.observe(q.snapshotLocked(), offered)
+	}
+}
+
 // Snapshot returns a detached queue view.
 func (q *FairQueue) Snapshot() QueueSnapshot {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	return q.snapshotLocked()
+}
+
+func (q *FairQueue) snapshotLocked() QueueSnapshot {
 	result := QueueSnapshot{Capacity: q.capacity, Pending: q.count}
 	groups := make(map[string][]Job, len(q.groups))
 	for group, jobs := range q.groups {
@@ -215,9 +234,4 @@ func (q *FairQueue) Snapshot() QueueSnapshot {
 		}
 	}
 	return result
-}
-
-// Position returns the one-based fair dequeue position of a pending job.
-func (q *FairQueue) Position(id string) int {
-	return slices.Index(q.Snapshot().IDs, id) + 1
 }

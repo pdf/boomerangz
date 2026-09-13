@@ -22,18 +22,20 @@ import (
 func TestWorkerStateLogLevels(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&output, nil))
-	status := &StatusStore{}
+	status := NewStatus(time.Now)
+	status.subscribeLog(slog.New(slog.NewTextHandler(&output, nil)))
 	for _, event := range []Event{{Job: "normal", State: "succeeded"}, {Job: "blocked", State: "blocked"}, {Job: "failed", State: "failed"}} {
-		reportWorkerState(logger, status, event)
+		event.Kind = EventTransition
+		status.record(event)
 	}
+	status.flush(t.Context())
 	logged := output.String()
 	for _, want := range []string{"level=INFO", "level=WARN", "level=ERROR"} {
 		if !strings.Contains(logged, want) {
 			t.Fatalf("missing %s in %q", want, logged)
 		}
 	}
-	if len(status.Snapshot()) != 3 {
+	if len(status.Snapshot().Jobs) != 3 {
 		t.Fatal("logging did not retain worker status")
 	}
 }
@@ -260,7 +262,8 @@ func TestApplyConfigPublishesGenerationAndRetainsIdentityDirectory(t *testing.T)
 	t.Parallel()
 	cfg := config.Defaults()
 	backend := &runtimeBackend{scanned: make(chan struct{}, 1)}
-	runtime, err := New(cfg, backend, "11111111-1111-4111-8111-111111111111", nil)
+	log := &lineLog{}
+	runtime, err := New(cfg, backend, "11111111-1111-4111-8111-111111111111", slog.New(log))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,6 +283,12 @@ func TestApplyConfigPublishesGenerationAndRetainsIdentityDirectory(t *testing.T)
 	}
 	if runtime.local.workers != 3 || runtime.ControlStatus().ConfigGeneration != 2 {
 		t.Fatalf("workers=%d status=%#v", runtime.local.workers, runtime.ControlStatus())
+	}
+	runtime.status.flush(t.Context())
+	if !slices.ContainsFunc(log.snapshot(), func(line map[string]string) bool {
+		return line["msg"] == "worker state" && line["pool"] == "configuration" && line["job"] == "config:reload" && line["state"] == "succeeded"
+	}) {
+		t.Fatalf("the configuration reload was not logged: %v", log.snapshot())
 	}
 }
 

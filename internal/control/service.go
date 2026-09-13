@@ -15,7 +15,7 @@ import (
 
 type runtime interface {
 	ControlStatus() daemonstate.ControlSnapshot
-	WaitStatus(context.Context, uint64) error
+	SubscribeStatus(context.Context) (daemonstate.Subscription, error)
 	Trigger([]string) ([]string, error)
 	Reconcile()
 	Clean(context.Context, []string, bool, bool, bool, bool) ([]lifecycle.CleanPlan, error)
@@ -86,20 +86,47 @@ func (s *service) WatchStatus(request *controlrpc.WatchStatusRequest, stream con
 		defer cancel()
 		defer context.AfterFunc(s.drain, cancel)()
 	}
+	ended := func() error {
+		if streamErr := stream.Context().Err(); streamErr != nil {
+			return streamErr
+		}
+		return status.Error(codes.Unavailable, errListenerRetired)
+	}
+	subscription, err := s.runtime.SubscribeStatus(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ended()
+		}
+		return status.Error(codes.Internal, err.Error())
+	}
+	var latest daemonstate.ControlSnapshot
+	received := false
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
-		snapshot := s.runtime.ControlStatus()
-		if err := stream.Send(&controlrpc.WatchStatusResponse{Status: toSnapshot(snapshot)}); err != nil {
+		select {
+		case update, ok := <-subscription.Updates():
+			if !ok {
+				if ctx.Err() != nil {
+					return ended()
+				}
+				return status.Errorf(codes.Aborted, "status watch ended: %v", subscription.Err())
+			}
+			latest, received = update.State, true
+		case <-timer.C:
+			if !received {
+				timer.Reset(interval)
+				continue
+			}
+			// The interval re-sends the newest state when nothing has moved.
+			latest.Observed = time.Now().UTC()
+		case <-ctx.Done():
+			return ended()
+		}
+		if err := stream.Send(&controlrpc.WatchStatusResponse{Status: toSnapshot(latest)}); err != nil {
 			return err
 		}
-		waitCtx, cancel := context.WithTimeout(ctx, interval)
-		err := s.runtime.WaitStatus(waitCtx, snapshot.Revision)
-		cancel()
-		if err != nil && ctx.Err() != nil {
-			if streamErr := stream.Context().Err(); streamErr != nil {
-				return streamErr
-			}
-			return status.Error(codes.Unavailable, errListenerRetired)
-		}
+		timer.Reset(interval)
 	}
 }
 

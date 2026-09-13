@@ -33,10 +33,18 @@ import (
 
 type fakeRuntime struct {
 	mu        sync.Mutex
-	revision  uint64
-	changed   chan struct{}
 	triggered []string
+	updates   chan daemonstate.Update // nil: deliver the current state once, then nothing
+	ended     error
 }
+
+type fakeSubscription struct {
+	updates <-chan daemonstate.Update
+	err     error
+}
+
+func (s *fakeSubscription) Updates() <-chan daemonstate.Update { return s.updates }
+func (s *fakeSubscription) Err() error                         { return s.err }
 
 type remoteTestBackend struct{ zfs.Executor }
 
@@ -48,27 +56,18 @@ func (remoteTestBackend) InspectDatasetIdentity(_ context.Context, dataset strin
 }
 
 func (f *fakeRuntime) ControlStatus() daemonstate.ControlSnapshot {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return daemonstate.ControlSnapshot{Revision: f.revision, Observed: time.Unix(10, 0), Generation: 7, Datasets: []daemonstate.DatasetStatus{{Name: "tank/data", Active: true}}, Queues: map[string]daemonstate.QueueSnapshot{"management": {Capacity: 8}}}
+	return daemonstate.ControlSnapshot{Observed: time.Unix(10, 0), Generation: 7, Datasets: []daemonstate.DatasetStatus{{Name: "tank/data", Active: true}}, Queues: map[string]daemonstate.QueueSnapshot{"management": {Capacity: 8}}}
 }
-func (f *fakeRuntime) WaitStatus(ctx context.Context, after uint64) error {
-	f.mu.Lock()
-	if f.revision > after {
-		f.mu.Unlock()
-		return nil
+
+// SubscribeStatus delivers f.updates when set. Otherwise, like the daemon, it
+// delivers the current state first, and then nothing.
+func (f *fakeRuntime) SubscribeStatus(context.Context) (daemonstate.Subscription, error) {
+	if f.updates != nil {
+		return &fakeSubscription{updates: f.updates, err: f.ended}, nil
 	}
-	if f.changed == nil {
-		f.changed = make(chan struct{})
-	}
-	changed := f.changed
-	f.mu.Unlock()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-changed:
-		return nil
-	}
+	initial := make(chan daemonstate.Update, 1)
+	initial <- daemonstate.Update{State: f.ControlStatus()}
+	return &fakeSubscription{updates: initial}, nil
 }
 func (f *fakeRuntime) Trigger(names []string) ([]string, error) {
 	f.mu.Lock()
@@ -124,6 +123,52 @@ func TestUnixControlAPI(t *testing.T) {
 	info, err := os.Stat(cfg.Paths.SocketPath)
 	if err != nil || info.Mode().Perm() != 0o660 {
 		t.Fatalf("socket mode=%v err=%v", info.Mode(), err)
+	}
+}
+
+func TestWatchStatusSendsEachUpdateAndResendsOnInterval(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	updates := make(chan daemonstate.Update)
+	server, err := StartServer(cfg, &fakeRuntime{updates: updates, ended: errors.New("status subscriber fell behind")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	client, err := DialLocal(t.Context(), cfg.Paths.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Connection.Close() }()
+	stream, err := client.Status.WatchStatus(t.Context(), &controlrpc.WatchStatusRequest{IntervalMilliseconds: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for revision := uint64(1); revision <= 2; revision++ {
+		updates <- daemonstate.Update{State: daemonstate.ControlSnapshot{Revision: revision}}
+		response, err := stream.Recv()
+		if err != nil || response.GetStatus().GetRevision() != revision {
+			t.Fatalf("update %d: response=%v err=%v", revision, response, err)
+		}
+	}
+	// Nothing moves, so the interval re-sends the newest state.
+	response, err := stream.Recv()
+	if err != nil || response.GetStatus().GetRevision() != 2 {
+		t.Fatalf("interval response=%v err=%v", response, err)
+	}
+	// A subscription that ends while the client is connected ends the watch
+	// with an error rather than leaving it silently stale.
+	close(updates)
+	for {
+		if _, err = stream.Recv(); err != nil {
+			break
+		}
+	}
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("ended watch err=%v, want Aborted", err)
 	}
 }
 

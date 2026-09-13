@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -252,4 +254,38 @@ func TestPoolSilentOutcomeLeavesTheReportedStateStanding(t *testing.T) {
 			t.Fatalf("recorded %v, want %v", states, want)
 		}
 	}
+}
+
+func TestPoolRecordsPendingBeforeAJobPoppedImmediatelyStarts(t *testing.T) {
+	t.Parallel()
+	status := NewStatus(time.Now)
+	pool, err := newStatusPool("transfer", "local_transfer", 4, 64, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription := subscribe(t, status)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := pool.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	const jobs = 50
+	for index := range jobs {
+		id := "job-" + strconv.Itoa(index)
+		if added, err := pool.Submit(Job{ID: id, Group: id, Scope: id, StartState: "probing", Run: func(context.Context) Outcome { return Outcome{} }}); err != nil || !added {
+			t.Fatalf("submit %s: added=%v err=%v", id, added, err)
+		}
+	}
+	transitions, _ := collect(t, subscription, 3*jobs)
+	states := map[string][]string{}
+	for _, event := range transitions {
+		states[event.Job] = append(states[event.Job], event.State)
+	}
+	for job, got := range states {
+		if want := []string{"pending-transfer", "probing", "succeeded"}; !slices.Equal(got, want) {
+			t.Fatalf("%s recorded %v, want %v", job, got, want)
+		}
+	}
+	pool.Close()
+	pool.Wait()
 }

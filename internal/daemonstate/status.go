@@ -4,8 +4,25 @@ package daemonstate
 
 import "time"
 
-// Event is a structured worker-state transition used by logs and live status.
+// EventKind says how an Event is delivered. The zero value is invalid, so an
+// Event built without a kind is rejected rather than guessed at.
+type EventKind uint8
+
+const (
+	// EventTransition is a change of job state: queued, lossless, in order.
+	EventTransition EventKind = iota + 1
+	// EventProgress is a transfer progress sample, conflated to the newest
+	// sample per job. It never changes a job's state.
+	EventProgress
+)
+
+// Event is a job-state transition or a transfer progress sample; Kind says
+// which.
 type Event struct {
+	Kind EventKind `json:"-"`
+	// Send identifies the sending transition a progress sample was taken
+	// under. It is set on a sending transition and on each of its samples.
+	Send           uint64        `json:"-"`
 	Pool           string        `json:"pool"`
 	Job            string        `json:"job"`
 	Scope          string        `json:"scope"`
@@ -46,6 +63,21 @@ type ControlSnapshot struct {
 	Datasets         []DatasetStatus
 	Queues           map[string]QueueSnapshot
 	Jobs             []Event
+}
+
+// Update is one delivery to a status subscriber: every transition since the
+// previous Update, in order, and the state as of the last message merged into
+// it. The first Update carries the state at registration and no transitions.
+type Update struct {
+	Transitions []Event
+	State       ControlSnapshot
+}
+
+// Subscription is a live status subscription. Updates is closed when the
+// subscription ends, and Err then reports why.
+type Subscription interface {
+	Updates() <-chan Update
+	Err() error
 }
 
 // ReloadResult describes one successfully validated configuration generation.
