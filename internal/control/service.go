@@ -78,7 +78,7 @@ func (s *service) WatchStatus(request *controlrpc.WatchStatusRequest, stream con
 		return status.Error(codes.InvalidArgument, "watch interval must be between 100ms and 1h")
 	}
 	// A watch never ends on its own, so a draining listener would otherwise
-	// wait out its whole drain bound for it and then cut it.
+	// never finish draining.
 	ctx := stream.Context()
 	if s.drain != nil {
 		var cancel context.CancelFunc

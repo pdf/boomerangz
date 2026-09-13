@@ -865,11 +865,20 @@ the retired listener's `Serve`, up to the full bound, and a call cut when the
 bound expired left no trace. A watch never ends on its own, so one connected to
 a retired listener always held the drain to its bound, and a same-address
 replacement drained with the server lock held, so `Reload` - and the Reload RPC
-reply, and `Close` - waited the bound with it. Chunk E closes the retired
-listener before `Reload` returns, which also frees its address for a
-same-address replacement; drains in a goroutine `Close` stops and waits for;
-ends a watch on a draining listener at once with `codes.Unavailable`; and logs
-"control listener drain bound expired" at warning when the bound cuts a call.
+reply, and `Close` - waited the bound with it. The bound itself cut replication
+transfers, which a configuration reload has no reason to stop. And every mTLS
+listener was replaced on every reload, changed or not, because its client CA
+pool is fixed once built.
+
+Chunk E closes the retired listener before `Reload` returns, which also frees
+its address for a same-address replacement; drains in a goroutine `Close` stops
+and waits for, with no bound, so a call in flight finishes however long it
+takes; ends a watch on a draining listener at once with `codes.Unavailable`; and
+replaces an mTLS listener only when its definition or the contents of its client
+CA changed. Without a bound, a call to a peer that vanished silently holds the
+retired server until the transport notices, which over TCP is the keepalive in
+3.8; until chunk D configures it, that is the kernel's own timeout. It holds
+memory, not the reload or the replacement.
 
 ## 6. Chunks
 
@@ -944,8 +953,8 @@ interval.
 rest. Done when a call in flight across a reload completes, the retired listener
 refuses connections once `Reload` returns, a watch on it ends at once, a
 same-address replacement does not wait for its predecessor's calls, `Close`
-stops a drain rather than waiting out its bound, and an expired bound is logged,
-each with a test.
+stops a drain, and an unchanged mTLS listener survives a reload while one whose
+client CA changed does not, each with a test.
 
 **Chunk F - the in-process waiter.** 4.1, on chunk B, in
 `test/integration/internal/statuswait`. `waitForTransferSuccesses`,

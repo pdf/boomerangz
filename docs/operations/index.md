@@ -87,16 +87,15 @@ causes the reload action to fail. See
 [Configure the daemon](/guide/configuration#validate-changes) for the reload
 contract and non-default socket usage.
 
-A reload leaves an unchanged control socket or token-authenticated TCP listener
-in place. A reload that moves or replaces a listener - a new socket path,
-address, or authentication mode - stops that listener accepting before the
-reload returns, and a TCP listener using `mtls` or `mtls+token` is always
-replaced, even when its configuration is unchanged, so that it picks up a new
-client CA. A `status --watch` connected to it ends at once with an error saying
-the listener was retired, so start the watch again against the current socket or
-endpoint. Other calls already running on it get up to five seconds to finish;
-any still running then are stopped, and the daemon logs
-`control listener drain bound expired` at warning.
+A reload leaves a control listener whose configuration is unchanged in place,
+along with its connections. A listener using `mtls` or `mtls+token` also counts
+as changed when the contents of its client CA file changed, because the CA is
+read when the listener starts. A listener that is moved, replaced or removed
+stops accepting before the reload returns, and its clients' existing
+connections start no new calls. Calls already running on it, such as
+replication transfers, run to completion. A `status --watch` connected to it
+never completes, so it ends at once with an error saying the listener was
+retired; start it again against the current socket or endpoint.
 
 Only restart the service when the reload result requires it, such as after
 changing `paths.identity_dir`, or when performing planned maintenance. Stopping

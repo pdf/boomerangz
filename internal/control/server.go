@@ -1,6 +1,7 @@
 package control
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -31,10 +32,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// listenerDrainBound limits how long a retired listener waits for its in-flight
-// calls before stopping them.
-const listenerDrainBound = 5 * time.Second
-
 // errListenerRetired ends a watch whose listener a reload retired.
 const errListenerRetired = "control listener retired by configuration reload"
 
@@ -56,7 +53,6 @@ type Server struct {
 	closeOnce   sync.Once
 	closeErr    error
 	closed      bool
-	drainBound  time.Duration
 	draining    map[*serverEndpoint]struct{}
 	drains      sync.WaitGroup
 }
@@ -67,7 +63,10 @@ type serverEndpoint struct {
 	server     *grpc.Server
 	listener   net.Listener
 	socket     *socketFile
-	retired    atomic.Bool
+	// clientCA is the client CA an mTLS endpoint was built to trust; its
+	// verification pool is fixed once built, so a change needs a new endpoint.
+	clientCA []byte
+	retired  atomic.Bool
 	// startDrain cancels the context the endpoint's service watches for a
 	// drain.
 	startDrain context.CancelFunc
@@ -191,40 +190,53 @@ func (r *certificateReloader) get(*tls.ClientHelloInfo) (*tls.Certificate, error
 	return r.certificate, nil
 }
 
-func tlsServerConfig(name string, listener config.ListenerConfig, identityDir string, logger *slog.Logger) (*tls.Config, error) {
-	if listener.TLSCert == "" {
-		managed, err := ensureManagedServerIdentity(identityDir, name, listener.AdvertisedAddress)
-		if err != nil {
-			return nil, err
-		}
-		listener.TLSCert, listener.TLSKey = managed.cert, managed.key
+func clientAuthenticated(listener config.ListenerConfig) bool {
+	return listener.Network == "tcp" && (listener.AuthMode == "mtls" || listener.AuthMode == "mtls+token")
+}
+
+// readClientCA returns the client CA an mTLS listener trusts, the managed CA
+// when client_ca is unset, and nil for any other listener.
+func readClientCA(listener config.ListenerConfig, identityDir string) ([]byte, error) {
+	if !clientAuthenticated(listener) {
+		return nil, nil
 	}
-	managedClientAuth := false
-	if (listener.AuthMode == "mtls" || listener.AuthMode == "mtls+token") && listener.ClientCA == "" {
+	path := listener.ClientCA
+	if path == "" {
 		managedCA, err := ensureManagedClientCA(identityDir)
 		if err != nil {
 			return nil, err
 		}
-		listener.ClientCA = managedCA
-		managedClientAuth = true
+		path = managedCA
+	}
+	return os.ReadFile(path)
+}
+
+// tlsServerConfig also returns the client CA the configuration trusts.
+func tlsServerConfig(name string, listener config.ListenerConfig, identityDir string, logger *slog.Logger) (*tls.Config, []byte, error) {
+	if listener.TLSCert == "" {
+		managed, err := ensureManagedServerIdentity(identityDir, name, listener.AdvertisedAddress)
+		if err != nil {
+			return nil, nil, err
+		}
+		listener.TLSCert, listener.TLSKey = managed.cert, managed.key
 	}
 	reloader := &certificateReloader{certFile: listener.TLSCert, keyFile: listener.TLSKey, logger: logger, listener: name}
 	if _, err := reloader.get(nil); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	result := &tls.Config{MinVersion: tls.VersionTLS13, GetCertificate: reloader.get}
-	if listener.AuthMode == "mtls" || listener.AuthMode == "mtls+token" {
-		pem, err := os.ReadFile(listener.ClientCA)
-		if err != nil {
-			return nil, err
-		}
+	clientCA, err := readClientCA(listener, identityDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if clientCA != nil {
 		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("client_ca contains no certificates")
+		if !pool.AppendCertsFromPEM(clientCA) {
+			return nil, nil, fmt.Errorf("client_ca contains no certificates")
 		}
 		result.ClientAuth = tls.RequireAndVerifyClientCert
 		result.ClientCAs = pool
-		if managedClientAuth {
+		if listener.ClientCA == "" {
 			result.VerifyConnection = func(state tls.ConnectionState) error {
 				if len(state.PeerCertificates) == 0 {
 					return fmt.Errorf("client supplied no certificate")
@@ -233,7 +245,7 @@ func tlsServerConfig(name string, listener config.ListenerConfig, identityDir st
 			}
 		}
 	}
-	return result, nil
+	return result, clientCA, nil
 }
 
 func methodScope(method string) string {
@@ -313,7 +325,7 @@ func startServer(cfg config.Config, backend runtime, replication zfs.Executor, z
 	if err != nil {
 		return nil, err
 	}
-	result := &Server{logger: logger, reloader: &reloadHandler{}, config: cfg.Clone(), backend: backend, replication: replication, zfsPath: zfsPath, store: store, endpoints: make(map[string]*serverEndpoint), drainBound: listenerDrainBound, draining: make(map[*serverEndpoint]struct{})}
+	result := &Server{logger: logger, reloader: &reloadHandler{}, config: cfg.Clone(), backend: backend, replication: replication, zfsPath: zfsPath, store: store, endpoints: make(map[string]*serverEndpoint), draining: make(map[*serverEndpoint]struct{})}
 	definitions := listenerDefinitions(cfg)
 	names := make([]string, 0, len(definitions))
 	for name := range definitions {
@@ -366,7 +378,7 @@ func (s *Server) buildEndpoint(name string, definition config.ListenerConfig, id
 			endpoint.socket = &socket
 		}
 	case "tcp":
-		tlsConfig, err = tlsServerConfig(name, definition, identityDir, s.logger)
+		tlsConfig, endpoint.clientCA, err = tlsServerConfig(name, definition, identityDir, s.logger)
 		if err == nil {
 			listener, err = (&net.ListenConfig{}).Listen(context.Background(), "tcp", definition.Address)
 		}
@@ -463,27 +475,15 @@ func closeEndpoint(endpoint *serverEndpoint) error {
 	return result
 }
 
-// drainEndpoint stops endpoint once its in-flight calls have finished, stopping
-// any still running when the drain bound expires, and then closes it.
+// drainEndpoint ends endpoint's watches, refuses new calls on its connections,
+// waits for every other call in flight to finish however long it takes, and
+// then closes it. Only Close stops those calls early.
 func (s *Server) drainEndpoint(endpoint *serverEndpoint) error {
 	if endpoint == nil || endpoint.server == nil {
 		return closeEndpoint(endpoint)
 	}
 	endpoint.startDrain()
-	done := make(chan struct{})
-	go func() {
-		endpoint.server.GracefulStop()
-		close(done)
-	}()
-	timer := time.NewTimer(s.drainBound)
-	defer timer.Stop()
-	select {
-	case <-done:
-	case <-timer.C:
-		s.logger.Warn("control listener drain bound expired", "name", endpoint.name, "bound", s.drainBound)
-		endpoint.server.Stop()
-		<-done
-	}
+	endpoint.server.GracefulStop()
 	return closeEndpoint(endpoint)
 }
 
@@ -514,13 +514,16 @@ func endpointAddress(definition config.ListenerConfig) string {
 	return definition.Network + "\x00" + definition.Address
 }
 
-func endpointUnchanged(previous, next config.ListenerConfig) bool {
-	if !reflect.DeepEqual(previous, next) {
+// endpointUnchanged reports whether previous can keep serving next as it is.
+// The server certificate is loaded for each handshake, but an mTLS endpoint's
+// client CA pool is fixed once built, so a changed CA - or one that can no
+// longer be read, which the rebuild then reports - needs a new endpoint.
+func endpointUnchanged(previous *serverEndpoint, next config.ListenerConfig, identityDir string) bool {
+	if !reflect.DeepEqual(previous.definition, next) {
 		return false
 	}
-	// The server certificate is loaded for each handshake, while client CA
-	// pools are immutable once constructed and therefore need a fresh server.
-	return next.Network != "tcp" || (next.AuthMode != "mtls" && next.AuthMode != "mtls+token")
+	clientCA, err := readClientCA(next, identityDir)
+	return err == nil && bytes.Equal(previous.clientCA, clientCA)
 }
 
 func normalizedDefinitions(cfg config.Config) map[string]config.ListenerConfig {
@@ -546,7 +549,7 @@ func normalizedDefinitions(cfg config.Config) map[string]config.ListenerConfig {
 
 func (s *Server) validateEndpoint(name string, definition config.ListenerConfig, identityDir string) error {
 	if definition.Network == "tcp" {
-		if _, err := tlsServerConfig(name, definition, identityDir, s.logger); err != nil {
+		if _, _, err := tlsServerConfig(name, definition, identityDir, s.logger); err != nil {
 			return err
 		}
 	}
@@ -580,7 +583,7 @@ func (s *Server) Reload(cfg config.Config) error {
 	staged := make(map[string]*serverEndpoint)
 	for name, definition := range nextDefinitions {
 		previous, exists := s.endpoints[name]
-		if exists && endpointUnchanged(previous.definition, definition) {
+		if exists && endpointUnchanged(previous, definition, cfg.Paths.IdentityDir) {
 			continue
 		}
 		if exists && endpointAddress(previous.definition) == endpointAddress(definition) {
@@ -602,7 +605,7 @@ func (s *Server) Reload(cfg config.Config) error {
 	replaced := make(map[string]*serverEndpoint)
 	for name, definition := range nextDefinitions {
 		previous, exists := s.endpoints[name]
-		if !exists || endpointUnchanged(previous.definition, definition) || endpointAddress(previous.definition) != endpointAddress(definition) {
+		if !exists || endpointUnchanged(previous, definition, cfg.Paths.IdentityDir) || endpointAddress(previous.definition) != endpointAddress(definition) {
 			continue
 		}
 		s.retireEndpointLocked(previous)

@@ -1,15 +1,12 @@
 package control
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -76,30 +73,13 @@ func awaitCall(t *testing.T, result <-chan error) error {
 	return nil
 }
 
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
-func movedSocketServer(t *testing.T, runtime runtime, logger *slog.Logger) (*Server, config.Config, config.Config) {
+func movedSocketServer(t *testing.T, runtime runtime) (*Server, config.Config, config.Config) {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := config.Defaults()
 	cfg.Paths.SocketPath = filepath.Join(dir, "before.sock")
 	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
-	server, err := StartServer(cfg, runtime, logger)
+	server, err := StartServer(cfg, runtime, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,9 +91,8 @@ func movedSocketServer(t *testing.T, runtime runtime, logger *slog.Logger) (*Ser
 func TestServerReloadCompletesCallInFlightOnRetiredListener(t *testing.T) {
 	t.Parallel()
 	runtime := newHeldRuntime()
-	server, cfg, next := movedSocketServer(t, runtime, nil)
+	server, cfg, next := movedSocketServer(t, runtime)
 	defer func() { _ = server.Close() }()
-	server.drainBound = time.Hour
 	client, err := DialLocal(t.Context(), cfg.Paths.SocketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -138,9 +117,8 @@ func TestServerReloadCompletesCallInFlightOnRetiredListener(t *testing.T) {
 
 func TestServerReloadRPCThatRetiresItsOwnListenerReturns(t *testing.T) {
 	t.Parallel()
-	server, cfg, next := movedSocketServer(t, &fakeRuntime{}, nil)
+	server, cfg, next := movedSocketServer(t, &fakeRuntime{})
 	defer func() { _ = server.Close() }()
-	server.drainBound = time.Hour
 	server.SetReloadHandler(func(context.Context) (daemonstate.ReloadResult, error) {
 		return daemonstate.ReloadResult{Generation: 2}, server.Reload(next)
 	})
@@ -166,8 +144,7 @@ func TestServerReloadRPCThatRetiresItsOwnListenerReturns(t *testing.T) {
 func TestServerCloseStopsCallDrainingFromReload(t *testing.T) {
 	t.Parallel()
 	runtime := newHeldRuntime()
-	server, cfg, next := movedSocketServer(t, runtime, nil)
-	server.drainBound = time.Hour
+	server, cfg, next := movedSocketServer(t, runtime)
 	client, err := DialLocal(t.Context(), cfg.Paths.SocketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -195,38 +172,9 @@ func TestServerCloseStopsCallDrainingFromReload(t *testing.T) {
 	}
 }
 
-func TestServerReloadDrainBoundStopsAndLogsCallInFlight(t *testing.T) {
-	t.Parallel()
-	runtime := newHeldRuntime()
-	var logs syncBuffer
-	server, cfg, next := movedSocketServer(t, runtime, slog.New(slog.NewJSONHandler(&logs, nil)))
-	server.drainBound = 10 * time.Millisecond
-	client, err := DialLocal(t.Context(), cfg.Paths.SocketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = client.Connection.Close() }()
-	result, _ := startHeldCall(t, client, runtime)
-	if err := server.Reload(next); err != nil {
-		t.Fatal(err)
-	}
-	if err := awaitCall(t, result); err == nil {
-		t.Fatal("call past the drain bound reported success")
-	}
-	if err := server.Close(); err != nil {
-		t.Fatal(err)
-	}
-	output := logs.String()
-	if !strings.Contains(output, `"msg":"control listener drain bound expired"`) || !strings.Contains(output, `"name":"@default"`) {
-		t.Fatalf("drain bound expiry was not logged:\n%s", output)
-	}
-}
-
 func TestServerReloadEndsWatchOnRetiredListener(t *testing.T) {
 	t.Parallel()
-	var logs syncBuffer
-	server, cfg, next := movedSocketServer(t, &fakeRuntime{}, slog.New(slog.NewJSONHandler(&logs, nil)))
-	server.drainBound = time.Hour
+	server, cfg, next := movedSocketServer(t, &fakeRuntime{})
 	client, err := DialLocal(t.Context(), cfg.Paths.SocketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -260,23 +208,13 @@ func TestServerReloadEndsWatchOnRetiredListener(t *testing.T) {
 	if err := awaitCall(t, closed); err != nil {
 		t.Fatal(err)
 	}
-	if output := logs.String(); strings.Contains(output, "drain bound expired") {
-		t.Fatalf("watch held the drain to its bound:\n%s", output)
-	}
 }
 
 func TestServerReloadSameAddressDoesNotWaitForCallInFlight(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ca, certificate, key, clientCertificate, clientKey := writeMTLSPKI(t, dir)
-	reservation, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := reservation.Addr().String()
-	if err := reservation.Close(); err != nil {
-		t.Fatal(err)
-	}
+	address := reserveAddress(t)
 	cfg := config.Defaults()
 	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
 	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
@@ -287,7 +225,6 @@ func TestServerReloadSameAddressDoesNotWaitForCallInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = server.Close() }()
-	server.drainBound = time.Hour
 	bundle, err := CreatePairingBundle(server.store, address, certificate, ca, "localhost", false, "", "", []string{"admin"}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -323,5 +260,113 @@ func TestServerReloadSameAddressDoesNotWaitForCallInFlight(t *testing.T) {
 	close(runtime.release)
 	if err := awaitCall(t, result); err != nil {
 		t.Fatalf("call in flight across a same-address reload failed: %v", err)
+	}
+}
+
+// reserveAddress returns a loopback address that was free a moment ago, so a
+// listener replaced by a reload rebinds the address its clients know.
+func reserveAddress(t *testing.T) string {
+	t.Helper()
+	reservation, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reservation.Close() }()
+	return reservation.Addr().String()
+}
+
+// mtlsServer starts a server with one mTLS TCP listener named "network" and
+// returns a client credential its client CA trusts.
+func mtlsServer(t *testing.T) (*Server, config.Config, PairingBundle) {
+	t.Helper()
+	dir := t.TempDir()
+	ca, certificate, key, clientCertificate, clientKey := writeMTLSPKI(t, dir)
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	cfg.Listeners["network"] = config.ListenerConfig{Network: "tcp", Address: reserveAddress(t), AuthMode: "mtls", TLSCert: certificate, TLSKey: key, ClientCA: ca}
+	server, err := StartServer(cfg, &fakeRuntime{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	return server, cfg, mtlsBundle(t, cfg.Listeners["network"].Address, ca, clientCertificate, clientKey)
+}
+
+func mtlsBundle(t *testing.T, address, ca string, clientCertificate, clientKey []byte) PairingBundle {
+	t.Helper()
+	caPEM, err := os.ReadFile(ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return PairingBundle{Version: 1, Endpoint: address, TrustMode: "ca", CAPEM: string(caPEM), ServerName: "localhost", ClientCert: string(clientCertificate), ClientKey: string(clientKey)}
+}
+
+func TestServerReloadKeepsUnchangedMTLSListener(t *testing.T) {
+	t.Parallel()
+	server, cfg, bundle := mtlsServer(t)
+	client, err := DialBundle(t.Context(), bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Connection.Close() }()
+	stream, err := client.Status.WatchStatus(t.Context(), &controlrpc.WatchStatusRequest{IntervalMilliseconds: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	before := server.endpoints["network"]
+	if err := server.Reload(cfg.Clone()); err != nil {
+		t.Fatal(err)
+	}
+	if server.endpoints["network"] != before {
+		t.Fatal("reload replaced an mTLS listener whose configuration and client CA were unchanged")
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("watch on an unchanged mTLS listener ended: %v", err)
+	}
+}
+
+func TestServerReloadReplacesMTLSListenerWhenClientCAChanges(t *testing.T) {
+	t.Parallel()
+	server, cfg, bundle := mtlsServer(t)
+	rotated := t.TempDir()
+	ca, _, _, clientCertificate, clientKey := writeMTLSPKI(t, rotated)
+	caPEM, err := os.ReadFile(ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedBundle := bundle
+	rotatedBundle.ClientCert, rotatedBundle.ClientKey = string(clientCertificate), string(clientKey)
+	if err := os.WriteFile(cfg.Listeners["network"].ClientCA, caPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := server.endpoints["network"]
+	if err := server.Reload(cfg.Clone()); err != nil {
+		t.Fatal(err)
+	}
+	if server.endpoints["network"] == before {
+		t.Fatal("reload kept an mTLS listener whose client CA changed")
+	}
+	// The server certificate is still issued by the original CA, which the
+	// rotated client's bundle keeps trusting for the server.
+	current, err := DialBundle(t.Context(), rotatedBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = current.Connection.Close() }()
+	if _, err := current.Status.GetStatus(t.Context(), &controlrpc.GetStatusRequest{}); err != nil {
+		t.Fatalf("client issued by the new client CA was refused: %v", err)
+	}
+	// DialBundle handshakes eagerly, so the refusal can arrive at either step.
+	previous, err := DialBundle(t.Context(), bundle)
+	if err == nil {
+		defer func() { _ = previous.Connection.Close() }()
+		_, err = previous.Status.GetStatus(t.Context(), &controlrpc.GetStatusRequest{})
+	}
+	if err == nil {
+		t.Fatal("client issued by the replaced client CA was accepted")
 	}
 }
