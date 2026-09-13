@@ -4,8 +4,8 @@ Status: proposed. Nothing here has landed.
 
 The daemon's status contract is a map of the latest event per job. Everything
 that wants to know what the daemon did - a test, an operator, a log pipeline -
-reads that map repeatedly and hopes it did not move in between. It does move,
-and what happened in between is gone.
+reads that map repeatedly and cannot tell whether it moved in between. It does
+move, and what happened in between is gone.
 
 This document proposes making the transition stream itself the contract, and
 then retiring the polling that only exists because the contract was a snapshot.
@@ -31,7 +31,7 @@ This is the pattern for a condition this process owns.
 `Runtime.WaitStatus` ([internal/daemon/runtime.go:1245](../internal/daemon/runtime.go)).
 `WatchStatus` uses it in production: it sends a snapshot, then blocks on the
 revision, re-sending after a client-chosen interval if nothing moves
-([internal/control/service.go:69](../internal/control/service.go)). Section 3.6
+([internal/control/service.go:69](../internal/control/service.go)). Section 3.8
 is about what that interval is still covering for.
 
 **Request channel plus ticker.** `discovery.Scanner.Run` waits on cancellation,
@@ -75,18 +75,32 @@ stand. But they work by keeping the map quiet enough to sample, which is a
 property every future caller has to preserve without knowing it is doing so.
 
 **2.3 Polling is what the snapshot contract forces.** Given only a map, a caller
-who wants a sequence has no option but to read it often. That is why four test
-helpers loop over `runtime.Status()` on a 25-100ms sleep
-([test/integration/daemon/guest_test.go:101](../test/integration/daemon/guest_test.go),
-[:124](../test/integration/daemon/guest_test.go),
-[:441](../test/integration/daemon/guest_test.go),
-[test/integration/daemon/native_test.go:84](../test/integration/daemon/native_test.go)),
-and why the control suite re-runs `boomerangz status` in a loop
+who wants a sequence has no option but to read it often. That is why four waits
+in the daemon stage loop over `runtime.Status()` on a 25-100ms sleep:
+`waitForTransferSuccesses`
+([test/integration/daemon/guest_test.go:124](../test/integration/daemon/guest_test.go)),
+`waitForEvent` in `TestGuestRemoteOutageReconnection`
+([:441](../test/integration/daemon/guest_test.go)), `waitForJobState`
+([test/integration/daemon/native_test.go:84](../test/integration/daemon/native_test.go)),
+and the inline attempt loop in `TestGuestDaemonRemoteBackoff`
+([test/integration/daemon/native_test.go:316-325](../test/integration/daemon/native_test.go)),
+the test 2.2 names. Two more poll the pool with `InspectState` while waiting for
+the daemon: the scheduling test's `waitFor`
+([test/integration/daemon/guest_test.go:199](../test/integration/daemon/guest_test.go))
+and the outage test's loops for its snapshot holds
+([:460-497](../test/integration/daemon/guest_test.go)). And the control suite
+re-runs `boomerangz status` in a loop
 ([test/integration/control/guest_test.go:82](../test/integration/control/guest_test.go),
 [:237](../test/integration/control/guest_test.go),
 [test/integration/control/adversarial_test.go:91](../test/integration/control/adversarial_test.go)).
 Those loops are a symptom. Faster polling shrinks the window and never closes
 it.
+
+`waitForSendIntervals`
+([test/integration/daemon/guest_test.go:101](../test/integration/daemon/guest_test.go))
+also loops, but over the test's own `observedLocalStream` fake rather than
+status. Its condition is one the test process owns, so it wants
+broadcast-and-recheck on the fake (1), not a status subscription.
 
 The cost is not only correctness. The guest is 2 vCPUs and 4 GiB
 ([test/integration/targets/cachyos/config.sh:16](../test/integration/targets/cachyos/config.sh)),
@@ -94,86 +108,340 @@ every `InspectState` forks `zfs`, and a 100ms poll is up to ten processes a
 second competing with the daemon whose timing the same test is asserting on.
 The CI failure that started this work was a starved management worker.
 
+**2.4 The snapshot is assembled from shared memory.** The map is one instance of
+a wider shape: status is state that several components write under their own
+locks and readers reach into. `ControlStatus` reads the store, then the
+scheduler's deadlines, then takes `r.mu` and reads every queue while holding it
+([internal/daemon/runtime.go:1228-1233](../internal/daemon/runtime.go)). Nothing
+makes those reads one view. `applyGeneration` updates the scheduler
+([internal/daemon/runtime.go:452](../internal/daemon/runtime.go)) before it
+updates the active set under `r.mu` ([:484](../internal/daemon/runtime.go)), so
+a snapshot taken between them shows new deadlines beside the old active set.
+`Pool.emit` reads the queue twice under separate locks - `Pending` from one
+`Snapshot`, `Position` from a second inside `Position`
+([internal/daemon/pool.go:242](../internal/daemon/pool.go),
+[internal/daemon/queue.go:221](../internal/daemon/queue.go)) - so the two fields
+of one event can disagree. And `r.mu` alone guards ten unrelated fields
+([internal/daemon/runtime.go:102-117](../internal/daemon/runtime.go)).
+
+**2.5 A progress sample stands in for a transition.** `Event` has no field that
+says what kind of message it is
+([internal/daemonstate/status.go:8](../internal/daemonstate/status.go)). A
+progress sample is an `Event` whose `State` `recordProgress` hard-codes to
+`sending` ([internal/daemon/runtime.go:1064-1069](../internal/daemon/runtime.go)),
+and for remote jobs that sample is the only record of the job starting to send.
+The remote job's start state is `probing`
+([internal/daemon/runtime.go:1006](../internal/daemon/runtime.go)); nothing
+records `sending` except the first sample that reaches `recordProgress`. The
+local job has the opposite fault: its start state is `sending`
+([internal/daemon/runtime.go:889](../internal/daemon/runtime.go)), published
+before planning, holds, and estimation, when no stream exists yet. Neither job
+reports the verification and property reconciliation that follow the stream.
+Section 3.4 traces where the decision to send is actually made.
+
 ## 3. The contract change
 
-**3.1 Publish transitions to subscribers.** Both consumers are streams: one
-gRPC goroutine per `--watch` client, blocked in `Send`
-([internal/control/service.go:69](../internal/control/service.go)), and a test
-waiter that wants the next event matching a predicate. So the store publishes
-rather than retaining a history for someone to pull:
+**3.1 One goroutine owns status.** Status is asynchronous results passing from
+producers to consumers. The Go wiki's guidance on
+[mutex or channel](https://go.dev/wiki/MutexOrChannel) lists channels for
+"communicating async results" and mutexes for "state"; the defect in 2 and the
+assembly in 2.4 are what sharing that memory costs. `FairQueue` and `Scheduler`
+are state in the wiki's sense and keep their mutexes. What they publish becomes
+messages.
+
+`StatusStore` is replaced by a status owner: one goroutine that owns job states,
+latest progress, the runtime's dataset view, deadlines, queue views, and the
+subscriber set. No other goroutine reads or writes that memory. Producers send
+values on one input channel:
 
 ```go
-// Subscribe delivers transitions recorded after the call. The channel is
-// closed when the subscription ends; cancel releases it. A subscriber that
-// stops reading past the queue bound has its subscription terminated rather
-// than its events dropped - ErrSubscriberOverflow is delivered before the
-// close, and the subscriber must resync from a snapshot.
-func (s *StatusStore) Subscribe() (<-chan Event, func())
+type statusMessage struct {
+	event     *Event               // a transition or a progress sample; Kind says which (3.3)
+	runtime   *runtimeView         // discovery and configuration generations; known, active, recursive datasets
+	deadlines map[string]time.Time // scheduler next-snapshot deadlines
+	queue     *queueView           // pool name and a detached QueueSnapshot
+	subscribe *subscribeRequest    // register a subscriber; reply carries its forwarder
+	snapshot  *snapshotRequest     // reply carries a detached copy of the state
+}
 ```
 
-The producer never blocks: publishing is a non-blocking send into each
-subscriber's bounded queue. That property is not negotiable, because the report
-path runs on the pool's worker goroutines and the transfer progress callbacks
+Every read becomes a request on that same channel - `subscribe`, `snapshot` (for
+`GetStatus`, `ListDatasets`, and `Runtime.Status()`), and unsubscribe - carrying
+a reply channel:
+
+```go
+for {
+	select {
+	case m := <-s.input:
+		switch {
+		case m.subscribe != nil:
+			fwd := newForwarder(s.state.clone(), m.subscribe.policy)
+			s.subscribers[fwd] = struct{}{}
+			m.subscribe.reply <- fwd
+		case m.snapshot != nil:
+			m.snapshot.reply <- s.state.clone()
+		default:
+			s.apply(m)  // update owned state
+			s.fanOut(m) // non-blocking send to each subscriber's forwarder (3.2)
+		}
+	case <-ctx.Done():
+		return
+	}
+}
+```
+
+It is one channel because `select` chooses at random among ready cases. Separate
+channels for events and views would lose the order in which one producer sent
+them, and a separate request channel would lose read-your-writes: a buffered
+channel is first in, first out, so a request sent after a change was sent is
+answered after that change is applied, while a request on its own channel could
+be answered first. Today a status read after `config reload` returns sees the
+new configuration generation, because `commitConfig` bumps it and records the
+reload before returning ([internal/daemon/runtime.go:319-331](../internal/daemon/runtime.go),
+[:353](../internal/daemon/runtime.go)); one channel keeps that true.
+
+The loop holds no lock and holds no reference to any other component, so it
+never calls out. That is what lets a producer send while holding its own lock
+without risking a deadlock, and it is a property of the loop's shape rather than
+a lock-ordering rule to remember.
+
+Ordering within a producer is the producer's job. The scheduler and the queues
+change from several goroutines, so each sends its view while holding the lock
+that serializes its changes: `Scheduler.mu` in `Update`, `Complete`, and `Retry`
+([internal/daemon/scheduler.go:63](../internal/daemon/scheduler.go),
+[:103](../internal/daemon/scheduler.go), [:117](../internal/daemon/scheduler.go)),
+and `FairQueue.mu` in `Offer`, `Pop`, `RemoveScope`, and `DiscardAll`
+([internal/daemon/queue.go:70](../internal/daemon/queue.go),
+[:96](../internal/daemon/queue.go), [:131](../internal/daemon/queue.go),
+[:165](../internal/daemon/queue.go)). `applyGeneration` still sends deadlines
+and the runtime view as two messages, so a subscriber can briefly hold the new
+deadlines beside the old active set, as `ControlStatus` can today (2.4).
+
+The pool breaks that rule today. `Pool.Submit` offers the job to the queue and
+only then emits `pending-<pool>`
+([internal/daemon/pool.go:224-230](../internal/daemon/pool.go)), while a worker
+can pop the job and emit its start state in between
+([internal/daemon/pool.go:249-273](../internal/daemon/pool.go)). Read from the
+code, not observed in a run: a job can record `running` - or, if it is quick, its
+outcome - before `pending`, and the status map then shows a started or finished
+job as pending. Two sends for one job come from different goroutines with nothing
+ordering them. So `Offer` sends the queue view and the `pending-<pool>`
+transition as one message under `FairQueue.mu`, the lock `Pop` must take before
+the job can start. Sending `pending` before `Offer` would instead publish it for a
+job a full or closed queue then rejects. This depends on `Pool.emit` no longer
+reading the queue (below), since today it takes the queue lock itself.
+
+With queue views owned here, the owner stamps `Pending` and `Position` onto job
+rows from the newest queue view, and `Pool.emit` stops reading the queue. The
+double read in 2.4 goes with it.
+
+The producer guarantee needs restating precisely. The report path runs on the
+pool's worker goroutines and the transfer progress callbacks
 ([internal/daemon/pool.go:280](../internal/daemon/pool.go),
-[internal/daemon/runtime.go:1064](../internal/daemon/runtime.go)) - a status
-consumer must never apply backpressure to replication.
+[internal/daemon/runtime.go:1064](../internal/daemon/runtime.go)), and a status
+consumer must never apply backpressure to replication. A send on the owner's
+buffered input can block, but only on the owner's in-memory work: the owner never
+waits on a consumer, because fan-out into forwarders is non-blocking and
+forwarders always accept input. That is weaker than "the producer never blocks"
+and it is the guarantee this design offers.
+
+**3.2 Delivery: a forwarder per subscriber.** Each subscriber gets a forwarder
+goroutine that decouples the owner from the consumer's pace. It always accepts
+from the owner and offers to the consumer only when it has something to send,
+using a nil channel to disable the send case:
+
+```go
+// Update is one delivery to a subscriber.
+type Update struct {
+	Transitions []Event  // every transition since the previous Update, in order
+	State       Snapshot // newest state as of the last merged message
+}
+
+for {
+	var out chan<- Update
+	if pending.ready() {
+		out = f.out
+	}
+	select {
+	case m := <-f.in:
+		pending.merge(m) // append transitions; overwrite state and progress
+		if len(pending.Transitions) > transitionBound {
+			f.fail(ErrSubscriberOverflow)
+			return
+		}
+	case out <- pending.take():
+	case <-f.done:
+		return
+	}
+}
+```
+
+```go
+// Subscribe registers a subscriber. The first Update carries the full state at
+// registration and no transitions; each later Update carries the transitions
+// since the previous one, in order, and the state as of the last of them. The
+// channel is closed when the subscription ends; Err then reports why, and is
+// ErrSubscriberOverflow when the subscriber fell behind. Cancelling ctx ends it.
+func (s *Status) Subscribe(ctx context.Context) (*Subscription, error)
+
+func (u *Subscription) Updates() <-chan Update
+func (u *Subscription) Err() error
+```
+
+Three properties follow from the owner handling `subscribe` between two input
+messages. The initial state reflects everything already applied and the
+forwarder receives everything after it, so the seam between snapshot and stream
+is exact with no revision filtering. Each `Update` pairs its transitions with
+the state they produced in one value, so no subscriber reconciles two channels.
+And overflow is detected in one forwarder and ends one subscription.
 
 Overflow stays terminal, as with any lossy edge: a consumer that falls behind is
 told its sequence is broken rather than handed a gap with a counter beside it.
-The difference from a shared history is that the failure is now the slow
-consumer's alone, and the memory is per subscriber - 256 events each, with one
-or two subscribers in practice - rather than one global buffer sized for the
-worst of them.
+The one exception is the daemon's own log, which cannot be ended and marks its
+gaps instead (3.9).
+The failure is the slow consumer's alone, and the memory is per subscriber -
+256 transitions each until chunk B measures it (7), with one or two subscribers in practice - rather than one
+global buffer sized for the worst of them. A forwarder holds back state-only
+updates to one per 250ms and sends transitions immediately (3.6).
 
-**3.2 Bootstrapping without a gap.** Subscribe first, then take the snapshot,
-then discard queued events at or before the snapshot's revision. That ordering
-is why `Event` keeps the revision it was recorded at even though no caller now
-passes a cursor: it is what makes the seam between the snapshot and the stream
-exact rather than approximate.
+The events a subscriber missed before subscribing are gone. That is a real
+constraint, not a free simplification: a test must subscribe before the action
+it observes, where today its helpers look back at whatever `Status()` happens to
+hold. It is the better constraint, because "subscribe, act, wait" cannot
+silently observe the wrong occurrence of a repeated state the way a backward
+look can, but it does mean the helpers in chunk F are written around the
+subscription rather than around the assertion.
 
-A retained history would have papered over late subscription; publication does
-not, and the events a subscriber missed are gone. That is a real constraint, not a
-free simplification: a test must subscribe before the action it observes, where
-today its helpers look back at whatever `Status()` happens to hold. It is the
-better constraint, because "subscribe, act, wait" cannot silently observe the
-wrong occurrence of a repeated state the way a backward look can, but it does
-mean the helpers in chunk E are written around the subscription rather than
-around the assertion.
+**3.3 Events carry a kind; progress is conflated.** `Event` today is a job's
+identity, state, and reason, its queue position, and its progress fields in one
+struct ([internal/daemonstate/status.go:8-23](../internal/daemonstate/status.go)).
+Nothing in it separates a transition from a progress sample, and no existing
+field can stand in: `State` is `sending` for both a local job's start
+([internal/daemon/runtime.go:889](../internal/daemon/runtime.go)) and every
+sample, and `Bytes` is zero for both the pool's transition and the sample each
+stream emits before it copies anything
+([internal/zfs/stream.go:395](../internal/zfs/stream.go),
+[internal/replication/rpc/client.go:249](../internal/replication/rpc/client.go)).
+So `Event` gains a `Kind EventKind` field:
 
-**3.3 Progress is conflated, not queued.** Progress reaches a watcher today
-through the same path as everything else: each sample goes through
-`recordProgress` into `StatusStore.Record`
+```go
+type EventKind uint8
+
+const (
+	EventTransition EventKind = iota + 1 // queued, lossless, in order
+	EventProgress                        // conflated to the newest per job
+)
+```
+
+The zero value is invalid, so an `Event` built without a kind is rejected by the
+owner rather than guessed at. The transitions a watcher receives on the wire are
+only ever transitions, so the kind needs no proto field.
+
+A transition and a progress sample need different delivery. Every transition
+matters, in order, so transitions are queued and overflow is terminal (3.2).
+Only the newest progress sample for a job matters - a rate from two samples ago
+is not information, it is a wrong number - so progress is conflated. The owner
+applies two rules. A progress sample for a job whose latest transition is not
+`sending` is discarded, so a sample that arrives late can never overwrite a
+finished job. A transition that moves a job out of `sending` clears that job's
+progress. Held progress is therefore bounded by the transfers running at once,
+which the transfer worker counts bound
+([internal/config/config.go:16-17](../internal/config/config.go)), and a
+forwarder merges progress by overwriting, so progress cannot overflow a
+subscription.
+
+Progress cannot share the transition queue. Deduplicating consecutive identical
+events to keep samples from crowding it out would erase the second of two
+identical failed attempts, which is the sequence `TestGuestDaemonRemoteBackoff`
+counts; and queueing samples at all spends the queue bound on numbers that are
+stale by the time they are read.
+
+Today a progress sample reaches a watcher through the same path as everything
+else: each sample goes through `recordProgress` into `StatusStore.Record`
 ([internal/daemon/runtime.go:1064](../internal/daemon/runtime.go)), moves the
 revision, and wakes `WatchStatus` into sending a full snapshot. Samples are
 produced at most every 250ms per transfer, from inside the stream's write path
 ([internal/zfs/stream.go:259](../internal/zfs/stream.go),
 [internal/replication/rpc/client.go:261](../internal/replication/rpc/client.go)),
 so a watcher sees bytes, rate and ETA move at up to four updates a second for
-each running transfer. The interval plays no part in that.
+each running transfer. The interval plays no part in that, and nothing in this
+section slows it.
 
-A transition and a progress sample are different kinds of message, and they
-need different delivery. Every transition matters, in order, so transitions are
-queued and overflow is terminal (3.1). Only the newest progress sample for a job
-matters - a rate from two samples ago is not information, it is a wrong number -
-so progress is conflated: each subscriber holds one latest-value slot per job
-and a one-element wake signal. Publishing a sample overwrites the slot and
-signals without blocking; a subscriber that was slow simply reads the newest
-sample when it next looks. The slots are bounded by the transfers running at
-once, which the transfer worker counts bound
-([internal/config/config.go:16](../internal/config/config.go)), so a progress
-subscription cannot overflow and needs no terminal edge.
+**3.4 Transfers report their phases.** Once a progress sample is a kind that
+never changes a job's state (3.3), the transition 2.5 describes has to come from
+wherever the decision to send is made. It is made three calls below the job.
 
-That is also why progress cannot share the transition queue. Deduplicating
-consecutive identical events to keep samples from crowding it out would erase
-the second of two identical failed attempts, which is the sequence
-`TestGuestDaemonRemoteBackoff` counts; and queueing samples at all spends the
-queue bound on numbers that are stale by the time they are read. Separate entry
-points on the store - `Record` for transitions, `RecordProgress` for samples -
-match call paths that are already distinct.
+For a remote job, the worker publishes `probing` and runs
+`Roadwarrior.Reconcile` with a callback into `recordProgress`
+([internal/daemon/runtime.go:1006-1015](../internal/daemon/runtime.go)).
+`Reconcile` returns early inside a backoff window; otherwise it calls
+`engine.Apply` up to twice, the second time only when the first plan's mode was
+`resume` ([internal/transfer/recovery.go:270-289](../internal/transfer/recovery.go)).
+It learns whether a stream ran only when `Apply` returns. The engine is
+`remoteApplier`, which opens the transport - this is the actual probe - and
+hands the same callback to a `transfer.Local` built by `NewRemoteWithService`
+([internal/daemon/runtime.go:41-52](../internal/daemon/runtime.go),
+[internal/transfer/local.go:127](../internal/transfer/local.go)). A local job
+reaches the same `Local.Apply` directly
+([internal/daemon/runtime.go:903-917](../internal/daemon/runtime.go)).
 
-**A stalled transfer currently reports nothing.** A sample is emitted only when
-bytes are written, and the rate is the cumulative average since the transfer
-began ([internal/zfs/stream.go:267](../internal/zfs/stream.go),
+`Local.Apply` plans, checks permissions, prepares receive parents, sets the
+target binding, places recovery holds, reloads, and re-plans. Only then, and only
+if `plan.Mode != "up-to-date"`, does it estimate and run the stream
+([internal/transfer/local.go:479-484](../internal/transfer/local.go)). After the
+stream it verifies GUIDs, checks the binding and references, reconciles
+destination properties, and verifies again, none of which reports anything.
+Both remote stream implementations emit their first sample after both ends have
+started and before the first byte
+([internal/zfs/stream.go:395](../internal/zfs/stream.go) through `RunPipeline`
+for SSH, [internal/replication/rpc/client.go:249](../internal/replication/rpc/client.go)
+for native), and their last before `Run` returns
+([internal/zfs/stream.go:407](../internal/zfs/stream.go),
+[internal/replication/rpc/client.go:281](../internal/replication/rpc/client.go)).
+
+So today a remote job shows `probing` through connection, planning, holds, and
+estimation; `sending` from the first sample through verification; and never
+`sending` at all against an up-to-date target. A resume shows as one continuous
+`sending` whose byte count falls back to zero when the second stream starts. A
+local job shows `sending` from before it has planned.
+
+The engine reports phases and progress through one ordered callback, replacing
+`report func(zfs.Progress)` on `Apply`:
+
+```go
+// Report is one ordered observation from a transfer: a phase change or a
+// progress sample.
+type Report struct {
+	Phase    Phase         // set on a phase change
+	Progress *zfs.Progress // set on a sample
+}
+```
+
+`Local.Apply` reports `PhaseSending` immediately before `EstimateSend` and
+`stream.Run`, and `PhaseVerifying` after `Run` returns. The daemon turns a phase
+into an `EventTransition` and a sample into an `EventProgress`, and
+`recordProgress` stops setting `State`. One callback keeps phases and samples in
+the order they happened, which is what 3.3's discard rule relies on: a stream's
+last sample is emitted inside `Run`, so it always precedes `PhaseVerifying`.
+
+A remote job then shows `probing`, `sending`, `verifying`, and its outcome, and
+an up-to-date remote job shows `probing` and its outcome, which is accurate. A
+resume whose second pass has newer state to send shows a second `sending`
+transition, so the counter falling back to zero has a visible cause; a second
+pass that finds the target up to date sends nothing and reports no second
+`sending`. A local job's start state becomes `planning`. The new
+states reach users through `status`; job states are not documented in `docs/`
+today, and 3.7 adds the list.
+
+Two alternatives do not work. Treating a stream's zero-byte first sample as the
+start marker relies on both stream implementations happening to emit before
+copying, which is the same unstated coupling as `recordProgress` hard-coding
+`sending`. And `Roadwarrior` cannot decide, because it knows whether a stream ran
+only after `Apply` returns.
+
+**3.5 A stalled transfer currently reports nothing.** A sample is emitted only
+when bytes are written, and the rate is the cumulative average since the
+transfer began ([internal/zfs/stream.go:267](../internal/zfs/stream.go),
 [internal/replication/rpc/client.go:203](../internal/replication/rpc/client.go)).
 A transfer that stops moving emits no further samples, so its last rate and ETA
 stay on screen unchanged - and today's interval re-sends exactly those numbers,
@@ -185,46 +453,65 @@ hides the stall for minutes. That ticker is sampling a counter to publish a time
 series - time-driven by intent, like the backoff timers - not polling for a
 condition.
 
-**3.4 `WatchStatus` sends what it receives.** Two additive fields on
+**3.6 `WatchStatus` sends what it receives.** One additive field on
 `WatchStatusResponse` ([proto/boomerangz/control/v1/control.proto:30](../proto/boomerangz/control/v1/control.proto)):
-the transitions observed since the previous message, and a flag marking a
-message as a resync after an overflow ended the server's subscription. The
-snapshot stays as it is, so existing clients are unaffected and a client joining
-mid-stream still gets a self-describing message. The handler subscribes, sends
-the snapshot, and then waits on both the transition queue and the progress
-signal. A wake sends every queued transition in order, together with a snapshot
-that by construction carries the newest progress for every running job.
+the transitions observed since the previous message. The snapshot stays as it
+is, so existing clients are unaffected and a client joining mid-stream still
+gets a self-describing message. The handler subscribes and sends one message per
+`Update`: its state as the snapshot and its transitions as the new field. The
+snapshot therefore carries the newest progress for every running job by
+construction.
 
-Progress-only wakes are coalesced to at most one message per 250ms per stream,
-matching the producer's own sample cadence. With the default of three transfer
-workers that bounds a watcher at four messages a second rather than twelve, and
-it never delays a transition, which sends immediately. While a `Send` is
-blocked, samples keep overwriting their slots, so a slow client costs itself
-freshness and nothing else. That limit is a server-side property of conflated
+When the subscription ends on overflow, the stream ends with it: the handler
+returns `codes.Aborted` with a message naming the overflow, and sends nothing
+further. There is no in-band resync. A flag on a message that otherwise looks
+like every other message is exactly what a consumer selecting `.jobs` ignores,
+which would reintroduce the silent gap this design removes; an ended stream
+cannot be ignored. `Aborted` rather than `ResourceExhausted` because gRPC also
+reports message-size limits as `ResourceExhausted`, and because `Aborted` means
+retry at a higher level - here, a fresh subscription and snapshot - which is the
+only honest recovery. Whether to reconnect is the client's decision.
+
+The forwarder's 250ms limit on state-only updates (3.2) matches the producers'
+own sample cadence. With the default two local and one remote transfer workers
+([internal/config/config.go:16-17](../internal/config/config.go)) that bounds a
+watcher at four messages a second rather than twelve, and it never delays a
+transition, which sends immediately. While a `Send` is blocked, the forwarder
+keeps merging, so a slow client costs itself freshness and nothing else until it
+falls 256 transitions behind. That limit is a server-side property of conflated
 data; it is not a client-chosen heartbeat, and it is not the interval coming
 back.
 
 `Runtime.WaitStatus` exists for exactly this handler
 ([internal/control/service.go:18](../internal/control/service.go),
-[:83](../internal/control/service.go)) and is retired with it, along with the
-revision-waiting on `StatusStore`. The interface the control service depends on
-gains `Subscribe` and loses `WaitStatus`; two test fakes follow
+[:83](../internal/control/service.go)) and is retired with it, along with
+`StatusStore` and its revision waiting. `StatusSnapshot.Revision` is already on
+the wire and stays; the owner counts it. The interface the control service
+depends on gains `Subscribe` and loses `WaitStatus`; two test fakes follow
 ([internal/control/control_test.go:55](../internal/control/control_test.go),
 [internal/cli/control_test.go:31](../internal/cli/control_test.go)).
 
-**3.5 The CLI shows them.** Interactive `--watch` gains a short transition tail
+**3.7 The CLI shows them.** Interactive `--watch` gains a short transition tail
 under the table - the thing an operator is actually watching for is a change,
 and today the only way to see one is to be looking at the right moment.
 Redirected `--json` includes the transitions in each object, which is additive
 for anything reading `.datasets` or `.jobs` today. `docs/reference/cli.md` and
-the operations guide say what the new field is, and that a resync marks the one
-case where the stream is not continuous. No flag changes, so the completions in `contrib/` are
-untouched; the man page gains a sentence with the docs.
+the operations guide say what the new field is, list the job states including
+those 3.4 adds, and say that a watch which falls behind ends with an error
+rather than continuing with a gap.
 
-This is the part I would have cut for being bigger than the tests needed. It is
-the half of the defect a user can hit.
+The CLI needs no new handling for that. The watch loop already returns any
+stream error other than end-of-stream or its own cancellation
+([internal/cli/control.go:73-78](../internal/cli/control.go)), and `cli.Run`
+prints it and exits 1 ([internal/cli/cli.go:23-26](../internal/cli/cli.go)), so
+both interactive and `--json` watches exit non-zero on overflow. No flag
+changes, so the completions in `contrib/` are untouched; the man page gains a
+sentence with the docs.
 
-**3.6 The watch interval retires.** `--interval` was specified before the
+This is the part a test-only fix would omit. It is the half of the defect a user
+can hit.
+
+**3.8 The watch interval retires.** `--interval` was specified before the
 stream was: the plan has non-interactive watch "emit newline-delimited JSON at
 `--interval`" ([PLAN.md:1025](../PLAN.md)), which is `watch(1)` - sample every N
 seconds. The control plane landed with revision waiting in the same commit
@@ -238,14 +525,18 @@ quietly covering for two real gaps rather than doing a job of its own.
 only a config reload records a transition
 ([internal/daemon/runtime.go:330](../internal/daemon/runtime.go)). A published
 discovery generation, the set of datasets and their activation, and the
-scheduler's next-snapshot deadlines all change silently. A watcher sees a newly
-enabled dataset when some unrelated job happens to transition, or when the
+scheduler's next-snapshot deadlines all change silently. So do the queues:
+`RemoveScope` and `DiscardAll` drop work without an event
+([internal/daemon/queue.go:131](../internal/daemon/queue.go),
+[:165](../internal/daemon/queue.go)), and a worker's `Pop` leaves the queue
+before `acquireScope`, which can block, and only then emits `running`
+([internal/daemon/pool.go:249-273](../internal/daemon/pool.go)). A watcher sees a
+newly enabled dataset when some unrelated job happens to transition, or when the
 interval expires - up to two seconds by default, indefinitely if the client
 asked for an hour. That is this document's defect in another place: a state
-change that is not an event. Publish them - a generation, an activation change,
-a deadline change - on the same stream, and the snapshot a watcher holds is
-never stale while connected. This also supplies the generation anchor 4.3 needs,
-so 4.3 stops being a test-only addition.
+change that is not an event. Under 3.1 each of these is a message to the owner,
+and every `Update` carries the resulting state, so the snapshot a watcher holds
+is never stale while connected.
 
 *A peer that has gone away without saying so.* No gRPC keepalive is configured
 on either side. Over the local socket that does not matter - a dead peer closes
@@ -254,46 +545,222 @@ thing that makes the server notice a vanished client, and nothing at all makes
 the client notice a vanished server: `Recv` has no deadline and the absence of a
 heartbeat is never checked ([internal/cli/control.go:73](../internal/cli/control.go)).
 Under publication, a silently dead client would hold its subscription until its
-queue overflowed. Liveness belongs to the transport: server and client
+forwarder overflowed. Liveness belongs to the transport: server and client
 keepalive parameters, with an enforcement policy, on the TCP listeners.
+
+The values are defined once in `internal/control` and used on both sides: by
+`grpcServer` for TCP listeners, where it already adds TLS credentials
+([internal/control/server.go:253-255](../internal/control/server.go)), and by
+`DialPairingConnection` ([internal/control/client.go:443-452](../internal/control/client.go)).
+Native replication dials through the same function
+([internal/replication/native/client.go:65](../internal/replication/native/client.go))
+and is served by the same listeners, so a native transfer to a vanished peer is
+detected by the same bound. The Unix socket gets none.
+
+| Side | Setting | Value |
+|---|---|---|
+| Server | `keepalive.ServerParameters` `Time` / `Timeout` | 30s / 10s |
+| Server | `keepalive.EnforcementPolicy` `MinTime` | 20s |
+| Server | `keepalive.EnforcementPolicy` `PermitWithoutStream` | false |
+| Client | `keepalive.ClientParameters` `Time` / `Timeout` | 30s / 10s |
+| Client | `keepalive.ClientParameters` `PermitWithoutStream` | false |
+
+The client and server values are one decision. In gRPC v1.83.2 the server
+counts a strike for each ping that arrives within `MinTime` of the previous one,
+and after more than two strikes closes the connection with a `too_many_pings`
+GOAWAY (`handlePing` and `maxPingStrikes = 2` in
+`internal/transport/http2_server.go`); its default `MinTime` is five minutes, so
+a client pinging every 30 seconds against a default server would be
+disconnected. `MinTime` sits below the client's `Time` to leave margin rather
+than at it. Neither side pings without an active RPC: a watch or a transfer is
+the connection worth keeping alive, and the CLI's other calls are short. Either
+side notices a vanished peer within `Time` plus `Timeout`, 40 seconds after the
+last activity.
+
+Two tests hold this. A unit test asserts, from the shared values, that the
+client's `Time` is at least the server's `MinTime`. And a host-safe test in
+`internal/control` runs `WatchStatus` over loopback TCP through a proxy that
+stops forwarding, and asserts that the client's stream fails and the server
+releases the subscription, each within 40 seconds plus a margin.
 
 With both addressed the interval has no remaining function, and it should go
 rather than linger as a knob whose effect nobody can describe. `--interval` is
-removed from the CLI, `interval_milliseconds` is reserved in the proto so an
-older client still sending it is not misread, and the flag leaves
-`docs/reference/cli.md`, the operations guide
-([docs/operations/index.md:30](../docs/operations/index.md)), the man page and
-all three completions in the same change. Whether removal passes through a
-release as a hidden, ignored flag first is a compatibility decision for whoever
-cuts that release, not a design question; the design's position is that the
-flag has no behaviour to preserve.
+removed from the CLI, `interval_milliseconds` is reserved in the proto so its
+field number is never reused, and the flag leaves `docs/reference/cli.md`, the
+operations guide ([docs/operations/index.md:30](../docs/operations/index.md)),
+the man page and all three completions in the same change. Whether removal
+passes through a release as a hidden, ignored flag first is a compatibility
+decision for whoever cuts that release, not a design question; the design's
+position is that the flag has no behaviour to preserve.
 
 If a client wants to redraw on a clock - an elapsed time, a countdown to the
 next snapshot - that is a client-side ticker over the snapshot it holds. It
 needs nothing from the server.
 
+**3.9 The log is a subscriber.** Transitions are logged today in one place,
+`reportWorkerState`, on the producer's goroutine, and only for pool events
+([internal/daemon/runtime.go:59-69](../internal/daemon/runtime.go)). The
+configuration reload record and progress go to the store without it
+([internal/daemon/runtime.go:330](../internal/daemon/runtime.go),
+[:1069](../internal/daemon/runtime.go)), and a discovery generation is logged
+separately, as "discovery complete"
+([internal/daemon/runtime.go:1140](../internal/daemon/runtime.go)). The log and
+the status are two writes, so they can disagree, and nothing orders one against
+the other.
+
+The owner logs what it ingests instead, through a subscriber registered in
+`daemon.New`, before any producer runs. The log therefore holds every transition
+from process start, in the order every other subscriber sees them. It writes
+each transition - not progress, which is not logged today either - as the same
+"worker state" line with the same keys and levels as now: `failed` at error,
+`blocked` and `waiting-retry` at warning, everything else at info. The
+configuration reload record gains a line it does not have today. Each new
+discovery generation is written as "discovery complete" with its ID and dataset
+count, from the runtime view (3.8), so the line follows the generation being
+applied rather than the scan finishing. `reportWorkerState`'s logging and the
+line at `runtime.go:1140` go. This is also the durable record 5 says a record
+consumer should get: operators already read it from the journal
+([docs/operations/index.md:14](../docs/operations/index.md)).
+
+The write does not happen in the owner's loop. `slog`'s handler writes
+synchronously under its own lock (`commonHandler.handle` in `log/slog`), so a
+stalled stderr would stall the owner and, through it, every producer - including
+queue sends made under the queue lock (3.1). The log subscriber's forwarder puts
+that write on its own goroutine. Today a stalled stderr stalls whichever worker
+is logging; afterwards it stalls only the log writer.
+
+The log subscriber cannot end on overflow, because nothing would replace it. Its
+forwarder marks the gap instead. It uses the same transition bound as every
+other subscriber (3.2): one bound, set once from chunk B's measurement (7),
+rather than a second number for the same kind of delay. When its held
+transitions pass that bound, or the owner's non-blocking send to it fails, it
+discards what it holds, counts the
+discarded transitions and the span of their times, and keeps accepting. When the
+writer next takes an `Update`, it first writes one error-level line - "status log
+dropped transitions", with the count and the span - and then the transitions
+that followed. That line is the only place the log is not the complete sequence.
+It is not the in-band flag 3.6 rejects: a flag rides on a message that is
+otherwise read normally, while this is a line of its own at error level, and a
+test reading the log fails on it. Forwarders take this policy only when the
+owner registers them for the log; every other subscription ends on overflow.
+
+Component logs that are diagnostics with no status representation - the error
+and warning lines in `internal/daemon/runtime.go` such as "queue snapshot" and
+"prepare remote recovery", and "daemon started" and "daemon stopped" - stay
+where they are.
+
+The event lines become something tests read (4.2), so their message and keys
+are a contract. The operations guide documents them, and the gap line, with the
+change.
+
 ## 4. What the tests then stop doing
 
-**4.1 In-process waiter.** A helper in `internal/testutil` taking a runtime, a
+**4.1 In-process waiter.** A helper in `test/integration/internal/statuswait` taking a runtime, a
 predicate over `Event`, and a bound; selecting on its subscription rather than
-sleeping; returning the first matching transition; and on expiry failing with
-every transition it received while waiting. Replaces the four helpers in 2.3.
-The bound stays a hard failure: this removes sampling, not deadlines.
+sleeping; returning the first matching transition; failing on a subscription
+error; and on expiry failing with every transition it received while waiting.
+Replaces the four status loops in 2.3. The bound stays a hard failure: this
+removes sampling, not deadlines.
 
-**4.2 Out-of-process waiter.** A client in the control test package that dials
-the socket those tests already hold credentials for and consumes `WatchStatus`,
-replacing the `boomerangz status` poll loops. Socket appearance stays a poll - a
-missing file has no notifier short of inotify, and the bound is short.
+It lives under the integration tests because only they use it, and Go's
+`internal` rule makes that structural: a package under
+`test/integration/internal/` can be imported only by packages under
+`test/integration/`. Nothing in `internal/daemon` can import it, so the import
+cycle a helper taking a `*daemon.Runtime` would otherwise risk cannot arise, and
+no production package can come to depend on test code. 4.2's log waiter lives in
+the same package, so both share predicates and failure reporting. The package
+itself carries no build tag, so `make test`'s `go vet ./...` and `golangci-lint`
+check it; only the tests that use it are tagged `integration`.
 
-**4.3 A generation anchor for negative assertions.** The restart test sleeps
+**4.2 Out-of-process waiter.** The control suite runs the packaged daemon as a
+subprocess, and a subprocess starts working before a test can subscribe to it.
+It binds its control socket first - `StartServerWithReplication` listens and
+sets the socket mode before `Runtime.Run` is called
+([internal/cli/commands.go:141-163](../internal/cli/commands.go),
+[internal/control/server.go:145](../internal/control/server.go)) - but `Run`
+starts the scanner, whose first scan runs at once
+([internal/discovery/discovery.go:186](../internal/discovery/discovery.go)), and
+the scheduler makes a newly discovered root due immediately
+([internal/daemon/scheduler.go:73](../internal/daemon/scheduler.go)). Every test
+that starts or restarts a daemon, including the ones that kill a daemon at a ZFS
+commit and restart it against what it left, depends on work done before any
+subscription could exist.
+
+So the waiter reads the daemon's log, which the tests already capture from the
+subprocess and which carries every transition from process start (3.9). It is a
+writer the test attaches as the daemon's stdout and stderr: it splits complete
+lines, decodes the "worker state" and "discovery complete" lines, and wakes
+waiters by closing and replacing a channel - broadcast-and-recheck, because the
+condition is one the test process owns (1). A wait takes a predicate over the
+lines and a bound, and can name an occurrence ("the second `succeeded` for this
+job") because the sequence is complete. It fails at once on a "status log
+dropped transitions" line, and on expiry prints every line it decoded. Socket
+appearance stays a poll - a missing file has no notifier short of inotify, and
+the bound is short.
+
+Waits on what the daemon did read the log; assertions about the control plane
+itself stay on the socket, as one read after the log shows the behaviour. That
+read sees what the log reports, because the log line is written only after the
+owner has applied the change and a status request is answered in order behind
+it (3.1). Mapped against the two tests in `guest_test.go`:
+
+- *Dataset in control status* ([test/integration/control/guest_test.go:97-100](../test/integration/control/guest_test.go))
+  becomes the first "discovery complete" line, then one `status` read that must
+  list the dataset.
+- *Reloaded configuration generation* (`:124-133`) becomes one `status` read
+  after `config reload` returns: the reload record and the generation are
+  committed before the reply (3.1), so no wait is needed.
+- *Initial owned snapshot* and *completed initial snapshot job* (`:134-161`)
+  become the first `succeeded` for `snapshot:<dataset>`, then one pool read.
+- *Triggered owned snapshot* (`:166-169`) becomes the second `succeeded` for
+  `snapshot:<dataset>` - counted, not "the next after the trigger returns",
+  because the log writer can lag the reply - since a forced run skips the
+  deadline check ([internal/daemon/runtime.go:641](../internal/daemon/runtime.go));
+  then one pool read.
+- The abrupt-restart test's two daemons are covered by 4.3.
+
+In `TestGuestDaemonPowerLoss` the killed daemons are observed through their exit,
+which stays as it is
+([test/integration/control/adversarial_test.go:180-190](../test/integration/control/adversarial_test.go),
+[:261-268](../test/integration/control/adversarial_test.go)). The daemons started
+after a kill or a reseed wait on their own logs:
+
+- *snapshot-commit* checks the lineage as soon as the replacement serves
+  (`:213-230`), before anything shows the replacement has looked at the dataset.
+  Its log gives that point: its first terminal transition for
+  `snapshot:<dataset>`, which should be `scheduled` because the surviving
+  snapshot sets the next deadline (4.3). The lineage and survivor checks follow.
+- *receive-commit* waits for `local:<dataset>:<root>` to report `blocked` or
+  `succeeded` (`:300-312`); from the log that is the first such transition, its
+  reason carried on the same line.
+- The reseeded daemon's convergence (`:330-342`) becomes the first `succeeded`
+  for the same job, then one read for the bookmark and the destination.
+
+The contention tests' waits (`:421`, `:463`, `:496`, `:530`, `:556`) have not been
+mapped here.
+
+A test that subscribes to `WatchStatus` remains the control plane's own
+coverage, in chunk C; the suite's waits do not depend on it.
+
+**4.3 Anchor the restart assertion on the job outcome.** The restart test sleeps
 500ms and then asserts that no further snapshot appeared
 ([test/integration/control/guest_test.go:285](../test/integration/control/guest_test.go)).
 The sleep is a guess at how long "nothing else happened" has to be to mean
-something. With generations published as events (3.6), a waiter can block
-until the generation ID exceeds one it captured
-([internal/discovery/discovery.go:59](../internal/discovery/discovery.go)) and
-the assertion hangs off a positive event: two further scans have completed and
-the snapshot count is unchanged.
+something. Waiting for further discovery generations would not fix it: a scan
+completing only makes the root due (`Scheduler.Update`), and the snapshot job
+that could create a duplicate runs later, from the scheduler loop through the
+management queue ([internal/daemon/runtime.go:1143-1152](../internal/daemon/runtime.go)).
+
+The restarted daemon always runs that job, because its first scan makes the root
+due at `now`. When an owned snapshot already sets a later deadline, the job ends
+`scheduled` with the reason "existing owned snapshot sets the next deadline", and
+retries at that deadline instead of creating a snapshot
+([internal/daemon/runtime.go:641-643](../internal/daemon/runtime.go)). A
+duplicate would end `succeeded`. So the test waits in the restarted daemon's log
+for the first terminal transition of `snapshot:<dataset>`, requires it to be
+`scheduled` with that reason, and counts snapshots once. The first daemon's wait
+for its initial snapshot (`guest_test.go:248-256`) is the first `succeeded` for
+the same job in its own log, then one pool read, before the kill.
 
 **4.4 Wait for the transition, then assert once.** The scheduling test polls
 `InspectState` until a snapshot exists, until a property is local, until the
@@ -359,13 +826,25 @@ through a system daemon the project does not currently require.
 **Resumable watching.** A client that loses its stream and reconnects gets a
 fresh snapshot and the transitions from then on; whatever happened during the
 disconnect is not recoverable. Making it recoverable means retained history and
-a cursor the client presents on reconnect - the pull model this design started
-with, on top of the push one rather than instead of it. Neither consumer wants
-it today: the CLI does not reconnect at all, it returns the stream error
+a cursor the client presents on reconnect - a pull model on top of the push one
+rather than instead of it. Neither consumer wants it today: the CLI does not
+reconnect at all, it returns the stream error
 ([internal/cli/control.go:74](../internal/cli/control.go)), and a test subscribes
 for the duration of what it is watching. It becomes worth building when
 something consumes this stream as a record - an exporter, an audit trail - at
 which point the honest form is durable and on disk, not a larger queue.
+
+**Mixed-version watch clients.** A new CLI watching an older daemon receives
+no transitions field, which reads the same as nothing having happened, and paired
+remote daemons make that combination possible. boomerangz is alpha and makes no
+cross-version compatibility promise, so this is not handled; it becomes a
+question when one is made.
+
+**The rest of the runtime's shared memory.** 2.4's other instances are real but
+are not status. `r.mu` guarding ten unrelated fields
+([internal/daemon/runtime.go:102-117](../internal/daemon/runtime.go)) is worth
+splitting, and it shrinks on its own once status no longer reads it, but it is a
+separate change with its own review.
 
 **Everything else stays as it is because it is already right.** `waitForDevice`
 ([internal/testutil/zfstest/fixture.go:116](../internal/testutil/zfstest/fixture.go))
@@ -384,76 +863,176 @@ log if the bound expires.
 
 ## 6. Chunks
 
-**Chunk A - publication.** 3.1 through 3.3's delivery model. Unit tests for
-delivery order, the non-blocking publish, overflow terminating one subscription
-without touching another or the producer, and conflation: a burst of samples
-leaves exactly the newest per job, and cannot overflow or displace a queued
-transition. Done when a subscriber receives every transition recorded after it
-subscribed, or is told its subscription ended, and always reads the newest
-progress for every running job.
+**Chunk A - transfers report phases.** 3.4, on the current store. `Apply` takes
+the ordered `Report` callback; the daemon records `sending` and `verifying` as
+transitions and gives local jobs a `planning` start state. `recordProgress`
+still writes through `Record` until chunk B, which is harmless because a phase
+transition and the samples that follow it carry the same state. It lands first
+because chunk B's discard rule would otherwise drop every remote sample while
+the job still shows `probing`. Done when, in unit tests against a fake stream, a
+remote job records `probing`, `sending`, `verifying`, and its outcome; an
+up-to-date remote job records no `sending`; a resume followed by a newer send
+records two `sending` transitions; and a local job records `planning` before
+`sending`.
 
-**Chunk B - the control plane carries transitions.** 3.4 and 3.5, retiring
+**Chunk B - the status owner.** 3.1 through 3.3: the owner goroutine, the one
+input message type, `EventKind`, and forwarders. Every use of `StatusStore`
+becomes a message or a request
+([internal/daemon/runtime.go:60](../internal/daemon/runtime.go),
+[:162](../internal/daemon/runtime.go), [:330](../internal/daemon/runtime.go),
+[:1069](../internal/daemon/runtime.go), [:1228](../internal/daemon/runtime.go),
+[:1246](../internal/daemon/runtime.go), [:1363](../internal/daemon/runtime.go)),
+with its tests in `status_test.go` and `runtime_test.go` following, and
+producers send their views under their own locks. `WatchStatus` sends a snapshot per `Update` with its
+interval retained, so the CLI is unchanged. Unit tests for delivery order; a
+consumer that never reads not blocking the producer; overflow ending one
+subscription without touching another; conflation leaving exactly the newest
+sample per job and never displacing a queued transition; a sample after a job
+leaves `sending` being discarded; and the first `Update` agreeing with every
+later transition. Done when a subscriber receives every transition recorded
+after it subscribed, or is told its subscription ended, always reads the newest
+progress for every running job, and `status --watch` behaves as before. Expose
+the forwarder high-water mark here, record its peak across an unfiltered
+`make integration-test`, and set the transition bound from it (7) - one bound,
+shared by the log subscriber (3.9). `Offer` sends
+`pending-<pool>` with its queue view (3.1), with a unit test that a job popped
+immediately never records `pending` after its start state.
+
+Chunk B also moves transition logging to the log subscriber (3.9):
+`reportWorkerState`'s logging goes, the configuration reload record gains its
+line, and the log forwarder marks gaps rather than ending. The "discovery
+complete" line moves with the runtime view in chunk D. Unit tests: every
+transition recorded after `daemon.New` appears in the log in owner order; a
+stalled log writer does not block a producer; a log that falls past its bound
+writes one gap line with the count and resumes. The operations guide documents
+the event lines and the gap line in the same change.
+
+**Chunk C - the control plane carries transitions.** 3.6 and 3.7, retiring
 `WaitStatus` with them, and the docs in the same change. Done when
 `status --watch --json` emits every transition a job made while the client was
-connected, and a test asserts that a sequence which collapses in the snapshot
-survives in the stream.
+connected, a test asserts that a sequence which collapses in the snapshot
+survives in the stream, and a test asserts that a watcher which overflows
+receives `codes.Aborted` and no further message.
 
-**Chunk C - nothing a watcher holds goes stale.** 3.6: publish generations,
-activation changes and next-snapshot deadlines; configure transport keepalive on
-the TCP listeners; remove `--interval` and reserve its proto field, with docs,
-man page and completions. And 3.3's producer fixes: progress emitted on a ticker
-while a transfer is active, and a windowed rate. Done when a watcher's snapshot
-reflects a newly enabled dataset without any job transitioning, a stalled
-transfer's rate reaches zero within a few samples, a client over TCP detects a
-vanished daemon within the keepalive bound, and nothing in the tree describes a
-watch interval.
+**Chunk D - nothing a watcher holds goes stale.** 3.8: runtime, deadline and
+queue views reach every `Update`; configure transport keepalive on the TCP
+listeners; remove `--interval` and reserve its proto field, with docs, man page
+and completions. And 3.5's producer fixes: progress emitted on a ticker while a
+transfer is active, and a windowed rate. Done when a watcher's snapshot reflects
+a newly enabled dataset and a removed queue entry without any job transitioning,
+a stalled transfer's rate reaches zero within a few samples, a client over TCP
+detects a vanished daemon and the daemon releases a vanished client's
+subscription within 40 seconds (3.8), and nothing in the tree describes a watch
+interval.
 
-**Chunk D - the listener drain.** Section 5's last paragraph, independent of the
+**Chunk E - the listener drain.** Section 5's last paragraph, independent of the
 rest. Done when a call in flight across a reload completes, with a test.
 
-**Chunk E - the in-process waiter.** 4.1, converting the four helpers. Done when
-nothing in `test/integration/daemon/` sleeps while watching status, and a forced
-failure prints the transitions observed.
+**Chunk F - the in-process waiter.** 4.1, on chunk B, in
+`test/integration/internal/statuswait`. `waitForTransferSuccesses`,
+`waitForEvent` in `TestGuestRemoteOutageReconnection`, `waitForJobState`, and
+the attempt loop in `TestGuestDaemonRemoteBackoff` wait on a subscription, taken
+before `Runtime.Run` starts - in `runDaemon` and in the tests that start the
+runtime themselves; the backoff test counts its three attempts
+from the subscription. `waitForSendIntervals` waits on a broadcast channel in
+`observedLocalStream`. Done when none of those five sleeps, and a forced failure
+prints the transitions observed.
 
-**Chunk F - the out-of-process waiter.** 4.2, on chunk B's stream. Done when the
-control suite watches the daemon over the socket it is testing rather than by
-re-running the CLI.
+**Chunk G - the out-of-process waiter.** 4.2, on chunk B's log subscriber and
+chunk D's "discovery complete" line. A log writer the tests attach to the daemon
+subprocess, with predicates over decoded lines, occurrence counting, failure on a
+gap line, and every decoded line printed on expiry. `TestGuestDaemonControl` and
+`TestGuestDaemonPowerLoss` convert as 4.2 maps them; each status read that
+remains is a single read after the log shows the behaviour. The contention
+tests' waits
+([test/integration/control/adversarial_test.go:421](../test/integration/control/adversarial_test.go),
+[:463](../test/integration/control/adversarial_test.go),
+[:496](../test/integration/control/adversarial_test.go),
+[:530](../test/integration/control/adversarial_test.go),
+[:556](../test/integration/control/adversarial_test.go)) are mapped the same way
+first. Done when no test in `test/integration/control/` re-runs `boomerangz
+status` in a loop or polls the pool while waiting for the daemon, and a forced
+failure prints the log lines the waiter decoded.
 
-**Chunk G - the generation anchor.** 4.3, on chunk C's generation events. Done
-when no bare sleep remains in `test/integration/control/`.
+**Chunk H - the restart anchor.** 4.3, on chunk G's waiter. Done when no bare
+sleep remains in `test/integration/control/`, and a restart that created a
+duplicate snapshot fails on the job ending `succeeded` rather than on a count
+taken after a guessed delay.
 
-**Chunk H - ZFS waits behind transitions.** 4.4, last because it depends on E
-and changes what those tests assert rather than how they wait.
+**Chunk I - ZFS waits behind transitions.** 4.4, last because it depends on F
+and changes what those tests assert rather than how they wait. It covers the
+scheduling test's `waitFor` and the outage test's hold loops (2.3); for the
+latter, which transition follows the hold being placed has not been traced, and
+that tracing comes first.
 
-A through C are the defect: the contract, the stream that carries it, and the
-state changes it was missing. D is an unrelated sleep fixed while nearby. E
-through H are the cleanup the fix makes possible, and each is independently
-droppable without leaving the contract half-changed.
+A through D are the defect: the transitions the daemon was not recording, the
+contract, the stream that carries it, and the state changes it was missing. E is
+an unrelated sleep fixed while nearby. F through I are the cleanup the fix makes
+possible, and each is independently droppable without leaving the contract
+half-changed.
 
 ## 7. Risks
 
 - **A silently lossy stream is the original bug.** Overflow has to end the
-  subscription at every layer that carries it - the channel, the RPC, the CLI -
+  subscription at every layer that carries it - the forwarder, the RPC, the CLI -
   and a test waiter must fail on it rather than continue against a gap. The
-  failure mode to design against is a consumer that keeps going.
-- **Queue depth is bounded by evidence, not derived from it.** 256 per
-  subscriber is sized against a peak of 103 transitions a minute in a
-  deliberately aggressive test daemon, against consumers that read within
-  milliseconds of a wake. Chunk A exposes the high-water mark; a real deployment
-  approaching it is a signal to look at what is producing transitions at that
-  rate before enlarging anything.
+  daemon log is the one consumer that cannot end, so it marks its gap with a
+  line of its own (3.9), and a log reader must fail on that line. The failure
+  mode to design against is a consumer that keeps going.
+- **Queue depth is set by measurement, not asserted.** 256 per subscriber is a
+  placeholder. Chunk B exposes the forwarder high-water mark, records it across
+  an unfiltered `make integration-test`, sets the one bound every subscriber
+  and the log share (3.9) from that peak with the run named here, and replaces
+  this sentence with the result. A real deployment
+  approaching the bound is a signal to look at what is producing transitions at
+  that rate before enlarging anything.
+- **The owner must never call out.** Producers send while holding their own
+  locks (3.1), which is safe only because the owner's loop holds no lock and
+  references no component. A change that has the owner consult the scheduler,
+  a queue, or the runtime to fill in a field reintroduces the deadlock the shape
+  rules out. Fields the owner needs arrive as messages.
+- **A producer can wait on the owner.** The guarantee is that no consumer
+  applies backpressure to replication, not that a send never blocks (3.1). An
+  owner that does anything slower than in-memory work breaks it for every
+  producer at once.
 - **Subscribe-before-act is a requirement, not a convention.** A helper that
   subscribes after the action it observes waits for an event that has already
   been published, and the failure looks like the daemon never did the work.
-  Chunk E's waiter should take the subscription in its constructor so the
+  Chunk F's waiter should take the subscription in its constructor so the
   ordering is structural rather than remembered.
-- **Additive proto fields still change output.** `--json` consumers gain a
+- **The daemon's event log lines become a contract.** The control suite waits
+  on them (4.2), and operators already read them from the journal. Renaming the
+  message or a key breaks the suite's waits as surely as renaming a proto field
+  breaks a client; the operations guide documents them so a change is a visible
+  one.
+- **The log's per-job order is only as good as the producers'.** The log records
+  transitions in the order the owner receives them. A producer that sends two
+  events for one job from goroutines with no ordering between them - as
+  `Pool.Submit` does today (3.1) - puts them in the log out of order, and a
+  waiter counting occurrences reads that order as fact.
+- **New job states reach users.** `planning` and `verifying` (3.4) appear in
+  `status` output, and a second `sending` appears on resume. Anything matching
+  on the current states sees new ones; the states list lands in the docs with
+  chunk C.
+- **An additive proto field still changes output.** `--json` consumers gain a
   field; that is compatible for anything selecting known keys and not for
   anything asserting an exact object. The docs change lands with the code.
+- **A long-running watch can now end with an error.** Today a watch ends only on
+  cancellation or a transport failure; after chunk C it also ends with
+  `codes.Aborted` when it falls behind. A script that runs `status --watch
+  --json` unattended has to treat that exit as "resubscribe", not as the daemon
+  failing.
 - **A lossless stream invites over-specified tests.** Being able to assert on
   every intermediate state does not mean a test should. The waiter's predicate
   should name the transition the behaviour is about, not transcribe the
   sequence, or the suite gets brittle in a new way.
 - **More test code coupled to the status vocabulary.** Job IDs and state names
   become load-bearing in more places. They are already public - the CLI prints
-  them - but chunk H should not invent states to make a wait convenient.
+  them - but chunk I should not invent states to make a wait convenient.
+
+## 8. Open questions
+
+Points raised in review and not yet settled. Each is resolved in this document
+or removed with a reason, not left to memory.
+
+Nothing is open.
