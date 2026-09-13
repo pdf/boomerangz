@@ -445,7 +445,7 @@ func DialPairingConnection(bundle PairingBundle) (*grpc.ClientConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	options := []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))}
+	options := []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), clientKeepaliveOption()}
 	if bundle.TokenID != "" || bundle.Secret != "" {
 		options = append(options, grpc.WithPerRPCCredentials(tokenCredentials{id: bundle.TokenID, secret: bundle.Secret}))
 	}

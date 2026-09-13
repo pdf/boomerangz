@@ -48,10 +48,7 @@ func terminalWidth(writer io.Writer) (bool, int) {
 // under the status table.
 const watchTailLength = 10
 
-func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential string, watch, useJSON bool, interval time.Duration) error {
-	if interval < 100*time.Millisecond || interval > time.Hour {
-		return fmt.Errorf("status interval must be between 100ms and 1h")
-	}
+func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential string, watch, useJSON bool) error {
 	client, err := controlClient(ctx, cfg, credential)
 	if err != nil {
 		return err
@@ -69,7 +66,7 @@ func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential
 		}
 		return statusui.JSON(out, response.GetStatus())
 	}
-	stream, err := client.Status.WatchStatus(ctx, &controlrpc.WatchStatusRequest{IntervalMilliseconds: uint32(interval.Milliseconds())})
+	stream, err := client.Status.WatchStatus(ctx, &controlrpc.WatchStatusRequest{})
 	if err != nil {
 		return err
 	}

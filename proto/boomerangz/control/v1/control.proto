@@ -23,8 +23,12 @@ message GetStatusResponse {
   StatusSnapshot status = 1;
 }
 
+// A watch sends a message whenever the daemon's status changes, and at no other
+// time. Its first message is the status at registration.
 message WatchStatusRequest {
-  uint32 interval_milliseconds = 1;
+  // The watch interval was retired: every change is delivered as it happens.
+  reserved 1;
+  reserved "interval_milliseconds";
 }
 
 message WatchStatusResponse {

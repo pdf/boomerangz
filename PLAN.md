@@ -994,7 +994,7 @@ The initial CLI shape is:
 
 ```text
 boomerangz daemon
-boomerangz status [-w|--watch] [-i|--interval 2s]
+boomerangz status [-w|--watch]
 boomerangz dataset list
 boomerangz dataset inspect <dataset>
 boomerangz dataset adopt [--apply] <dataset>
@@ -1022,8 +1022,8 @@ Status output goes to stdout:
 - an interactive one-shot status uses a human-readable table;
 - interactive watch mode redraws a stable terminal display with progress bars;
 - non-interactive one-shot status emits one JSON object;
-- non-interactive watch mode emits newline-delimited JSON at `--interval`,
-  defaulting to two seconds.
+- non-interactive watch mode emits newline-delimited JSON, one object per
+  status change.
 
 Watch mode handles terminal resize and degrades cleanly when the terminal is too
 narrow for progress bars.

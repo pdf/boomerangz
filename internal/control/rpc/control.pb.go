@@ -101,11 +101,12 @@ func (x *GetStatusResponse) GetStatus() *StatusSnapshot {
 	return nil
 }
 
+// A watch sends a message whenever the daemon's status changes, and at no other
+// time. Its first message is the status at registration.
 type WatchStatusRequest struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	IntervalMilliseconds uint32                 `protobuf:"varint,1,opt,name=interval_milliseconds,json=intervalMilliseconds,proto3" json:"interval_milliseconds,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WatchStatusRequest) Reset() {
@@ -136,13 +137,6 @@ func (x *WatchStatusRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use WatchStatusRequest.ProtoReflect.Descriptor instead.
 func (*WatchStatusRequest) Descriptor() ([]byte, []int) {
 	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *WatchStatusRequest) GetIntervalMilliseconds() uint32 {
-	if x != nil {
-		return x.IntervalMilliseconds
-	}
-	return 0
 }
 
 type WatchStatusResponse struct {
@@ -1223,9 +1217,8 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"#boomerangz/control/v1/control.proto\x12\x15boomerangz.control.v1\"\x12\n" +
 	"\x10GetStatusRequest\"R\n" +
 	"\x11GetStatusResponse\x12=\n" +
-	"\x06status\x18\x01 \x01(\v2%.boomerangz.control.v1.StatusSnapshotR\x06status\"I\n" +
-	"\x12WatchStatusRequest\x123\n" +
-	"\x15interval_milliseconds\x18\x01 \x01(\rR\x14intervalMilliseconds\"\x98\x01\n" +
+	"\x06status\x18\x01 \x01(\v2%.boomerangz.control.v1.StatusSnapshotR\x06status\"1\n" +
+	"\x12WatchStatusRequestJ\x04\b\x01\x10\x02R\x15interval_milliseconds\"\x98\x01\n" +
 	"\x13WatchStatusResponse\x12=\n" +
 	"\x06status\x18\x01 \x01(\v2%.boomerangz.control.v1.StatusSnapshotR\x06status\x12B\n" +
 	"\vtransitions\x18\x02 \x03(\v2 .boomerangz.control.v1.JobStatusR\vtransitions\"p\n" +

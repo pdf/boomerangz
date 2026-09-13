@@ -33,12 +33,24 @@ warning level, and every other state at info level. A successful
 `boomerangz config reload` is logged as job `config:reload` in pool
 `configuration`. Transfer progress is not logged.
 
+### Discovery lines
+
+Each time the daemon applies a new discovery generation, it writes an
+info-level `discovery complete` line with `generation`, the generation's
+number, and `datasets`, the number of datasets it holds. The line is written
+once the generation is reflected in `status`, in order with the job state lines
+around it. A scan that fails writes a `discovery failed` line instead, and a
+configuration reload that republishes the same generation writes no second
+line.
+
+### Gaps in the log
+
 The log is complete from the moment the daemon starts. If writing to the log
 falls far enough behind that the daemon has to discard state changes rather
 than hold them, it writes an error-level `status log dropped transitions`
 line in place of each run of discarded changes, with `count`, the number of
-changes in the run, and `first` and `last`, the times of the earliest and
-latest of them. The line appears where those changes would have been, and the
+changes in the run, job state changes and discovery generations together, and
+`first` and `last`, the times of the earliest and latest of them. The line appears where those changes would have been, and the
 state changes that follow are written after it. Anything reading the log as a
 record should treat that line as a gap in it.
 
@@ -60,8 +72,21 @@ continuously:
 
 ```sh
 boomerangz status --watch
-boomerangz status --watch --interval 5s
 ```
+
+A watch receives an update whenever the daemon's status changes - a job state
+change, transfer progress, a newly discovered or activated dataset, a snapshot
+deadline, or work entering or leaving a queue - and nothing while status stays
+the same. Transfer progress updates at most four times a second, and a
+transfer's rate is measured over the last second, so a transfer that stops
+moving shows a rate of zero rather than a slowly falling average.
+
+Over a paired TCP listener, the client and the daemon each check that the other
+is still there while a watch or a transfer is running. A peer that vanished
+without closing the connection, such as a host that lost power or a network
+path that went away, is noticed within about 40 seconds: the watch ends with an
+`Unavailable` error, and the daemon releases what the call held. The local
+control socket needs no such check.
 
 In a terminal, a watch shows the status view with the most recent job state
 changes beneath it, oldest first, under `RECENT TRANSITIONS`. The table shows
@@ -74,8 +99,8 @@ newline-delimited JSON. Each object carries the snapshot fields and
 the daemon recorded it, with the same fields as an entry in `jobs` apart from
 transfer progress. A job that changed state several times between two objects
 has one entry in `jobs` and one entry in `transitions` for each change. The
-first object carries an empty `transitions` array, and so does an object sent
-only because the interval passed with nothing changing.
+first object, and an object sent for a change that was not a job state change,
+carry an empty `transitions` array.
 
 A watch that falls too far behind the daemon, because the client or its
 connection cannot keep up, ends with an `Aborted` error and exits with status
@@ -172,7 +197,8 @@ as changed when the contents of its client CA file changed, because the CA is
 read when the listener starts. A listener that is moved, replaced or removed
 stops accepting before the reload returns, and its clients' existing
 connections start no new calls. Calls already running on it, such as
-replication transfers, run to completion. A `status --watch` connected to it
+replication transfers, run to completion, or until transport keepalive finds
+that their peer has vanished. A `status --watch` connected to it
 never completes, so it ends at once with an error saying the listener was
 retired; start it again against the current socket or endpoint.
 

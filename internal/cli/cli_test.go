@@ -113,3 +113,16 @@ func TestDatasetHelpDescribesJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusHasNoWatchInterval(t *testing.T) {
+	t.Parallel()
+	for _, command := range [][]string{{"status", "--watch", "--interval", "5s"}, {"status", "--watch", "-i", "5s"}} {
+		parser, err := kong.New(&commandLine{}, kong.Name("boomerangz"), kong.Writers(io.Discard, io.Discard), kong.Exit(func(int) {}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parser.Parse(command); err == nil {
+			t.Fatalf("%v parsed: a watch sends every change as it happens and has no interval", command)
+		}
+	}
+}

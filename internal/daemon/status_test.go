@@ -42,7 +42,7 @@ func ownedStatus(t *testing.T) (*statusOwner, *Subscription) {
 func (o *statusOwner) record(event Event) {
 	if event.Kind == EventProgress {
 		if o.applyProgress(event) {
-			o.fanOut(nil)
+			o.fanOut(nil, nil)
 		}
 		return
 	}
@@ -501,9 +501,10 @@ func TestStatusLogMarksAGapWhenItFallsBehind(t *testing.T) {
 	}
 }
 
-// checkLogSequence requires lines to account for transitions with reasons
-// 0 through total-1 in order, each either written or counted in the gap line
-// that stands in its place. It returns the number of gap lines.
+// checkLogSequence requires lines to account for entries 0 through total-1 in
+// order, each either written or counted in the gap line that stands in its
+// place. Entry i is a transition with reason i or a discovery generation i+1.
+// It returns the number of gap lines.
 func checkLogSequence(t *testing.T, lines []map[string]string, total int) int {
 	t.Helper()
 	next, gaps := 0, 0
@@ -519,6 +520,11 @@ func checkLogSequence(t *testing.T, lines []map[string]string, total int) int {
 		case "worker state":
 			if reason, err := strconv.Atoi(line["reason"]); err != nil || reason != next {
 				t.Fatalf("line %d is transition %q, want %d", index, line["reason"], next)
+			}
+			next++
+		case "discovery complete":
+			if generation, err := strconv.Atoi(line["generation"]); err != nil || generation != next+1 || line["level"] != "INFO" {
+				t.Fatalf("line %d is discovery generation %q, want %d", index, line["generation"], next+1)
 			}
 			next++
 		default:
@@ -556,4 +562,65 @@ func TestStatusFlushWaitsForTheLogWriter(t *testing.T) {
 		t.Fatal("flush did not return once the log writer was released")
 	}
 	checkLogSequence(t, log.snapshot(), 2*transitionBound)
+}
+
+func TestStatusLogWritesEachNewDiscoveryGeneration(t *testing.T) {
+	t.Parallel()
+	log := &lineLog{}
+	status := NewStatus(time.Now)
+	status.subscribeLog(slog.New(log))
+	// A runtime with no generation yet writes nothing.
+	status.publishRuntime(runtimeView{configGeneration: 1})
+	status.record(transition("job", "running", "before"))
+	status.publishRuntime(runtimeView{generation: 1, entries: 3, configGeneration: 1})
+	// The same generation published again, by a configuration reload or an
+	// activation change, is not a new discovery.
+	status.publishRuntime(runtimeView{generation: 1, entries: 3, configGeneration: 2})
+	status.record(transition("job", "succeeded", "after"))
+	status.publishRuntime(runtimeView{generation: 2, entries: 4, configGeneration: 2})
+	status.flush(t.Context())
+	var got []string
+	for _, line := range log.snapshot() {
+		switch line["msg"] {
+		case "worker state":
+			got = append(got, "worker state/"+line["reason"])
+		case "discovery complete":
+			got = append(got, "discovery complete/"+line["generation"]+"/"+line["datasets"]+"/"+line["level"])
+		default:
+			t.Fatalf("unexpected log line %v", line)
+		}
+	}
+	want := []string{"worker state/before", "discovery complete/1/3/INFO", "worker state/after", "discovery complete/2/4/INFO"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("log = %v, want %v", got, want)
+	}
+}
+
+func TestStatusLogCountsDiscoveryGenerationsInAGap(t *testing.T) {
+	t.Parallel()
+	log := &lineLog{hold: make(chan struct{})}
+	status := NewStatus(time.Now)
+	status.subscribeLog(slog.New(log))
+	total := 4 * (transitionBound + statusInputBuffer)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for index := range total {
+			if index%10 == 0 {
+				status.publishRuntime(runtimeView{generation: uint64(index + 1)})
+				continue
+			}
+			status.record(transition("job", "running", strconv.Itoa(index)))
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stalled log writer blocked the producer")
+	}
+	close(log.hold)
+	status.flush(t.Context())
+	if gaps := checkLogSequence(t, log.snapshot(), total); gaps == 0 {
+		t.Fatal("a stalled log writer wrote no gap line")
+	}
 }

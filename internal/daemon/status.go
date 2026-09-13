@@ -94,6 +94,7 @@ type deadlineView struct {
 
 type runtimeView struct {
 	generation       uint64
+	entries          int // datasets the discovery generation holds
 	configGeneration uint64
 	datasets         []DatasetStatus // sorted; NextSnapshot is filled by the owner
 }
@@ -205,9 +206,10 @@ func (s *Status) Subscribe(ctx context.Context) (*Subscription, error) {
 }
 
 // subscribeLog registers the daemon log as a subscriber. It writes every
-// transition as a "worker state" line on its own goroutine, and it never ends:
-// transitions it could not take are written as one "status log dropped
-// transitions" line in their place.
+// transition as a "worker state" line and every newly applied discovery
+// generation as a "discovery complete" line, on its own goroutine, and it
+// never ends: what it could not take is written as one "status log dropped
+// transitions" line in its place.
 func (s *Status) subscribeLog(logger *slog.Logger) {
 	f := s.register(true)
 	go f.runLog()
@@ -219,6 +221,8 @@ func (s *Status) subscribeLog(logger *slog.Logger) {
 					logger.Error("status log dropped transitions", "count", delivered.gap.count, "first", delivered.gap.first, "last", delivered.gap.last)
 				case delivered.flush != nil:
 					close(delivered.flush)
+				case delivered.discovery != nil:
+					logger.Info("discovery complete", "generation", delivered.discovery.generation, "datasets", delivered.discovery.datasets)
 				default:
 					logTransition(logger, delivered.event)
 				}
@@ -335,10 +339,10 @@ func (o *statusOwner) run() {
 			o.handle(m)
 		case sample := <-o.status.progress:
 			if o.applyProgress(sample) {
-				o.fanOut(nil)
+				o.fanOut(nil, nil)
 			}
 		case <-retries:
-			o.fanOut(nil)
+			o.fanOut(nil, nil)
 		}
 	}
 }
@@ -365,17 +369,18 @@ func (o *statusOwner) handle(m statusMessage) {
 		if !logged {
 			close(m.flush)
 		}
-		o.fanOut(nil)
+		o.fanOut(nil, nil)
 	default:
-		if transition, changed := o.apply(m); changed {
-			o.fanOut(transition)
+		if transition, discovery, changed := o.apply(m); changed {
+			o.fanOut(transition, discovery)
 		}
 	}
 }
 
 // apply updates owned state from one input message. It returns the transition
-// to deliver, if the message carried one, and whether the state changed.
-func (o *statusOwner) apply(m statusMessage) (*Event, bool) {
+// to deliver, if the message carried one, the discovery generation to log, if
+// the message applied a new one, and whether the state changed.
+func (o *statusOwner) apply(m statusMessage) (*Event, *discoveryRecord, bool) {
 	changed := false
 	if m.queue != nil {
 		o.queues[m.queue.name] = m.queue.snapshot
@@ -385,7 +390,11 @@ func (o *statusOwner) apply(m statusMessage) (*Event, bool) {
 		o.deadlines = m.deadlines.entries
 		changed = true
 	}
+	var discovery *discoveryRecord
 	if m.runtime != nil {
+		if m.runtime.generation != 0 && m.runtime.generation != o.runtime.generation {
+			discovery = &discoveryRecord{generation: m.runtime.generation, datasets: m.runtime.entries, at: o.status.now().UTC()}
+		}
 		o.runtime = *m.runtime
 		changed = true
 	}
@@ -405,7 +414,7 @@ func (o *statusOwner) apply(m statusMessage) (*Event, bool) {
 		o.revision++
 		o.current = nil
 	}
-	return transition, changed
+	return transition, discovery, changed
 }
 
 // applyProgress keeps a sample only while its job is sending, and only under
@@ -469,8 +478,10 @@ func (o *statusOwner) hasRefused() bool {
 // fanOut delivers a change to every subscriber without blocking. A transition
 // is sent before the state it produced, and carries that state's revision. A
 // subscriber that refuses a transition has fallen behind: the log records a
-// gap in its place, and any other subscription ends.
-func (o *statusOwner) fanOut(transition *Event) {
+// gap in its place, and any other subscription ends. A newly applied discovery
+// generation is delivered to the log alone, which writes it as a record of its
+// own; every other subscriber sees it as state.
+func (o *statusOwner) fanOut(transition *Event, discovery *discoveryRecord) {
 	for f, record := range o.subscribers {
 		select {
 		case <-f.exited:
@@ -479,7 +490,14 @@ func (o *statusOwner) fanOut(transition *Event) {
 		default:
 		}
 		if f.log {
-			o.deliverLog(f, record, transition)
+			if discovery != nil {
+				o.deliverLog(f, record, &delivery{discovery: discovery})
+			}
+			var next *delivery
+			if transition != nil {
+				next = &delivery{event: *transition, revision: o.revision}
+			}
+			o.deliverLog(f, record, next)
 			continue
 		}
 		if transition != nil {
@@ -501,10 +519,12 @@ func (o *statusOwner) fanOut(transition *Event) {
 	}
 }
 
-// deliverLog offers the log what it refused earlier, in order, then the new
-// transition. Nothing is offered past a refusal, so the log's order holds, and
-// a flush is closed only by the writer once it has taken what preceded it.
-func (o *statusOwner) deliverLog(f *forwarder, record *subscriber, transition *Event) {
+// deliverLog offers the log what it refused earlier, in order, then the next
+// delivery, a transition or a discovery generation. Nothing is offered past a
+// refusal, so the log's order holds, and a flush is closed only by the writer
+// once it has taken what preceded it. A refused transition or discovery
+// generation is counted in a gap, so what the log holds back stays bounded.
+func (o *statusOwner) deliverLog(f *forwarder, record *subscriber, next *delivery) {
 	for len(record.refused) > 0 {
 		select {
 		case f.transitions <- record.refused[0]:
@@ -514,12 +534,12 @@ func (o *statusOwner) deliverLog(f *forwarder, record *subscriber, transition *E
 		}
 		break
 	}
-	if transition == nil {
+	if next == nil {
 		return
 	}
 	if len(record.refused) == 0 {
 		select {
-		case f.transitions <- delivery{event: *transition, revision: o.revision}:
+		case f.transitions <- *next:
 			return
 		default:
 		}
@@ -529,11 +549,15 @@ func (o *statusOwner) deliverLog(f *forwarder, record *subscriber, transition *E
 		record.refused = append(record.refused, delivery{})
 		last++
 	}
-	record.refused[last].gap.add(transition.At)
+	at := next.event.At
+	if next.discovery != nil {
+		at = next.discovery.at
+	}
+	record.refused[last].gap.add(at)
 }
 
-// gap counts transitions the daemon log could not take, and the span of their
-// times.
+// gap counts transitions and discovery generations the daemon log could not
+// take, and the span of their times.
 type gap struct {
 	count       int
 	first, last time.Time
@@ -550,12 +574,22 @@ func (g *gap) add(at time.Time) {
 }
 
 // delivery is one entry on a forwarder's transition channel: a transition
-// and the revision it produced, or, for the log only, a gap or a flush.
+// and the revision it produced, or, for the log only, a discovery generation,
+// a gap, or a flush.
 type delivery struct {
-	event    Event
-	revision uint64
-	gap      gap
-	flush    chan struct{}
+	event     Event
+	revision  uint64
+	discovery *discoveryRecord
+	gap       gap
+	flush     chan struct{}
+}
+
+// discoveryRecord is a discovery generation the runtime has applied, as the
+// daemon log writes it.
+type discoveryRecord struct {
+	generation uint64
+	datasets   int
+	at         time.Time
 }
 
 // forwarder decouples the owner from one consumer's pace.

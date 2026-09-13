@@ -4,7 +4,6 @@ package control
 import (
 	"context"
 	"sync"
-	"time"
 
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
 	"github.com/pdf/boomerangz/internal/daemonstate"
@@ -84,14 +83,11 @@ func (s *service) GetStatus(context.Context, *controlrpc.GetStatusRequest) (*con
 	return &controlrpc.GetStatusResponse{Status: toSnapshot(s.runtime.ControlStatus())}, nil
 }
 
-func (s *service) WatchStatus(request *controlrpc.WatchStatusRequest, stream controlrpc.StatusService_WatchStatusServer) error {
-	interval := time.Duration(request.GetIntervalMilliseconds()) * time.Millisecond
-	if interval == 0 {
-		interval = 2 * time.Second
-	}
-	if interval < 100*time.Millisecond || interval > time.Hour {
-		return status.Error(codes.InvalidArgument, "watch interval must be between 100ms and 1h")
-	}
+// WatchStatus sends one message per status update: the state at registration,
+// then each change with the transitions that produced it. Every change reaches
+// the subscription, so there is nothing to re-send while nothing moves; a
+// vanished peer is noticed by transport keepalive, not by a periodic send.
+func (s *service) WatchStatus(_ *controlrpc.WatchStatusRequest, stream controlrpc.StatusService_WatchStatusServer) error {
 	// A watch never ends on its own, so a draining listener would otherwise
 	// never finish draining.
 	ctx := stream.Context()
@@ -114,12 +110,7 @@ func (s *service) WatchStatus(request *controlrpc.WatchStatusRequest, stream con
 		}
 		return status.Error(codes.Internal, err.Error())
 	}
-	var latest daemonstate.ControlSnapshot
-	received := false
-	timer := time.NewTimer(interval)
-	defer timer.Stop()
 	for {
-		var response *controlrpc.WatchStatusResponse
 		select {
 		case update, ok := <-subscription.Updates():
 			if !ok {
@@ -130,24 +121,12 @@ func (s *service) WatchStatus(request *controlrpc.WatchStatusRequest, stream con
 				// than continue with a gap a client could not see.
 				return status.Errorf(codes.Aborted, "status watch ended: %v", subscription.Err())
 			}
-			latest, received = update.State, true
-			response = toWatchResponse(update)
-		case <-timer.C:
-			if !received {
-				timer.Reset(interval)
-				continue
+			if err := stream.Send(toWatchResponse(update)); err != nil {
+				return err
 			}
-			// The interval re-sends the newest state when nothing has moved.
-			// Its transitions were already sent, so it carries none.
-			latest.Observed = time.Now().UTC()
-			response = toWatchResponse(daemonstate.Update{State: latest})
 		case <-ctx.Done():
 			return ended()
 		}
-		if err := stream.Send(response); err != nil {
-			return err
-		}
-		timer.Reset(interval)
 	}
 }
 

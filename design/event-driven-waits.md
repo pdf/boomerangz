@@ -1056,6 +1056,32 @@ detects a vanished daemon and the daemon releases a vanished client's
 subscription within 40 seconds (3.8), and nothing in the tree describes a watch
 interval.
 
+As built, the "discovery complete" line is written by the log subscriber when
+the owner applies a runtime view whose discovery generation differs from the
+previous one; the view carries the generation's dataset count for it, and a
+republished generation writes nothing. A discovery generation the log refuses
+is counted in the gap with the transitions around it rather than held as
+itself, so what the owner holds for a stalled log stays bounded however often
+discovery runs, and the gap line's `count` covers both. Both streams report
+progress through one `zfs.ProgressMeter`: a first sample before the first byte,
+one per 250ms on a ticker whether or not bytes moved, and a last sample from
+`Finish` once the ticker's goroutine has exited, so the last sample still
+precedes `PhaseVerifying` (3.4). The rate is measured over the last second, so
+a stalled stream reports zero within four samples. Keepalive lives in
+`internal/control/keepalive.go` and is applied wherever a listener has TLS,
+which is every TCP listener and no Unix socket. Its loopback test holds the
+suite for the full 40 seconds, running in parallel with the rest of the
+package. The view-change test drives a real pool's `RemoveScope` and the
+runtime's view publication rather than `applyGeneration`, because a newly
+enabled dataset also enqueues reconciliation, whose `pending` transition would
+make "without any job transitioning" untestable there.
+
+Read from the code while building this, not addressed here: a job that
+`RemoveScope` or `DiscardAll` drops from a queue records no transition, so its
+row keeps the `pending-<pool>` state it was queued with until the job next
+runs. The queue view no longer lists it, but the row itself goes stale - the
+same shape as 3.8's gaps, for a job rather than a view.
+
 **Chunk E - the listener drain.** Section 5's last paragraph, independent of the
 rest. Done when a call in flight across a reload completes, the retired listener
 refuses connections once `Reload` returns, a watch on it ends at once, a

@@ -25,7 +25,6 @@ complete -c boomerangz -l recursive
 complete -c boomerangz -l all
 complete -c boomerangz -l destroy-owned-snapshots
 complete -c boomerangz -s w -l watch
-complete -c boomerangz -s i -l interval -r
 complete -c boomerangz -l credential -r
 complete -c boomerangz -l listener -r
 complete -c boomerangz -l client-cert -r -F

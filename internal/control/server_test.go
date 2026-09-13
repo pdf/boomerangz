@@ -277,7 +277,7 @@ func reserveAddress(t *testing.T) string {
 
 // mtlsServer starts a server with one mTLS TCP listener named "network" and
 // returns a client credential its client CA trusts.
-func mtlsServer(t *testing.T) (*Server, config.Config, PairingBundle) {
+func mtlsServer(t *testing.T, runtime runtime) (*Server, config.Config, PairingBundle) {
 	t.Helper()
 	dir := t.TempDir()
 	ca, certificate, key, clientCertificate, clientKey := writeMTLSPKI(t, dir)
@@ -285,7 +285,7 @@ func mtlsServer(t *testing.T) (*Server, config.Config, PairingBundle) {
 	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
 	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
 	cfg.Listeners["network"] = config.ListenerConfig{Network: "tcp", Address: reserveAddress(t), AuthMode: "mtls", TLSCert: certificate, TLSKey: key, ClientCA: ca}
-	server, err := StartServer(cfg, &fakeRuntime{}, nil)
+	server, err := StartServer(cfg, runtime, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,16 +304,18 @@ func mtlsBundle(t *testing.T, address, ca string, clientCertificate, clientKey [
 
 func TestServerReloadKeepsUnchangedMTLSListener(t *testing.T) {
 	t.Parallel()
-	server, cfg, bundle := mtlsServer(t)
+	updates := make(chan daemonstate.Update, 1)
+	server, cfg, bundle := mtlsServer(t, &fakeRuntime{updates: updates})
 	client, err := DialBundle(t.Context(), bundle)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = client.Connection.Close() }()
-	stream, err := client.Status.WatchStatus(t.Context(), &controlrpc.WatchStatusRequest{IntervalMilliseconds: 100})
+	stream, err := client.Status.WatchStatus(t.Context(), &controlrpc.WatchStatusRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	updates <- daemonstate.Update{State: daemonstate.ControlSnapshot{Revision: 1}}
 	if _, err := stream.Recv(); err != nil {
 		t.Fatal(err)
 	}
@@ -324,14 +326,15 @@ func TestServerReloadKeepsUnchangedMTLSListener(t *testing.T) {
 	if server.endpoints["network"] != before {
 		t.Fatal("reload replaced an mTLS listener whose configuration and client CA were unchanged")
 	}
-	if _, err := stream.Recv(); err != nil {
-		t.Fatalf("watch on an unchanged mTLS listener ended: %v", err)
+	updates <- daemonstate.Update{State: daemonstate.ControlSnapshot{Revision: 2}}
+	if response, err := stream.Recv(); err != nil || response.GetStatus().GetRevision() != 2 {
+		t.Fatalf("watch on an unchanged mTLS listener: response=%v err=%v", response, err)
 	}
 }
 
 func TestServerReloadReplacesMTLSListenerWhenClientCAChanges(t *testing.T) {
 	t.Parallel()
-	server, cfg, bundle := mtlsServer(t)
+	server, cfg, bundle := mtlsServer(t, &fakeRuntime{})
 	rotated := t.TempDir()
 	ca, _, _, clientCertificate, clientKey := writeMTLSPKI(t, rotated)
 	caPEM, err := os.ReadFile(ca)

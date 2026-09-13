@@ -278,8 +278,10 @@ func authorize(ctx context.Context, store *TokenStore, method string) error {
 
 func grpcServer(service *service, remote remoterpc.RemoteServiceServer, tokenAuth bool, store *TokenStore, tlsConfig *tls.Config) *grpc.Server {
 	var options []grpc.ServerOption
+	// Only TCP listeners carry TLS, and only they need transport keepalive.
 	if tlsConfig != nil {
 		options = append(options, grpc.Creds(credentials.NewTLS(tlsConfig)))
+		options = append(options, serverKeepaliveOptions()...)
 	}
 	if tokenAuth {
 		options = append(options,

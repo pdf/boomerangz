@@ -127,7 +127,7 @@ func TestUnixControlAPI(t *testing.T) {
 	}
 }
 
-func TestWatchStatusSendsEachUpdateWithItsTransitionsAndResendsOnInterval(t *testing.T) {
+func TestWatchStatusSendsEachUpdateWithItsTransitions(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	cfg := config.Defaults()
@@ -144,7 +144,7 @@ func TestWatchStatusSendsEachUpdateWithItsTransitionsAndResendsOnInterval(t *tes
 		t.Fatal(err)
 	}
 	defer func() { _ = client.Connection.Close() }()
-	stream, err := client.Status.WatchStatus(t.Context(), &controlrpc.WatchStatusRequest{IntervalMilliseconds: 100})
+	stream, err := client.Status.WatchStatus(t.Context(), &controlrpc.WatchStatusRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,11 +174,12 @@ func TestWatchStatusSendsEachUpdateWithItsTransitionsAndResendsOnInterval(t *tes
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("transitions=%q, want %q", got, want)
 	}
-	// Nothing moves, so the interval re-sends the newest state. Its
-	// transitions were already delivered, so it repeats none of them.
+	// An update that changed state without a transition, such as a view
+	// change, is sent as it arrives and carries no transitions.
+	updates <- daemonstate.Update{State: daemonstate.ControlSnapshot{Revision: 4, Jobs: transitions[1:]}}
 	response, err = stream.Recv()
-	if err != nil || response.GetStatus().GetRevision() != 3 || len(response.GetTransitions()) != 0 {
-		t.Fatalf("interval response=%v err=%v", response, err)
+	if err != nil || response.GetStatus().GetRevision() != 4 || len(response.GetTransitions()) != 0 {
+		t.Fatalf("state-only response=%v err=%v", response, err)
 	}
 	// A subscription that ends while the client is connected ends the watch
 	// with an error rather than leaving it silently stale.

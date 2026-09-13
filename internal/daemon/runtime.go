@@ -1103,7 +1103,7 @@ func (r *Runtime) publishRuntimeLocked() {
 	slices.Sort(names)
 	view := runtimeView{configGeneration: r.configGeneration, datasets: make([]DatasetStatus, 0, len(names))}
 	if r.generation != nil {
-		view.generation = r.generation.ID()
+		view.generation, view.entries = r.generation.ID(), len(r.generation.Entries())
 	}
 	for _, name := range names {
 		view.datasets = append(view.datasets, DatasetStatus{Name: name, Active: r.active[name], Recursive: r.recursive[name]})
@@ -1179,7 +1179,6 @@ func (r *Runtime) Run(ctx context.Context) error {
 				}
 				return
 			}
-			r.logger.Info("discovery complete", "generation", generation.ID(), "datasets", len(generation.Entries()))
 			r.applyGeneration(generation)
 		})
 	}()
