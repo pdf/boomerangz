@@ -87,6 +87,14 @@ causes the reload action to fail. See
 [Configure the daemon](/guide/configuration#validate-changes) for the reload
 contract and non-default socket usage.
 
+A reload that moves or replaces a control listener - a new socket path, address,
+or authentication mode - stops that listener accepting before the reload
+returns. A `status --watch` connected to it ends at once with an error saying
+the listener was retired, so start the watch again against the current socket or
+endpoint. Other calls already running on it get up to five seconds to finish;
+any still running then are stopped, and the daemon logs
+`control listener drain bound expired` at warning.
+
 Only restart the service when the reload result requires it, such as after
 changing `paths.identity_dir`, or when performing planned maintenance. Stopping
 the daemon prevents new work and cancels active transfers; recoverable transfer

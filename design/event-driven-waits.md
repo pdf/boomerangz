@@ -862,9 +862,14 @@ retired listener accepting for 100ms after `Reload` returned, which is why the
 moved-socket test polled for the old socket to disappear. And the goroutine was
 untracked: `Close` did not stop a drain in progress but waited it out through
 the retired listener's `Serve`, up to the full bound, and a call cut when the
-bound expired left no trace. Chunk E closes the retired listener before `Reload`
-returns, drains in a goroutine `Close` stops and waits for, and logs "control
-listener drain bound expired" at warning when the bound cuts a call.
+bound expired left no trace. A watch never ends on its own, so one connected to
+a retired listener always held the drain to its bound, and a same-address
+replacement drained with the server lock held, so `Reload` - and the Reload RPC
+reply, and `Close` - waited the bound with it. Chunk E closes the retired
+listener before `Reload` returns, which also frees its address for a
+same-address replacement; drains in a goroutine `Close` stops and waits for;
+ends a watch on a draining listener at once with `codes.Unavailable`; and logs
+"control listener drain bound expired" at warning when the bound cuts a call.
 
 ## 6. Chunks
 
@@ -937,8 +942,10 @@ interval.
 
 **Chunk E - the listener drain.** Section 5's last paragraph, independent of the
 rest. Done when a call in flight across a reload completes, the retired listener
-refuses connections once `Reload` returns, `Close` stops a drain rather than
-waiting out its bound, and an expired bound is logged, each with a test.
+refuses connections once `Reload` returns, a watch on it ends at once, a
+same-address replacement does not wait for its predecessor's calls, `Close`
+stops a drain rather than waiting out its bound, and an expired bound is logged,
+each with a test.
 
 **Chunk F - the in-process waiter.** 4.1, on chunk B, in
 `test/integration/internal/statuswait`. `waitForTransferSuccesses`,
@@ -1030,7 +1037,8 @@ half-changed.
   field; that is compatible for anything selecting known keys and not for
   anything asserting an exact object. The docs change lands with the code.
 - **A long-running watch can now end with an error.** Today a watch ends only on
-  cancellation or a transport failure; after chunk C it also ends with
+  cancellation, a transport failure, or `codes.Unavailable` when a reload
+  retires its listener (chunk E); after chunk C it also ends with
   `codes.Aborted` when it falls behind. A script that runs `status --watch
   --json` unattended has to treat that exit as "resubscribe", not as the daemon
   failing.

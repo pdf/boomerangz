@@ -35,6 +35,9 @@ import (
 // calls before stopping them.
 const listenerDrainBound = 5 * time.Second
 
+// errListenerRetired ends a watch whose listener a reload retired.
+const errListenerRetired = "control listener retired by configuration reload"
+
 // Server owns all configured local-control listeners.
 type Server struct {
 	servers     []*grpc.Server
@@ -65,6 +68,9 @@ type serverEndpoint struct {
 	listener   net.Listener
 	socket     *socketFile
 	retired    atomic.Bool
+	// startDrain cancels the context the endpoint's service watches for a
+	// drain.
+	startDrain context.CancelFunc
 }
 
 type socketFile struct {
@@ -383,7 +389,9 @@ func (s *Server) buildEndpoint(name string, definition config.ListenerConfig, id
 			return nil, err
 		}
 	}
-	server := grpcServer(&service{runtime: s.backend, reloader: s.reloader, reloadAllowed: name == "@default"}, remote, definition.Network == "tcp" && strings.Contains(definition.AuthMode, "token"), s.store, tlsConfig)
+	drain, startDrain := context.WithCancel(context.Background())
+	endpoint.startDrain = startDrain
+	server := grpcServer(&service{runtime: s.backend, reloader: s.reloader, reloadAllowed: name == "@default", drain: drain}, remote, definition.Network == "tcp" && strings.Contains(definition.AuthMode, "token"), s.store, tlsConfig)
 	endpoint.server = server
 	return endpoint, nil
 }
@@ -426,6 +434,9 @@ func closeEndpoint(endpoint *serverEndpoint) error {
 	if endpoint == nil {
 		return nil
 	}
+	if endpoint.startDrain != nil {
+		endpoint.startDrain()
+	}
 	if endpoint.server != nil {
 		endpoint.server.Stop()
 	}
@@ -458,6 +469,7 @@ func (s *Server) drainEndpoint(endpoint *serverEndpoint) error {
 	if endpoint == nil || endpoint.server == nil {
 		return closeEndpoint(endpoint)
 	}
+	endpoint.startDrain()
 	done := make(chan struct{})
 	go func() {
 		endpoint.server.GracefulStop()
@@ -475,9 +487,10 @@ func (s *Server) drainEndpoint(endpoint *serverEndpoint) error {
 	return closeEndpoint(endpoint)
 }
 
-// retireEndpointLocked stops endpoint accepting before returning and drains its
-// in-flight calls in the background, where Close can stop them. The drain
-// cannot run inline: a Reload RPC served by endpoint is itself in flight.
+// retireEndpointLocked stops endpoint accepting before returning, which frees
+// its address, and drains its in-flight calls in the background, where Close
+// can stop them. The drain cannot run inline: a Reload RPC served by endpoint is
+// itself in flight, and a same-address replacement would hold s.mu through it.
 func (s *Server) retireEndpointLocked(endpoint *serverEndpoint) {
 	endpoint.retired.Store(true)
 	closeErr := endpoint.listener.Close()
@@ -592,12 +605,7 @@ func (s *Server) Reload(cfg config.Config) error {
 		if !exists || endpointUnchanged(previous.definition, definition) || endpointAddress(previous.definition) != endpointAddress(definition) {
 			continue
 		}
-		if err := s.drainEndpoint(previous); err != nil {
-			for _, candidate := range staged {
-				_ = closeEndpoint(candidate)
-			}
-			return fmt.Errorf("stop listener %s: %w", name, err)
-		}
+		s.retireEndpointLocked(previous)
 		endpoint, err := s.buildEndpoint(name, definition, cfg.Paths.IdentityDir)
 		if err != nil {
 			rollback, rollbackErr := s.buildEndpoint(name, previous.definition, s.config.Paths.IdentityDir)

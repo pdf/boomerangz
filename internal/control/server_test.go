@@ -17,6 +17,8 @@ import (
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
 	"github.com/pdf/boomerangz/internal/daemonstate"
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // heldRuntime holds each Clean call until it is released or its context ends,
@@ -217,5 +219,109 @@ func TestServerReloadDrainBoundStopsAndLogsCallInFlight(t *testing.T) {
 	output := logs.String()
 	if !strings.Contains(output, `"msg":"control listener drain bound expired"`) || !strings.Contains(output, `"name":"@default"`) {
 		t.Fatalf("drain bound expiry was not logged:\n%s", output)
+	}
+}
+
+func TestServerReloadEndsWatchOnRetiredListener(t *testing.T) {
+	t.Parallel()
+	var logs syncBuffer
+	server, cfg, next := movedSocketServer(t, &fakeRuntime{}, slog.New(slog.NewJSONHandler(&logs, nil)))
+	server.drainBound = time.Hour
+	client, err := DialLocal(t.Context(), cfg.Paths.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Connection.Close() }()
+	stream, err := client.Status.WatchStatus(t.Context(), &controlrpc.WatchStatusRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Reload(next); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		for {
+			if _, err := stream.Recv(); err != nil {
+				result <- err
+				return
+			}
+		}
+	}()
+	err = awaitCall(t, result)
+	if status.Code(err) != codes.Unavailable || !strings.Contains(err.Error(), errListenerRetired) {
+		t.Fatalf("watch on a retired listener ended with %v", err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- server.Close() }()
+	if err := awaitCall(t, closed); err != nil {
+		t.Fatal(err)
+	}
+	if output := logs.String(); strings.Contains(output, "drain bound expired") {
+		t.Fatalf("watch held the drain to its bound:\n%s", output)
+	}
+}
+
+func TestServerReloadSameAddressDoesNotWaitForCallInFlight(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ca, certificate, key, clientCertificate, clientKey := writeMTLSPKI(t, dir)
+	reservation, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	cfg.Listeners["network"] = config.ListenerConfig{Network: "tcp", Address: address, AuthMode: "token", TLSCert: certificate, TLSKey: key}
+	runtime := newHeldRuntime()
+	server, err := StartServer(cfg, runtime, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	server.drainBound = time.Hour
+	bundle, err := CreatePairingBundle(server.store, address, certificate, ca, "localhost", false, "", "", []string{"admin"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := DialBundle(t.Context(), bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Connection.Close() }()
+	result, _ := startHeldCall(t, client, runtime)
+	next := cfg.Clone()
+	listener := next.Listeners["network"]
+	listener.AuthMode = "mtls"
+	listener.ClientCA = ca
+	next.Listeners["network"] = listener
+	reloaded := make(chan error, 1)
+	go func() { reloaded <- server.Reload(next) }()
+	if err := awaitCall(t, reloaded); err != nil {
+		t.Fatal(err)
+	}
+	caPEM, err := os.ReadFile(ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := DialBundle(t.Context(), PairingBundle{Version: 1, Endpoint: address, TrustMode: "ca", CAPEM: string(caPEM), ServerName: "localhost", ClientCert: string(clientCertificate), ClientKey: string(clientKey)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = replacement.Connection.Close() }()
+	if _, err := replacement.Status.GetStatus(t.Context(), &controlrpc.GetStatusRequest{}); err != nil {
+		t.Fatalf("replacement listener did not serve while the previous one drained: %v", err)
+	}
+	close(runtime.release)
+	if err := awaitCall(t, result); err != nil {
+		t.Fatalf("call in flight across a same-address reload failed: %v", err)
 	}
 }

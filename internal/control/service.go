@@ -42,6 +42,9 @@ type service struct {
 	runtime       runtime
 	reloader      *reloadHandler
 	reloadAllowed bool
+	// drain is cancelled when the listener serving this service starts to
+	// drain; calls with no natural end watch it and end early.
+	drain context.Context
 }
 
 func toSnapshot(snapshot daemonstate.ControlSnapshot) *controlrpc.StatusSnapshot {
@@ -74,16 +77,28 @@ func (s *service) WatchStatus(request *controlrpc.WatchStatusRequest, stream con
 	if interval < 100*time.Millisecond || interval > time.Hour {
 		return status.Error(codes.InvalidArgument, "watch interval must be between 100ms and 1h")
 	}
+	// A watch never ends on its own, so a draining listener would otherwise
+	// wait out its whole drain bound for it and then cut it.
+	ctx := stream.Context()
+	if s.drain != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		defer context.AfterFunc(s.drain, cancel)()
+	}
 	for {
 		snapshot := s.runtime.ControlStatus()
 		if err := stream.Send(&controlrpc.WatchStatusResponse{Status: toSnapshot(snapshot)}); err != nil {
 			return err
 		}
-		waitCtx, cancel := context.WithTimeout(stream.Context(), interval)
+		waitCtx, cancel := context.WithTimeout(ctx, interval)
 		err := s.runtime.WaitStatus(waitCtx, snapshot.Revision)
 		cancel()
-		if err != nil && stream.Context().Err() != nil {
-			return stream.Context().Err()
+		if err != nil && ctx.Err() != nil {
+			if streamErr := stream.Context().Err(); streamErr != nil {
+				return streamErr
+			}
+			return status.Error(codes.Unavailable, errListenerRetired)
 		}
 	}
 }
