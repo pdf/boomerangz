@@ -252,9 +252,8 @@ func (r *Roadwarrior) Reconcile(ctx context.Context, report Reporter) (RecoveryO
 	now := r.now()
 	if now.Before(r.notBefore) {
 		// An attempt made before the backoff deadline reports the failure that
-		// set it. Returning the bare status instead would overwrite the reason
-		// in the daemon's status store, which keeps only the latest event per
-		// job, and leave an operator watching a retry with no cause.
+		// set it, so a caller that shows this outcome as the job's latest state
+		// never shows a retry with no cause.
 		return RecoveryOutcome{Status: "waiting-retry", Reason: r.reason, NotBefore: r.notBefore}, nil
 	}
 	request := r.request

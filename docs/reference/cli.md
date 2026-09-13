@@ -29,9 +29,15 @@ Commands that read configuration accept:
 | `boomerangz status` | `--credential NAME_OR_PATH`, `--watch`/`-w`, `--interval DURATION` (default `2s`), and `--json`. |
 | `boomerangz trigger [DATASET...]` | Empty selects every active root; `--credential NAME_OR_PATH` addresses a paired listener. |
 
-Interactive status uses a readable terminal view. Redirected one-shot output is
-one JSON object; redirected watch output is newline-delimited JSON. Add `--json`
-to emit that structured output even when standard output is a terminal.
+Interactive status uses a readable terminal view; an interactive watch adds the
+most recent job state changes beneath it. Redirected one-shot output is one JSON
+object; redirected watch output is newline-delimited JSON. Add `--json` to emit
+that structured output even when standard output is a terminal. Each watch
+object also carries `transitions`, every job state change since the previous
+object in the order the daemon recorded it. A watch that falls too far behind
+the daemon ends with an `Aborted` error and exits with status one rather than
+continuing with changes missing. See
+[View status](/operations/#view-status) for the fields and the job states.
 
 ## Dataset lifecycle
 

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -126,7 +127,7 @@ func TestUnixControlAPI(t *testing.T) {
 	}
 }
 
-func TestWatchStatusSendsEachUpdateAndResendsOnInterval(t *testing.T) {
+func TestWatchStatusSendsEachUpdateWithItsTransitionsAndResendsOnInterval(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	cfg := config.Defaults()
@@ -147,16 +148,36 @@ func TestWatchStatusSendsEachUpdateAndResendsOnInterval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for revision := uint64(1); revision <= 2; revision++ {
-		updates <- daemonstate.Update{State: daemonstate.ControlSnapshot{Revision: revision}}
-		response, err := stream.Recv()
-		if err != nil || response.GetStatus().GetRevision() != revision {
-			t.Fatalf("update %d: response=%v err=%v", revision, response, err)
-		}
-	}
-	// Nothing moves, so the interval re-sends the newest state.
+	updates <- daemonstate.Update{State: daemonstate.ControlSnapshot{Revision: 1}}
 	response, err := stream.Recv()
-	if err != nil || response.GetStatus().GetRevision() != 2 {
+	if err != nil || response.GetStatus().GetRevision() != 1 || len(response.GetTransitions()) != 0 {
+		t.Fatalf("initial response=%v err=%v", response, err)
+	}
+	at := time.Unix(30, 0).UTC()
+	transitions := []daemonstate.Event{
+		{Kind: daemonstate.EventTransition, Pool: "transfer", Job: "remote:tank/data:offsite", Scope: "tank/data", Target: "offsite", State: "sending", At: at},
+		{Kind: daemonstate.EventTransition, Pool: "transfer", Job: "remote:tank/data:offsite", Scope: "tank/data", Target: "offsite", State: "waiting-retry", Reason: "connection reset", At: at.Add(time.Second)},
+	}
+	updates <- daemonstate.Update{Transitions: transitions, State: daemonstate.ControlSnapshot{Revision: 3, Jobs: transitions[1:]}}
+	response, err = stream.Recv()
+	if err != nil || response.GetStatus().GetRevision() != 3 {
+		t.Fatalf("update response=%v err=%v", response, err)
+	}
+	var got []string
+	for _, transition := range response.GetTransitions() {
+		got = append(got, strings.Join([]string{transition.GetPool(), transition.GetJob(), transition.GetDataset(), transition.GetTarget(), transition.GetState(), transition.GetReason(), strconv.FormatInt(transition.GetChangedUnixNano(), 10)}, "|"))
+	}
+	want := []string{
+		"transfer|remote:tank/data:offsite|tank/data|offsite|sending||" + strconv.FormatInt(at.UnixNano(), 10),
+		"transfer|remote:tank/data:offsite|tank/data|offsite|waiting-retry|connection reset|" + strconv.FormatInt(at.Add(time.Second).UnixNano(), 10),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("transitions=%q, want %q", got, want)
+	}
+	// Nothing moves, so the interval re-sends the newest state. Its
+	// transitions were already delivered, so it repeats none of them.
+	response, err = stream.Recv()
+	if err != nil || response.GetStatus().GetRevision() != 3 || len(response.GetTransitions()) != 0 {
 		t.Fatalf("interval response=%v err=%v", response, err)
 	}
 	// A subscription that ends while the client is connected ends the watch

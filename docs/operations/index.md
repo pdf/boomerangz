@@ -24,7 +24,7 @@ the daemon recorded it. The line carries these keys:
 | `job` | The job, for example `snapshot:tank/data` or `remote:tank/data:offsite` |
 | `scope` | The dataset the job belongs to |
 | `target` | The shared resource the job locks, such as a transfer target |
-| `state` | The state the job moved to |
+| `state` | The state the job moved to; see [job states](#job-states) |
 | `reason` | Why, when the state carries one |
 | `pending` | Jobs waiting in the job's queue when the change was recorded |
 
@@ -63,8 +63,54 @@ boomerangz status --watch
 boomerangz status --watch --interval 5s
 ```
 
+In a terminal, a watch shows the status view with the most recent job state
+changes beneath it, oldest first, under `RECENT TRANSITIONS`. The table shows
+only each job's latest state; the list also shows the changes that happened
+between two refreshes.
+
 When watch output is redirected, or when `--json` is supplied, it becomes
-newline-delimited JSON.
+newline-delimited JSON. Each object carries the snapshot fields and
+`transitions`: every job state change since the previous object, in the order
+the daemon recorded it, with the same fields as an entry in `jobs` apart from
+transfer progress. A job that changed state several times between two objects
+has one entry in `jobs` and one entry in `transitions` for each change. The
+first object carries an empty `transitions` array, and so does an object sent
+only because the interval passed with nothing changing.
+
+A watch that falls too far behind the daemon, because the client or its
+connection cannot keep up, ends with an `Aborted` error and exits with status
+one rather than continuing with changes missing. Start it again to receive a
+fresh snapshot; changes made while no watch was connected are not replayed. A
+script that runs a watch unattended should treat that exit as a reason to
+reconnect, not as the daemon failing.
+
+### Job states
+
+A job's `state` in `status`, in `transitions`, and in the
+[job state lines](#job-state-lines) is one of:
+
+| State | Meaning |
+|---|---|
+| `pending-management`, `pending-transfer` | Queued in that worker pool, waiting for a worker |
+| `snapshotting` | Taking a scheduled or triggered snapshot |
+| `pruning` | Destroying snapshots that retention no longer keeps, on the source (`prune:`) or a destination (`destination-prune:`) |
+| `reconciling` | Activating or deactivating a dataset |
+| `retiring` | Retiring a deactivated dataset once its inactive grace period has passed |
+| `planning` | A local transfer is planning, placing holds, and preparing its destination |
+| `probing` | A remote transfer is connecting to its remote and planning |
+| `sending` | A transfer stream is running; the progress fields describe it |
+| `verifying` | The stream has finished; the daemon is verifying the result and reconciling destination properties |
+| `succeeded` | The job finished its work |
+| `scheduled` | The job found nothing due yet; `reason` says why |
+| `waiting-retry` | The job will be retried later, for example after a remote was unreachable; `reason` carries the cause |
+| `blocked` | The job stopped on a condition it cannot resolve itself; `reason` carries the cause |
+| `failed` | The job failed; `reason` carries the error |
+| `cancelled` | The job was stopped, for example because the daemon is shutting down |
+
+A transfer that resumes an interrupted stream and then has newer state to send
+reports `sending` twice, once for each stream, so its byte count starting again
+from zero has a visible cause. A remote transfer whose destination is already
+up to date goes from `probing` to `succeeded` without `sending`.
 
 ## Request a snapshot
 

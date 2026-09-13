@@ -146,8 +146,12 @@ func (x *WatchStatusRequest) GetIntervalMilliseconds() uint32 {
 }
 
 type WatchStatusResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Status        *StatusSnapshot        `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Status *StatusSnapshot        `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	// Every job-state transition since the previous message, in the order the
+	// daemon recorded them. The first message carries none. Progress fields are
+	// unset: a transition is a change of state, not a sample.
+	Transitions   []*JobStatus `protobuf:"bytes,2,rep,name=transitions,proto3" json:"transitions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -185,6 +189,13 @@ func (*WatchStatusResponse) Descriptor() ([]byte, []int) {
 func (x *WatchStatusResponse) GetStatus() *StatusSnapshot {
 	if x != nil {
 		return x.Status
+	}
+	return nil
+}
+
+func (x *WatchStatusResponse) GetTransitions() []*JobStatus {
+	if x != nil {
+		return x.Transitions
 	}
 	return nil
 }
@@ -1214,9 +1225,10 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"\x11GetStatusResponse\x12=\n" +
 	"\x06status\x18\x01 \x01(\v2%.boomerangz.control.v1.StatusSnapshotR\x06status\"I\n" +
 	"\x12WatchStatusRequest\x123\n" +
-	"\x15interval_milliseconds\x18\x01 \x01(\rR\x14intervalMilliseconds\"T\n" +
+	"\x15interval_milliseconds\x18\x01 \x01(\rR\x14intervalMilliseconds\"\x98\x01\n" +
 	"\x13WatchStatusResponse\x12=\n" +
-	"\x06status\x18\x01 \x01(\v2%.boomerangz.control.v1.StatusSnapshotR\x06status\"p\n" +
+	"\x06status\x18\x01 \x01(\v2%.boomerangz.control.v1.StatusSnapshotR\x06status\x12B\n" +
+	"\vtransitions\x18\x02 \x03(\v2 .boomerangz.control.v1.JobStatusR\vtransitions\"p\n" +
 	"\vQueueStatus\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\rR\bcapacity\x12\x18\n" +
@@ -1345,31 +1357,32 @@ var file_boomerangz_control_v1_control_proto_goTypes = []any{
 var file_boomerangz_control_v1_control_proto_depIdxs = []int32{
 	7,  // 0: boomerangz.control.v1.GetStatusResponse.status:type_name -> boomerangz.control.v1.StatusSnapshot
 	7,  // 1: boomerangz.control.v1.WatchStatusResponse.status:type_name -> boomerangz.control.v1.StatusSnapshot
-	6,  // 2: boomerangz.control.v1.StatusSnapshot.datasets:type_name -> boomerangz.control.v1.DatasetStatus
-	4,  // 3: boomerangz.control.v1.StatusSnapshot.queues:type_name -> boomerangz.control.v1.QueueStatus
-	5,  // 4: boomerangz.control.v1.StatusSnapshot.jobs:type_name -> boomerangz.control.v1.JobStatus
-	6,  // 5: boomerangz.control.v1.ListDatasetsResponse.datasets:type_name -> boomerangz.control.v1.DatasetStatus
-	17, // 6: boomerangz.control.v1.CleanPlan.actions:type_name -> boomerangz.control.v1.CleanAction
-	18, // 7: boomerangz.control.v1.CleanResponse.plans:type_name -> boomerangz.control.v1.CleanPlan
-	0,  // 8: boomerangz.control.v1.StatusService.GetStatus:input_type -> boomerangz.control.v1.GetStatusRequest
-	2,  // 9: boomerangz.control.v1.StatusService.WatchStatus:input_type -> boomerangz.control.v1.WatchStatusRequest
-	8,  // 10: boomerangz.control.v1.StatusService.ListDatasets:input_type -> boomerangz.control.v1.ListDatasetsRequest
-	10, // 11: boomerangz.control.v1.ControlService.Trigger:input_type -> boomerangz.control.v1.TriggerRequest
-	11, // 12: boomerangz.control.v1.ControlService.Reconcile:input_type -> boomerangz.control.v1.ReconcileRequest
-	14, // 13: boomerangz.control.v1.ControlService.Reload:input_type -> boomerangz.control.v1.ReloadRequest
-	16, // 14: boomerangz.control.v1.ControlService.Clean:input_type -> boomerangz.control.v1.CleanRequest
-	1,  // 15: boomerangz.control.v1.StatusService.GetStatus:output_type -> boomerangz.control.v1.GetStatusResponse
-	3,  // 16: boomerangz.control.v1.StatusService.WatchStatus:output_type -> boomerangz.control.v1.WatchStatusResponse
-	9,  // 17: boomerangz.control.v1.StatusService.ListDatasets:output_type -> boomerangz.control.v1.ListDatasetsResponse
-	12, // 18: boomerangz.control.v1.ControlService.Trigger:output_type -> boomerangz.control.v1.TriggerResponse
-	13, // 19: boomerangz.control.v1.ControlService.Reconcile:output_type -> boomerangz.control.v1.ReconcileResponse
-	15, // 20: boomerangz.control.v1.ControlService.Reload:output_type -> boomerangz.control.v1.ReloadResponse
-	19, // 21: boomerangz.control.v1.ControlService.Clean:output_type -> boomerangz.control.v1.CleanResponse
-	15, // [15:22] is the sub-list for method output_type
-	8,  // [8:15] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	5,  // 2: boomerangz.control.v1.WatchStatusResponse.transitions:type_name -> boomerangz.control.v1.JobStatus
+	6,  // 3: boomerangz.control.v1.StatusSnapshot.datasets:type_name -> boomerangz.control.v1.DatasetStatus
+	4,  // 4: boomerangz.control.v1.StatusSnapshot.queues:type_name -> boomerangz.control.v1.QueueStatus
+	5,  // 5: boomerangz.control.v1.StatusSnapshot.jobs:type_name -> boomerangz.control.v1.JobStatus
+	6,  // 6: boomerangz.control.v1.ListDatasetsResponse.datasets:type_name -> boomerangz.control.v1.DatasetStatus
+	17, // 7: boomerangz.control.v1.CleanPlan.actions:type_name -> boomerangz.control.v1.CleanAction
+	18, // 8: boomerangz.control.v1.CleanResponse.plans:type_name -> boomerangz.control.v1.CleanPlan
+	0,  // 9: boomerangz.control.v1.StatusService.GetStatus:input_type -> boomerangz.control.v1.GetStatusRequest
+	2,  // 10: boomerangz.control.v1.StatusService.WatchStatus:input_type -> boomerangz.control.v1.WatchStatusRequest
+	8,  // 11: boomerangz.control.v1.StatusService.ListDatasets:input_type -> boomerangz.control.v1.ListDatasetsRequest
+	10, // 12: boomerangz.control.v1.ControlService.Trigger:input_type -> boomerangz.control.v1.TriggerRequest
+	11, // 13: boomerangz.control.v1.ControlService.Reconcile:input_type -> boomerangz.control.v1.ReconcileRequest
+	14, // 14: boomerangz.control.v1.ControlService.Reload:input_type -> boomerangz.control.v1.ReloadRequest
+	16, // 15: boomerangz.control.v1.ControlService.Clean:input_type -> boomerangz.control.v1.CleanRequest
+	1,  // 16: boomerangz.control.v1.StatusService.GetStatus:output_type -> boomerangz.control.v1.GetStatusResponse
+	3,  // 17: boomerangz.control.v1.StatusService.WatchStatus:output_type -> boomerangz.control.v1.WatchStatusResponse
+	9,  // 18: boomerangz.control.v1.StatusService.ListDatasets:output_type -> boomerangz.control.v1.ListDatasetsResponse
+	12, // 19: boomerangz.control.v1.ControlService.Trigger:output_type -> boomerangz.control.v1.TriggerResponse
+	13, // 20: boomerangz.control.v1.ControlService.Reconcile:output_type -> boomerangz.control.v1.ReconcileResponse
+	15, // 21: boomerangz.control.v1.ControlService.Reload:output_type -> boomerangz.control.v1.ReloadResponse
+	19, // 22: boomerangz.control.v1.ControlService.Clean:output_type -> boomerangz.control.v1.CleanResponse
+	16, // [16:23] is the sub-list for method output_type
+	9,  // [9:16] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_boomerangz_control_v1_control_proto_init() }

@@ -60,9 +60,24 @@ func toSnapshot(snapshot daemonstate.ControlSnapshot) *controlrpc.StatusSnapshot
 		result.Queues = append(result.Queues, &controlrpc.QueueStatus{Name: name, Capacity: uint32(queue.Capacity), Pending: uint32(queue.Pending), JobIds: queue.IDs})
 	}
 	for _, event := range snapshot.Jobs {
-		result.Jobs = append(result.Jobs, &controlrpc.JobStatus{Pool: event.Pool, Job: event.Job, Dataset: event.Scope, Target: event.Target, State: event.State, Reason: event.Reason, ChangedUnixNano: event.At.UnixNano(), Pending: uint32(event.Pending), QueuePosition: uint32(event.Position), Bytes: event.Bytes, TotalBytes: event.TotalBytes, BytesPerSecond: event.BytesPerSecond, EtaNanoseconds: int64(event.ETA), TotalKnown: event.TotalKnown})
+		result.Jobs = append(result.Jobs, toJobStatus(event))
 	}
 	return result
+}
+
+func toJobStatus(event daemonstate.Event) *controlrpc.JobStatus {
+	return &controlrpc.JobStatus{Pool: event.Pool, Job: event.Job, Dataset: event.Scope, Target: event.Target, State: event.State, Reason: event.Reason, ChangedUnixNano: event.At.UnixNano(), Pending: uint32(event.Pending), QueuePosition: uint32(event.Position), Bytes: event.Bytes, TotalBytes: event.TotalBytes, BytesPerSecond: event.BytesPerSecond, EtaNanoseconds: int64(event.ETA), TotalKnown: event.TotalKnown}
+}
+
+// toWatchResponse pairs an update's state with the transitions that produced
+// it, so a watcher sees every transition even where the state has collapsed
+// several of them into one row.
+func toWatchResponse(update daemonstate.Update) *controlrpc.WatchStatusResponse {
+	response := &controlrpc.WatchStatusResponse{Status: toSnapshot(update.State)}
+	for _, event := range update.Transitions {
+		response.Transitions = append(response.Transitions, toJobStatus(event))
+	}
+	return response
 }
 
 func (s *service) GetStatus(context.Context, *controlrpc.GetStatusRequest) (*controlrpc.GetStatusResponse, error) {
@@ -104,26 +119,32 @@ func (s *service) WatchStatus(request *controlrpc.WatchStatusRequest, stream con
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 	for {
+		var response *controlrpc.WatchStatusResponse
 		select {
 		case update, ok := <-subscription.Updates():
 			if !ok {
 				if ctx.Err() != nil {
 					return ended()
 				}
+				// The subscription's sequence is broken. End the stream rather
+				// than continue with a gap a client could not see.
 				return status.Errorf(codes.Aborted, "status watch ended: %v", subscription.Err())
 			}
 			latest, received = update.State, true
+			response = toWatchResponse(update)
 		case <-timer.C:
 			if !received {
 				timer.Reset(interval)
 				continue
 			}
 			// The interval re-sends the newest state when nothing has moved.
+			// Its transitions were already sent, so it carries none.
 			latest.Observed = time.Now().UTC()
+			response = toWatchResponse(daemonstate.Update{State: latest})
 		case <-ctx.Done():
 			return ended()
 		}
-		if err := stream.Send(&controlrpc.WatchStatusResponse{Status: toSnapshot(latest)}); err != nil {
+		if err := stream.Send(response); err != nil {
 			return err
 		}
 		timer.Reset(interval)

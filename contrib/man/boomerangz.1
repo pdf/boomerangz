@@ -24,7 +24,10 @@ to follow changes,
 .B --interval
 to bound refresh time, and
 .B --json
-for structured output.
+for structured output. A watch also shows every job state change since its
+previous update, in the order the daemon recorded them, and one that falls too
+far behind the daemon ends with an error rather than continuing with changes
+missing.
 .TP
 .B trigger
 Queue an immediate snapshot for selected active roots, or all active roots when

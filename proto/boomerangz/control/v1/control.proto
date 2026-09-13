@@ -29,6 +29,10 @@ message WatchStatusRequest {
 
 message WatchStatusResponse {
   StatusSnapshot status = 1;
+  // Every job-state transition since the previous message, in the order the
+  // daemon recorded them. The first message carries none. Progress fields are
+  // unset: a transition is a change of state, not a sample.
+  repeated JobStatus transitions = 2;
 }
 
 message QueueStatus {

@@ -1032,6 +1032,19 @@ connected, a test asserts that a sequence which collapses in the snapshot
 survives in the stream, and a test asserts that a watcher which overflows
 receives `codes.Aborted` and no further message.
 
+As built, `transitions` reuses `JobStatus`, so a transition has the same fields
+as a snapshot row with the progress fields unset. While the interval survives
+(chunk D), a message it re-sends carries no transitions, since they were sent
+with the update that brought them. Redirected output always carries the field,
+as an empty array when there are none, and one-shot `status` does not. The
+interactive tail holds the ten newest transitions across messages. Both
+end-to-end tests run a real status owner behind the control server
+(`internal/daemon/watch_test.go`); the overflow test fixes the client's
+flow-control windows so that a client which stops reading holds the server's
+sends at a known size, and checks that what arrives before `Aborted` is an
+unbroken prefix of the recorded sequence. `status --watch --json` is tested
+against a scripted subscription in `internal/cli`.
+
 **Chunk D - nothing a watcher holds goes stale.** 3.8: runtime, deadline and
 queue views reach every `Update`; configure transport keepalive on the TCP
 listeners; remove `--interval` and reserve its proto field, with docs, man page

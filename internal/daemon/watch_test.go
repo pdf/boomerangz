@@ -1,0 +1,182 @@
+package daemon
+
+import (
+	"context"
+	"net"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/control"
+	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
+	"github.com/pdf/boomerangz/internal/daemonstate"
+	"github.com/pdf/boomerangz/internal/lifecycle"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	grpcstatus "google.golang.org/grpc/status"
+)
+
+// watchRuntime serves a real status owner to the control plane, as Runtime
+// does, so a watch test exercises the owner, its forwarders, and the handler
+// together.
+type watchRuntime struct{ status *Status }
+
+func (r watchRuntime) ControlStatus() ControlSnapshot { return r.status.Snapshot() }
+func (r watchRuntime) SubscribeStatus(ctx context.Context) (daemonstate.Subscription, error) {
+	subscription, err := r.status.Subscribe(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return subscription, nil
+}
+func (watchRuntime) Trigger([]string) ([]string, error) { return nil, nil }
+func (watchRuntime) Reconcile()                         {}
+func (watchRuntime) Clean(context.Context, []string, bool, bool, bool, bool) ([]lifecycle.CleanPlan, error) {
+	return nil, nil
+}
+
+// watchStatus serves status over a control socket and opens a watch on it,
+// returning the watch once its first message, the state at registration, has
+// arrived. The client's flow-control windows are fixed, so a client that stops
+// reading holds the server's sends at a known size rather than one that grows.
+func watchStatus(t *testing.T, status *Status) (controlrpc.StatusServiceClient, controlrpc.StatusService_WatchStatusClient) {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	server, err := control.StartServer(cfg, watchRuntime{status: status}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	connection, err := grpc.NewClient("passthrough:///"+cfg.Paths.SocketPath,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", cfg.Paths.SocketPath)
+		}),
+		grpc.WithInitialWindowSize(1<<16),
+		grpc.WithInitialConnWindowSize(1<<16),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	client := controlrpc.NewStatusServiceClient(connection)
+	stream, err := client.WatchStatus(t.Context(), &controlrpc.WatchStatusRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.GetTransitions()) != 0 {
+		t.Fatalf("first watch message carried transitions: %v", first.GetTransitions())
+	}
+	return client, stream
+}
+
+func jobRows(snapshot *controlrpc.StatusSnapshot, job string) []*controlrpc.JobStatus {
+	var rows []*controlrpc.JobStatus
+	for _, row := range snapshot.GetJobs() {
+		if row.GetJob() == job {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+// TestWatchStatusCarriesTransitionsTheSnapshotCollapses pins the defect the
+// transitions field exists for: a job that goes waiting-retry, probing,
+// waiting-retry holds one row in any snapshot, and a watcher still receives all
+// three changes, each message pairing its transitions with the state they
+// produced.
+func TestWatchStatusCarriesTransitionsTheSnapshotCollapses(t *testing.T) {
+	t.Parallel()
+	status := NewStatus(nil)
+	client, stream := watchStatus(t, status)
+	const job = "remote:tank/data:offsite"
+	sent := []Event{transition(job, "waiting-retry", "connection refused"), transition(job, "probing", ""), transition(job, "waiting-retry", "connection reset")}
+	for _, event := range sent {
+		status.record(event)
+	}
+	var got []string
+	for len(got) < len(sent) {
+		response, err := stream.Recv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		transitions := response.GetTransitions()
+		if len(transitions) == 0 {
+			continue
+		}
+		for _, transition := range transitions {
+			got = append(got, transition.GetState()+"/"+transition.GetReason())
+		}
+		last := transitions[len(transitions)-1]
+		if rows := jobRows(response.GetStatus(), job); len(rows) != 1 || rows[0].GetState() != last.GetState() || rows[0].GetReason() != last.GetReason() {
+			t.Fatalf("message state %v does not follow its last transition %v", rows, last)
+		}
+	}
+	want := []string{"waiting-retry/connection refused", "probing/", "waiting-retry/connection reset"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("watch transitions=%q, want %q", got, want)
+	}
+	current, err := client.GetStatus(t.Context(), &controlrpc.GetStatusRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows := jobRows(current.GetStatus(), job); len(rows) != 1 || rows[0].GetState() != "waiting-retry" || rows[0].GetReason() != "connection reset" {
+		t.Fatalf("snapshot rows=%v, want the one latest state", rows)
+	}
+}
+
+// TestWatchStatusThatFallsBehindEndsAborted holds a watcher's reads until its
+// subscription has overflowed, then reads everything the server sent. What
+// arrives is an unbroken prefix of the recorded sequence followed by
+// codes.Aborted, and nothing after it: the stream ends rather than resuming
+// past a gap.
+func TestWatchStatusThatFallsBehindEndsAborted(t *testing.T) {
+	t.Parallel()
+	status := NewStatus(nil)
+	_, stream := watchStatus(t, status)
+	// Far more than the forwarder's bound, its channel, and what the fixed
+	// flow-control windows let the server send while the client reads nothing.
+	total := 8 * transitionBound
+	padding := strings.Repeat("x", 512)
+	for index := range total {
+		status.record(transition("remote:tank/data:offsite", "waiting-retry", strconv.Itoa(index)+" "+padding))
+	}
+	// A snapshot request is answered after every transition before it has been
+	// offered to the subscriber, so the overflow has happened by now.
+	status.Snapshot()
+	next := 0
+	var err error
+	for {
+		var response *controlrpc.WatchStatusResponse
+		response, err = stream.Recv()
+		if err != nil {
+			break
+		}
+		for _, transition := range response.GetTransitions() {
+			index, _, _ := strings.Cut(transition.GetReason(), " ")
+			if index != strconv.Itoa(next) {
+				t.Fatalf("received transition %s where %d was next: the stream skipped a gap", index, next)
+			}
+			next++
+		}
+	}
+	if grpcstatus.Code(err) != codes.Aborted {
+		t.Fatalf("watch that fell behind ended with %v, want Aborted", err)
+	}
+	if next >= total {
+		t.Fatalf("received all %d transitions, so the watch never fell behind", total)
+	}
+	if response, again := stream.Recv(); again == nil {
+		t.Fatalf("a message arrived after the watch ended: %v", response)
+	}
+}

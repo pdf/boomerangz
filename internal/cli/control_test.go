@@ -18,6 +18,8 @@ import (
 	"github.com/pdf/boomerangz/internal/daemon"
 	"github.com/pdf/boomerangz/internal/daemonstate"
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type cliControlRuntime struct {
@@ -137,5 +139,99 @@ func TestStatusRendererSelection(t *testing.T) {
 	defer func() { _ = file.Close() }()
 	if interactive, width := terminalWidth(file); interactive || width != 0 {
 		t.Fatalf("a redirected file reported interactive=%v width=%d", interactive, width)
+	}
+}
+
+// scriptedWatchRuntime delivers a fixed sequence of updates to a watch and
+// then ends the subscription, as the daemon does when a watcher falls behind.
+type scriptedWatchRuntime struct {
+	cliControlRuntime
+	updates []daemonstate.Update
+}
+
+type scriptedSubscription struct{ updates chan daemonstate.Update }
+
+func (s scriptedSubscription) Updates() <-chan daemonstate.Update { return s.updates }
+func (scriptedSubscription) Err() error                           { return daemon.ErrSubscriberOverflow }
+
+func (r *scriptedWatchRuntime) SubscribeStatus(context.Context) (daemonstate.Subscription, error) {
+	updates := make(chan daemonstate.Update, len(r.updates))
+	for _, update := range r.updates {
+		updates <- update
+	}
+	close(updates)
+	return scriptedSubscription{updates: updates}, nil
+}
+
+// TestStatusWatchJSONEmitsEveryTransition runs `status --watch --json` against
+// a daemon whose job went waiting-retry, probing, waiting-retry between two
+// snapshots, each of which holds one row for it. Every transition appears in
+// the output in order, and a watch that falls behind exits with an error.
+func TestStatusWatchJSONEmitsEveryTransition(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	cfg.Paths.CredentialsDir = filepath.Join(dir, "credentials")
+	const job = "remote:tank/data:offsite"
+	at := time.Unix(40, 0).UTC()
+	event := func(state, reason string, offset time.Duration) daemonstate.Event {
+		return daemonstate.Event{Kind: daemonstate.EventTransition, Pool: "transfer", Job: job, Scope: "tank/data", Target: "offsite", State: state, Reason: reason, At: at.Add(offset)}
+	}
+	first, second, third, fourth := event("waiting-retry", "connection refused", 0), event("probing", "", time.Second), event("waiting-retry", "connection reset", 2*time.Second), event("sending", "", 3*time.Second)
+	runtime := &scriptedWatchRuntime{updates: []daemonstate.Update{
+		{State: daemon.ControlSnapshot{Revision: 1}},
+		{Transitions: []daemonstate.Event{first, second, third}, State: daemon.ControlSnapshot{Revision: 4, Jobs: []daemonstate.Event{third}}},
+		{Transitions: []daemonstate.Event{fourth}, State: daemon.ControlSnapshot{Revision: 5, Jobs: []daemonstate.Event{fourth}}},
+	}}
+	server, err := control.StartServer(cfg, runtime, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	configPath := filepath.Join(dir, "config.toml")
+	document := fmt.Sprintf("[paths]\nsocket_path=%q\nidentity_dir=%q\ncredentials_dir=%q\n", cfg.Paths.SocketPath, cfg.Paths.IdentityDir, cfg.Paths.CredentialsDir)
+	if err := os.WriteFile(configPath, []byte(document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	watchErr := runWithReader(t.Context(), []string{"status", "--watch", "--json", "--config", configPath, "--config-dir", filepath.Join(dir, "missing")}, &output, io.Discard, BuildInfo{}, nil)
+	if status.Code(watchErr) != codes.Aborted {
+		t.Fatalf("watch that fell behind returned %v, want Aborted; output=%s", watchErr, output.String())
+	}
+	type transition struct {
+		Job     string `json:"job"`
+		State   string `json:"state"`
+		Reason  string `json:"reason"`
+		Changed int64  `json:"changed_unix_nano"`
+	}
+	var got []transition
+	var revisions []uint64
+	decoder := json.NewDecoder(&output)
+	for decoder.More() {
+		var message struct {
+			Revision    uint64       `json:"revision"`
+			Jobs        []transition `json:"jobs"`
+			Transitions []transition `json:"transitions"`
+		}
+		if err := decoder.Decode(&message); err != nil {
+			t.Fatal(err)
+		}
+		if message.Transitions == nil {
+			t.Fatalf("revision %d has no transitions array", message.Revision)
+		}
+		if len(message.Jobs) > 1 {
+			t.Fatalf("revision %d holds %d rows for one job", message.Revision, len(message.Jobs))
+		}
+		revisions = append(revisions, message.Revision)
+		got = append(got, message.Transitions...)
+	}
+	var want []transition
+	for _, event := range []daemonstate.Event{first, second, third, fourth} {
+		want = append(want, transition{Job: job, State: event.State, Reason: event.Reason, Changed: event.At.UnixNano()})
+	}
+	if !reflect.DeepEqual(revisions, []uint64{1, 4, 5}) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("revisions=%v transitions=%+v, want %+v", revisions, got, want)
 	}
 }
