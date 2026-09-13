@@ -161,13 +161,23 @@ func datasetObjects(state zfs.State) []zfs.Object {
 	return objects
 }
 
+// StateChangedError reports that ZFS state changed between an operation's read
+// and its write. Nothing was written, and a fresh plan may succeed, so it is
+// temporary: work that re-plans on its next attempt should retry it.
+type StateChangedError struct{}
+
+func (*StateChangedError) Error() string { return "ZFS state changed; retry with a fresh plan" }
+
+// Temporary reports that re-planning can succeed.
+func (*StateChangedError) Temporary() bool { return true }
+
 func (s *Service) unchanged(ctx context.Context, dataset string, recursive bool, expected zfs.State) error {
 	current, err := s.backend.InspectState(ctx, dataset, recursive)
 	if err != nil {
 		return err
 	}
 	if !reflect.DeepEqual(expected, current) {
-		return fmt.Errorf("ZFS state changed; retry with a fresh plan")
+		return &StateChangedError{}
 	}
 	return nil
 }

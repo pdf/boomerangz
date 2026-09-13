@@ -810,7 +810,7 @@ func (r *Runtime) protectAndCoalesce(dataset, snapshot, target string, recursive
 			}
 		}
 	}
-	if _, err := service.ProtectSet(context.Background(), dataset, snapshots, target); err != nil {
+	if err := protectSet(service, dataset, snapshots, target); err != nil {
 		return err
 	}
 	coalesced, err := r.pending.Coalesce(dataset, target, pending)
@@ -823,6 +823,28 @@ func (r *Runtime) protectAndCoalesce(dataset, snapshot, target string, recursive
 		}
 	}
 	return nil
+}
+
+// protectAttempts bounds how many times a new snapshot's protection re-plans
+// around concurrent changes to its source. Nothing reschedules a snapshot's
+// protection, so the snapshot job retries it itself; each attempt re-reads
+// the source, and none waits.
+const protectAttempts = 5
+
+// protectSet places a reference and holds on snapshots for target. The
+// daemon's own transfers write their source without the lifecycle lock - a
+// first transfer records its target binding - so protection can find the
+// source changed under it, and re-plans rather than leaving the snapshot
+// unprotected.
+func protectSet(service *lifecycle.Service, dataset string, snapshots []string, target string) error {
+	var err error
+	for range protectAttempts {
+		var changed *lifecycle.StateChangedError
+		if _, err = service.ProtectSet(context.Background(), dataset, snapshots, target); !errors.As(err, &changed) {
+			return err
+		}
+	}
+	return err
 }
 
 func (r *Runtime) releaseSupersededPending(dataset, target, snapshot string) error {
