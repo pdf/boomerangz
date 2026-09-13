@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,6 +30,10 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+// listenerDrainBound limits how long a retired listener waits for its in-flight
+// calls before stopping them.
+const listenerDrainBound = 5 * time.Second
 
 // Server owns all configured local-control listeners.
 type Server struct {
@@ -48,6 +53,9 @@ type Server struct {
 	closeOnce   sync.Once
 	closeErr    error
 	closed      bool
+	drainBound  time.Duration
+	draining    map[*serverEndpoint]struct{}
+	drains      sync.WaitGroup
 }
 
 type serverEndpoint struct {
@@ -56,6 +64,7 @@ type serverEndpoint struct {
 	server     *grpc.Server
 	listener   net.Listener
 	socket     *socketFile
+	retired    atomic.Bool
 }
 
 type socketFile struct {
@@ -298,7 +307,7 @@ func startServer(cfg config.Config, backend runtime, replication zfs.Executor, z
 	if err != nil {
 		return nil, err
 	}
-	result := &Server{logger: logger, reloader: &reloadHandler{}, config: cfg.Clone(), backend: backend, replication: replication, zfsPath: zfsPath, store: store, endpoints: make(map[string]*serverEndpoint)}
+	result := &Server{logger: logger, reloader: &reloadHandler{}, config: cfg.Clone(), backend: backend, replication: replication, zfsPath: zfsPath, store: store, endpoints: make(map[string]*serverEndpoint), drainBound: listenerDrainBound, draining: make(map[*serverEndpoint]struct{})}
 	definitions := listenerDefinitions(cfg)
 	names := make([]string, 0, len(definitions))
 	for name := range definitions {
@@ -383,7 +392,11 @@ func (s *Server) startEndpoint(endpoint *serverEndpoint) {
 	s.wait.Add(1)
 	go func() {
 		defer s.wait.Done()
-		if serveErr := endpoint.server.Serve(endpoint.listener); serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
+		serveErr := endpoint.server.Serve(endpoint.listener)
+		if endpoint.retired.Load() && errors.Is(serveErr, net.ErrClosed) {
+			return
+		}
+		if serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
 			s.logger.Error("control listener stopped", "name", endpoint.name, "error", serveErr)
 		}
 	}()
@@ -439,7 +452,9 @@ func closeEndpoint(endpoint *serverEndpoint) error {
 	return result
 }
 
-func retireEndpoint(endpoint *serverEndpoint) error {
+// drainEndpoint stops endpoint once its in-flight calls have finished, stopping
+// any still running when the drain bound expires, and then closes it.
+func (s *Server) drainEndpoint(endpoint *serverEndpoint) error {
 	if endpoint == nil || endpoint.server == nil {
 		return closeEndpoint(endpoint)
 	}
@@ -448,15 +463,38 @@ func retireEndpoint(endpoint *serverEndpoint) error {
 		endpoint.server.GracefulStop()
 		close(done)
 	}()
-	timer := time.NewTimer(5 * time.Second)
+	timer := time.NewTimer(s.drainBound)
 	defer timer.Stop()
 	select {
 	case <-done:
 	case <-timer.C:
+		s.logger.Warn("control listener drain bound expired", "name", endpoint.name, "bound", s.drainBound)
 		endpoint.server.Stop()
 		<-done
 	}
 	return closeEndpoint(endpoint)
+}
+
+// retireEndpointLocked stops endpoint accepting before returning and drains its
+// in-flight calls in the background, where Close can stop them. The drain
+// cannot run inline: a Reload RPC served by endpoint is itself in flight.
+func (s *Server) retireEndpointLocked(endpoint *serverEndpoint) {
+	endpoint.retired.Store(true)
+	closeErr := endpoint.listener.Close()
+	if errors.Is(closeErr, net.ErrClosed) {
+		closeErr = nil
+	}
+	s.draining[endpoint] = struct{}{}
+	s.drains.Add(1)
+	go func() {
+		defer s.drains.Done()
+		if err := errors.Join(closeErr, s.drainEndpoint(endpoint)); err != nil {
+			s.logger.Error("retire reconfigured control listener", "name", endpoint.name, "error", err)
+		}
+		s.mu.Lock()
+		delete(s.draining, endpoint)
+		s.mu.Unlock()
+	}()
 }
 
 func endpointAddress(definition config.ListenerConfig) string {
@@ -554,7 +592,7 @@ func (s *Server) Reload(cfg config.Config) error {
 		if !exists || endpointUnchanged(previous.definition, definition) || endpointAddress(previous.definition) != endpointAddress(definition) {
 			continue
 		}
-		if err := retireEndpoint(previous); err != nil {
+		if err := s.drainEndpoint(previous); err != nil {
 			for _, candidate := range staged {
 				_ = closeEndpoint(candidate)
 			}
@@ -618,15 +656,8 @@ func (s *Server) Reload(cfg config.Config) error {
 	}
 	s.config = cfg.Clone()
 	s.refreshViewsLocked()
-	if len(retired) != 0 {
-		go func(endpoints []*serverEndpoint) {
-			time.Sleep(100 * time.Millisecond)
-			for _, endpoint := range endpoints {
-				if err := retireEndpoint(endpoint); err != nil {
-					s.logger.Error("retire reconfigured control listener", "name", endpoint.name, "error", err)
-				}
-			}
-		}(retired)
+	for _, endpoint := range retired {
+		s.retireEndpointLocked(endpoint)
 	}
 	return nil
 }
@@ -638,7 +669,8 @@ func (s *Server) SetReloadHandler(handler func(context.Context) (daemonstate.Rel
 	s.reloader.mu.Unlock()
 }
 
-// Close stops all RPCs and removes only sockets created by this server.
+// Close stops all RPCs, including those still draining from listeners a reload
+// retired, and removes only sockets created by this server.
 func (s *Server) Close() error {
 	if s == nil {
 		return nil
@@ -652,10 +684,18 @@ func (s *Server) Close() error {
 		}
 		s.endpoints = make(map[string]*serverEndpoint)
 		s.refreshViewsLocked()
+		draining := make([]*serverEndpoint, 0, len(s.draining))
+		for endpoint := range s.draining {
+			draining = append(draining, endpoint)
+		}
 		s.mu.Unlock()
+		for _, endpoint := range draining {
+			endpoint.server.Stop()
+		}
 		for _, endpoint := range endpoints {
 			s.closeErr = errors.Join(s.closeErr, closeEndpoint(endpoint))
 		}
+		s.drains.Wait()
 		s.wait.Wait()
 	})
 	return s.closeErr

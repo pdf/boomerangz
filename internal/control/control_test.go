@@ -151,14 +151,9 @@ func TestServerReloadMovesDefaultUnixSocket(t *testing.T) {
 	if _, err := client.Status.GetStatus(t.Context(), &controlrpc.GetStatusRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Lstat(cfg.Paths.SocketPath); errors.Is(err, os.ErrNotExist) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if _, err := os.Lstat(cfg.Paths.SocketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("previous control socket was not retired: %v", err)
 	}
-	t.Fatal("previous control socket was not retired")
 }
 
 func TestServerReloadFailureRetainsActiveListeners(t *testing.T) {

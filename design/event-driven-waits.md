@@ -854,12 +854,17 @@ running are fixtures, not waits
 ([internal/daemon/pool_test.go:66](../internal/daemon/pool_test.go),
 [internal/control/control_test.go:159](../internal/control/control_test.go)).
 
-One unrelated sleep is worth fixing while nearby: a control reload hands
-replaced listeners to a goroutine that sleeps 100ms before closing them
-([internal/control/server.go:623](../internal/control/server.go)), which can cut
-an RPC still running at 100ms and holds the listener open when none is. It
-should close on a drain of in-flight calls, bounded, keeping the existing error
-log if the bound expires.
+One unrelated sleep is worth fixing while nearby: a control reload handed
+retired listeners to a goroutine that slept 100ms before draining them. The
+drain itself was already there - `GracefulStop`, bounded at five seconds, then
+`Stop` - so the sleep did not cut calls in flight. What it did was keep the
+retired listener accepting for 100ms after `Reload` returned, which is why the
+moved-socket test polled for the old socket to disappear. And the goroutine was
+untracked: `Close` did not stop a drain in progress but waited it out through
+the retired listener's `Serve`, up to the full bound, and a call cut when the
+bound expired left no trace. Chunk E closes the retired listener before `Reload`
+returns, drains in a goroutine `Close` stops and waits for, and logs "control
+listener drain bound expired" at warning when the bound cuts a call.
 
 ## 6. Chunks
 
@@ -931,7 +936,9 @@ subscription within 40 seconds (3.8), and nothing in the tree describes a watch
 interval.
 
 **Chunk E - the listener drain.** Section 5's last paragraph, independent of the
-rest. Done when a call in flight across a reload completes, with a test.
+rest. Done when a call in flight across a reload completes, the retired listener
+refuses connections once `Reload` returns, `Close` stops a drain rather than
+waiting out its bound, and an expired bound is logged, each with a test.
 
 **Chunk F - the in-process waiter.** 4.1, on chunk B, in
 `test/integration/internal/statuswait`. `waitForTransferSuccesses`,
