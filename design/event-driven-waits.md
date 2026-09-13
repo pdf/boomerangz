@@ -140,19 +140,50 @@ wrong occurrence of a repeated state the way a backward look can, but it does
 mean the helpers in chunk E are written around the subscription rather than
 around the assertion.
 
-**3.3 Progress is a separate topic.** `recordProgress` writes an event per
-progress callback with `State: "sending"`
-([internal/daemon/runtime.go:1064](../internal/daemon/runtime.go)), and the
-status UI reads bytes, rate and ETA from the current snapshot rather than from
-any sequence ([internal/statusui/status.go:169](../internal/statusui/status.go)).
-So transitions and progress are published as distinct topics, and a transition
-subscriber does not receive progress at all. The periodic snapshot carries the
-progress an operator is watching.
+**3.3 Progress is conflated, not queued.** Progress reaches a watcher today
+through the same path as everything else: each sample goes through
+`recordProgress` into `StatusStore.Record`
+([internal/daemon/runtime.go:1064](../internal/daemon/runtime.go)), moves the
+revision, and wakes `WatchStatus` into sending a full snapshot. Samples are
+produced at most every 250ms per transfer, from inside the stream's write path
+([internal/zfs/stream.go:259](../internal/zfs/stream.go),
+[internal/replication/rpc/client.go:261](../internal/replication/rpc/client.go)),
+so a watcher sees bytes, rate and ETA move at up to four updates a second for
+each running transfer. The interval plays no part in that.
 
-Filtering by content instead - deduplicating consecutive identical events -
-would erase the second of two identical failed attempts, which is the sequence
-`TestGuestDaemonRemoteBackoff` counts. The two call paths are already distinct,
-so the split costs nothing and the dedupe trap is avoided entirely.
+A transition and a progress sample are different kinds of message, and they
+need different delivery. Every transition matters, in order, so transitions are
+queued and overflow is terminal (3.1). Only the newest progress sample for a job
+matters - a rate from two samples ago is not information, it is a wrong number -
+so progress is conflated: each subscriber holds one latest-value slot per job
+and a one-element wake signal. Publishing a sample overwrites the slot and
+signals without blocking; a subscriber that was slow simply reads the newest
+sample when it next looks. The slots are bounded by the transfers running at
+once, which the transfer worker counts bound
+([internal/config/config.go:16](../internal/config/config.go)), so a progress
+subscription cannot overflow and needs no terminal edge.
+
+That is also why progress cannot share the transition queue. Deduplicating
+consecutive identical events to keep samples from crowding it out would erase
+the second of two identical failed attempts, which is the sequence
+`TestGuestDaemonRemoteBackoff` counts; and queueing samples at all spends the
+queue bound on numbers that are stale by the time they are read. Separate entry
+points on the store - `Record` for transitions, `RecordProgress` for samples -
+match call paths that are already distinct.
+
+**A stalled transfer currently reports nothing.** A sample is emitted only when
+bytes are written, and the rate is the cumulative average since the transfer
+began ([internal/zfs/stream.go:267](../internal/zfs/stream.go),
+[internal/replication/rpc/client.go:203](../internal/replication/rpc/client.go)).
+A transfer that stops moving emits no further samples, so its last rate and ETA
+stay on screen unchanged - and today's interval re-sends exactly those numbers,
+so it never covered this either. Two producer-side fixes: emit on a ticker for
+as long as a transfer is active, not only on write, so a stall is visible as a
+stall; and report the rate over a recent window rather than since the start, so
+it falls to zero when the bytes do, instead of decaying toward an average that
+hides the stall for minutes. That ticker is sampling a counter to publish a time
+series - time-driven by intent, like the backoff timers - not polling for a
+condition.
 
 **3.4 `WatchStatus` sends what it receives.** Two additive fields on
 `WatchStatusResponse` ([proto/boomerangz/control/v1/control.proto:30](../proto/boomerangz/control/v1/control.proto)):
@@ -160,7 +191,18 @@ the transitions observed since the previous message, and a flag marking a
 message as a resync after an overflow ended the server's subscription. The
 snapshot stays as it is, so existing clients are unaffected and a client joining
 mid-stream still gets a self-describing message. The handler subscribes, sends
-the snapshot, and then forwards from its channel.
+the snapshot, and then waits on both the transition queue and the progress
+signal. A wake sends every queued transition in order, together with a snapshot
+that by construction carries the newest progress for every running job.
+
+Progress-only wakes are coalesced to at most one message per 250ms per stream,
+matching the producer's own sample cadence. With the default of three transfer
+workers that bounds a watcher at four messages a second rather than twelve, and
+it never delays a transition, which sends immediately. While a `Send` is
+blocked, samples keep overwriting their slots, so a slow client costs itself
+freshness and nothing else. That limit is a server-side property of conflated
+data; it is not a client-chosen heartbeat, and it is not the interval coming
+back.
 
 `Runtime.WaitStatus` exists for exactly this handler
 ([internal/control/service.go:18](../internal/control/service.go),
@@ -342,11 +384,13 @@ log if the bound expires.
 
 ## 6. Chunks
 
-**Chunk A - publication.** 3.1 through 3.3. Unit tests for delivery order, the
-non-blocking publish, overflow terminating one subscription without touching
-another or the producer, and that a progress-heavy send delivers nothing to a
-transition subscriber. Done when a subscriber receives every transition recorded
-after it subscribed, or is told its subscription ended.
+**Chunk A - publication.** 3.1 through 3.3's delivery model. Unit tests for
+delivery order, the non-blocking publish, overflow terminating one subscription
+without touching another or the producer, and conflation: a burst of samples
+leaves exactly the newest per job, and cannot overflow or displace a queued
+transition. Done when a subscriber receives every transition recorded after it
+subscribed, or is told its subscription ended, and always reads the newest
+progress for every running job.
 
 **Chunk B - the control plane carries transitions.** 3.4 and 3.5, retiring
 `WaitStatus` with them, and the docs in the same change. Done when
@@ -354,11 +398,13 @@ after it subscribed, or is told its subscription ended.
 connected, and a test asserts that a sequence which collapses in the snapshot
 survives in the stream.
 
-**Chunk C - every state change is an event.** 3.6: publish generations,
+**Chunk C - nothing a watcher holds goes stale.** 3.6: publish generations,
 activation changes and next-snapshot deadlines; configure transport keepalive on
 the TCP listeners; remove `--interval` and reserve its proto field, with docs,
-man page and completions. Done when a watcher's snapshot reflects a newly
-enabled dataset without any job transitioning, a client over TCP detects a
+man page and completions. And 3.3's producer fixes: progress emitted on a ticker
+while a transfer is active, and a windowed rate. Done when a watcher's snapshot
+reflects a newly enabled dataset without any job transitioning, a stalled
+transfer's rate reaches zero within a few samples, a client over TCP detects a
 vanished daemon within the keepalive bound, and nothing in the tree describes a
 watch interval.
 
