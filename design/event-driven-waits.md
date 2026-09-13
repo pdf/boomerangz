@@ -268,17 +268,51 @@ is not proposed.
 
 ## 5. Deferred, on merit rather than size
 
-**Replacing periodic discovery with `zpool events`/zed.** The scanner rescans on
-a ticker because ZFS changes are not pushed to it. A zed hook could wake it
-instead, and that is the honest end state of "stop polling". It is deferred
-because it changes what the daemon is guaranteed to notice - a missed or
-coalesced event becomes a dataset the daemon does not know about, where today a
-missed wake costs latency only - and because zed's availability and delivery
-guarantees vary by distribution in ways this project has not surveyed. It
-becomes worth doing when the periodic scan is a measured cost rather than an
-assumed one, and when a zed path can be specified with the periodic scan still
-underneath it as the correctness floor. It wants its own document; this one
-should not pretend to have decided it.
+**Waking discovery from ZFS events.** The scanner rescans on a ticker because
+nothing pushes ZFS changes to the daemon. OpenZFS does emit them: the kernel
+module posts a zevent for pool history, and the upstream zedlet
+`history_event-zfs-list-cacher.sh`, shipped in `zfs-utils`, already uses them to
+notice `create`, `destroy`, `rename`, `finish receiving`, `set` and `inherit` -
+user properties included. zed and zevents are part of OpenZFS itself rather than
+a distribution addition, and this project is Linux-only
+([PLAN.md:29](../PLAN.md)), so platform variation is not what shapes the
+question. Three things observed on OpenZFS 2.4.4 do:
+
+- *The daemon cannot read zevents.* `/dev/zfs` is world-writable, but the events
+  ioctl refuses an unprivileged caller - `zpool events` as an ordinary user fails
+  with `cannot get event: permission denied` - and `zfs allow` cannot delegate
+  it. The daemon runs as the delegated service account, so it cannot be a zevent
+  consumer. A root-run zedlet can: `history_event` calling the existing
+  `Reconcile` RPC, which already coalesces an explicit discovery hint
+  ([internal/control/service.go:112](../internal/control/service.go)), over the
+  local socket the daemon already serves.
+- *That makes zed a deployment dependency, and whether it runs is the
+  distribution's call.* OpenZFS ships a systemd preset that enables
+  `zfs-zed.service` (`/usr/lib/systemd/system-preset/50-zfs.preset`), but a
+  preset only takes effect where the distribution applies presets on install.
+  Arch does not enable services from packages, so on the Arch-family
+  development host the unit is installed, preset to enabled, and disabled; and
+  nothing in `contrib/` or the integration target enables it. That is the real
+  variation - not zed's presence or behaviour, which come from OpenZFS, but
+  whether anything turned it on. Requiring it is a packaging decision with
+  consequences beyond this project - zed also runs the fault-handling and
+  notification zedlets - and not one to take as a side effect of a latency
+  improvement.
+- *Delivery is a wake, never the truth.* The kernel queue is bounded
+  (`zfs_zevent_len_max`, default 512, in `zfs(4)`), `zed(8)` documents missing
+  events and grows that buffer to compensate, and event IDs restart when the
+  module reloads. The upstream zedlet treats an event accordingly: it re-lists
+  the pool rather than trusting the payload.
+
+So the shape is settled even though the decision is not: a zedlet that nudges
+`Reconcile`, with the periodic scan left underneath unchanged as the correctness
+floor. Built that way it cannot make the daemon miss a change - a lost event
+costs what a missed wake costs today, one interval of latency - and it does not
+remove any scanning, because lengthening the interval is exactly what would turn
+a lost event into a missed change. It is a latency improvement with a packaging
+dependency, and nothing has yet measured discovery latency as a problem. It is
+deferred on that ground: an optimisation without a demonstrated need, shipped
+through a system daemon the project does not currently require.
 
 **Resumable watching.** A client that loses its stream and reconnects gets a
 fresh snapshot and the transitions from then on; whatever happened during the
