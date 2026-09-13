@@ -87,9 +87,12 @@ causes the reload action to fail. See
 [Configure the daemon](/guide/configuration#validate-changes) for the reload
 contract and non-default socket usage.
 
-A reload that moves or replaces a control listener - a new socket path, address,
-or authentication mode - stops that listener accepting before the reload
-returns. A `status --watch` connected to it ends at once with an error saying
+A reload leaves an unchanged control socket or token-authenticated TCP listener
+in place. A reload that moves or replaces a listener - a new socket path,
+address, or authentication mode - stops that listener accepting before the
+reload returns, and a TCP listener using `mtls` or `mtls+token` is always
+replaced, even when its configuration is unchanged, so that it picks up a new
+client CA. A `status --watch` connected to it ends at once with an error saying
 the listener was retired, so start the watch again against the current socket or
 endpoint. Other calls already running on it get up to five seconds to finish;
 any still running then are stopped, and the daemon logs

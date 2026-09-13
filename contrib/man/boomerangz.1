@@ -82,7 +82,8 @@ Validate and atomically apply the running daemon configuration. Use
 .B --socket
 to select a non-default current control socket. The JSON result identifies
 fields applied live and fields requiring restart. A watch connected to a
-listener the reload moves or replaces ends with an error.
+listener the reload moves or replaces ends with an error; mTLS TCP listeners
+are replaced on every reload.
 .TP
 .B pairing create
 Create a one-time pairing bundle for a configured TCP listener. Scopes are
