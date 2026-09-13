@@ -1081,18 +1081,31 @@ queue recorded no transition, so its row kept the `pending-<pool>` state it was
 queued with until the job next ran: the queue view no longer listed it, but the
 row itself went stale - the same shape as 3.8's gaps, for a job rather than a
 view. Fixed after chunk D: a dropped job records `cancelled`, with a reason
-the caller gives - "dataset deactivated" from deactivation, "configuration
-reloaded" for the queued remote work every reload discards, and "daemon shutting
-down" from `Runtime.Run` - sent in the same message as the queue view that no
+the caller gives - "dataset deactivated" from deactivation, "remote
+configuration changed" from a reload that changes a remote, and "daemon
+shutting down" from `Runtime.Run` - sent in the same message as the queue view that no
 longer lists it, under `FairQueue.mu`, the way an offer sends `pending-<pool>`
 (3.1). A queue message therefore carries any number of transitions, applied and
 delivered in order under one revision. A worker that pops a job after its pool
 was stopped records `cancelled` too, rather than dropping it silently. So
 removing a queue entry is no longer a change without a transition; a pop still
-is, until the worker reports the job's start (3.8). A reload now logs
-`cancelled` for each queued remote job, followed by `pending-transfer` where a
-reload that changed the remotes requeues it, which chunk G's occurrence
-counting has to allow for.
+is, until the worker reports the job's start (3.8).
+
+Recording those transitions exposed a second defect in the reload path. Every
+reload discarded queued remote work and every remote's recovery coordinator,
+retry state included, but requeued remote work only when the remotes had
+changed. A reload that changed nothing about the remotes - a worker count, say -
+therefore dropped remote transfers silently, and one carrying a newly protected
+snapshot waited for that dataset's next snapshot or discovery change to run.
+The discard, the coordinator reset, and the requeue now happen together, and
+only when a remote changed. "Changed" compares the clients a reload builds
+with the ones in use - an SSH remote's setting, a native remote's pairing
+bundle and root - rather than the configuration alone, so a native credential
+file whose contents changed still replaces its client and coordinators, as
+the unconditional reset used to. A reload that changes a remote logs
+`cancelled` for each queued remote job and `pending-transfer` for the work
+requeued against the new clients, which chunk G's occurrence counting has to
+allow for; any other reload logs neither.
 
 **Chunk E - the listener drain.** Section 5's last paragraph, independent of the
 rest. Done when a call in flight across a reload completes, the retired listener

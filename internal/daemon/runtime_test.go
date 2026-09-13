@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/control"
 	"github.com/pdf/boomerangz/internal/discovery"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
@@ -334,5 +335,114 @@ func TestListenerReloadFailureRollsBackDaemonConfiguration(t *testing.T) {
 	}
 	if runtime.local.workers != cfg.Daemon.LocalTransferWorkers || runtime.ControlStatus().ConfigGeneration != 1 {
 		t.Fatal("listener failure changed live runtime state")
+	}
+}
+
+// queueRemoteWork queues a remote job in a runtime whose pools never start, and
+// gives its remote a recovery coordinator, as enqueueRemote would.
+func queueRemoteWork(t *testing.T, runtime *Runtime, dataset, remote string) string {
+	t.Helper()
+	id := "remote:" + dataset + ":" + remote
+	if added, err := runtime.remote.Submit(Job{ID: id, Group: dataset, Scope: dataset, StartState: "probing", Run: func(context.Context) Outcome { return Outcome{} }}); err != nil || !added {
+		t.Fatalf("submit %s: added=%t err=%v", id, added, err)
+	}
+	runtime.mu.Lock()
+	runtime.roads[roadKey(dataset, remote)] = roadState{}
+	runtime.mu.Unlock()
+	return id
+}
+
+func sshRemoteConfig(port int) config.RemoteConfig {
+	return config.RemoteConfig{Transport: "ssh", Host: "backup.example.net", Port: port, Root: "tank/backups"}
+}
+
+func TestReloadKeepsQueuedRemoteWorkWhenRemotesAreUnchanged(t *testing.T) {
+	t.Parallel()
+	cfg := config.Defaults()
+	cfg.Remotes["offsite"] = sshRemoteConfig(22)
+	log := &lineLog{}
+	runtime, err := New(cfg, &runtimeBackend{}, "11111111-1111-4111-8111-111111111111", slog.New(log))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := queueRemoteWork(t, runtime, "tank/data", "offsite")
+	clients := runtime.remotes
+	next := cfg.Clone()
+	next.Daemon.LocalTransferWorkers = 3
+	if _, err := runtime.ApplyConfig(next); err != nil {
+		t.Fatal(err)
+	}
+	if queued := runtime.remote.queue.Snapshot().IDs; !slices.Equal(queued, []string{id}) {
+		t.Fatalf("queued remote work after an unrelated reload = %v", queued)
+	}
+	runtime.mu.Lock()
+	_, road := runtime.roads[roadKey("tank/data", "offsite")]
+	sameClient := runtime.remotes["offsite"] == clients["offsite"]
+	runtime.mu.Unlock()
+	if !road || !sameClient {
+		t.Fatalf("an unrelated reload replaced remote state: road kept=%t client kept=%t", road, sameClient)
+	}
+	runtime.status.flush(t.Context())
+	for _, line := range log.snapshot() {
+		if line["state"] == "cancelled" {
+			t.Fatalf("an unrelated reload cancelled work: %v", line)
+		}
+	}
+}
+
+func TestReloadDiscardsQueuedRemoteWorkWhenARemoteChanges(t *testing.T) {
+	t.Parallel()
+	cfg := config.Defaults()
+	cfg.Remotes["offsite"] = sshRemoteConfig(22)
+	log := &lineLog{}
+	runtime, err := New(cfg, &runtimeBackend{}, "11111111-1111-4111-8111-111111111111", slog.New(log))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := queueRemoteWork(t, runtime, "tank/data", "offsite")
+	next := cfg.Clone()
+	next.Remotes["offsite"] = sshRemoteConfig(2222)
+	if _, err := runtime.ApplyConfig(next); err != nil {
+		t.Fatal(err)
+	}
+	if queued := runtime.remote.queue.Snapshot().IDs; len(queued) != 0 {
+		t.Fatalf("remote work bound to the previous client is still queued: %v", queued)
+	}
+	runtime.mu.Lock()
+	roads := len(runtime.roads)
+	setting := runtime.remotes["offsite"].(*sshRemote).setting
+	runtime.mu.Unlock()
+	if roads != 0 || setting.Port != 2222 {
+		t.Fatalf("changed remote kept its previous state: roads=%d port=%d", roads, setting.Port)
+	}
+	runtime.status.flush(t.Context())
+	if !slices.ContainsFunc(log.snapshot(), func(line map[string]string) bool {
+		return line["job"] == id && line["state"] == "cancelled" && line["reason"] == "remote configuration changed"
+	}) {
+		t.Fatalf("discarded remote work did not record cancelled: %v", log.snapshot())
+	}
+}
+
+func TestSameRemoteClientsComparesWhatEachClientWasBuiltFrom(t *testing.T) {
+	t.Parallel()
+	ssh := func(port int) remoteClient { return &sshRemote{setting: sshRemoteConfig(port)} }
+	native := func(endpoint string) remoteClient {
+		return &nativeRemote{bundle: control.PairingBundle{Version: 1, Endpoint: endpoint}, root: "tank/backups", canonical: "native://" + endpoint + "/tank/backups"}
+	}
+	for _, tc := range []struct {
+		name string
+		a, b map[string]remoteClient
+		same bool
+	}{
+		{"rebuilt identical", map[string]remoteClient{"s": ssh(22), "n": native("a:1")}, map[string]remoteClient{"s": ssh(22), "n": native("a:1")}, true},
+		{"ssh setting", map[string]remoteClient{"s": ssh(22)}, map[string]remoteClient{"s": ssh(2222)}, false},
+		{"native bundle contents", map[string]remoteClient{"n": native("a:1")}, map[string]remoteClient{"n": native("b:1")}, false},
+		{"transport", map[string]remoteClient{"r": ssh(22)}, map[string]remoteClient{"r": native("a:1")}, false},
+		{"added", map[string]remoteClient{}, map[string]remoteClient{"s": ssh(22)}, false},
+		{"renamed", map[string]remoteClient{"s": ssh(22)}, map[string]remoteClient{"t": ssh(22)}, false},
+	} {
+		if got := sameRemoteClients(tc.a, tc.b); got != tc.same {
+			t.Errorf("%s: same=%t, want %t", tc.name, got, tc.same)
+		}
 	}
 }

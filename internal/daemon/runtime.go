@@ -265,13 +265,16 @@ func (r *Runtime) prepareConfig(next config.Config) (*preparedConfig, error) {
 		remoteNames = append(remoteNames, name)
 	}
 	slices.Sort(remoteNames)
+	r.mu.Lock()
+	unchanged := sameRemoteClients(r.remotes, clients)
+	r.mu.Unlock()
 	return &preparedConfig{
 		effective:      effective,
 		clients:        clients,
 		remotes:        remoteNames,
 		applied:        applied,
 		restart:        restart,
-		refreshRemotes: !reflect.DeepEqual(previous.Remotes, effective.Remotes) || previous.Paths.CredentialsDir != effective.Paths.CredentialsDir,
+		refreshRemotes: !unchanged,
 	}, nil
 }
 
@@ -282,9 +285,14 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	_ = r.local.Resize(effective.Daemon.LocalTransferWorkers)
 	_ = r.remote.Resize(effective.Daemon.RemoteTransferWorkers)
 	_ = r.scanner.Reconfigure(effective.Daemon.ReconcileInterval.Duration, prepared.remotes)
-	// Remote work queued under the previous configuration is discarded; a
-	// reload that changed the remotes requeues it below.
-	r.remote.DiscardPending("configuration reloaded")
+	// Queued remote work, and each remote's recovery coordinator with its
+	// retry state, is bound to the client it was built with. A reload that
+	// leaves every remote as it was keeps both; one that changes a remote
+	// discards them and requeues every active dataset's remote work against
+	// the new clients below.
+	if prepared.refreshRemotes {
+		r.remote.DiscardPending("remote configuration changed")
+	}
 	type remoteReconcile struct {
 		dataset string
 		remote  string
@@ -293,9 +301,9 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	var reconciles []remoteReconcile
 	r.mu.Lock()
 	r.config = effective.Clone()
-	r.remotes = prepared.clients
-	r.roads = make(map[string]roadState)
 	if prepared.refreshRemotes {
+		r.remotes = prepared.clients
+		r.roads = make(map[string]roadState)
 		for key := range r.delayed {
 			if strings.HasPrefix(key, "remote:") {
 				delete(r.delayed, key)
@@ -316,7 +324,7 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 			}
 		}
 	}
-	r.safety.setTargets(&TargetChecker{local: r.backend, remotes: prepared.clients, settings: effective.Remotes})
+	r.safety.setTargets(&TargetChecker{local: r.backend, remotes: r.remotes, settings: effective.Remotes})
 	r.configGeneration++
 	generation := r.configGeneration
 	r.publishRuntimeLocked()

@@ -130,7 +130,7 @@ A job's `state` in `status`, in `transitions`, and in the
 | `waiting-retry` | The job will be retried later, for example after a remote was unreachable; `reason` carries the cause |
 | `blocked` | The job stopped on a condition it cannot resolve itself; `reason` carries the cause |
 | `failed` | The job failed; `reason` carries the error |
-| `cancelled` | The job was stopped, or removed from its queue before it started; `reason` says why, for example `daemon shutting down`, `dataset deactivated`, or `configuration reloaded` for queued remote transfers, which a reload discards |
+| `cancelled` | The job was stopped, or removed from its queue before it started; `reason` says why, for example `daemon shutting down`, `dataset deactivated`, or `remote configuration changed` for queued remote transfers a reload requeues against a changed remote |
 
 A transfer that resumes an interrupted stream and then has newer state to send
 reports `sending` twice, once for each stream, so its byte count starting again

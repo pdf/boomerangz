@@ -60,7 +60,11 @@ system journal; inspect it with `journalctl -u boomerangz.service`. Check
 
 Most settings, including worker counts, remotes, listeners, credential and
 socket paths, and restricted-shell roots, are applied live. Running jobs finish
-with the configuration they captured when they started. Changing
+with the configuration they captured when they started. Queued remote
+transfers, and each remote's retry backoff, are kept unless the reload changes
+a remote's settings or the contents of a native remote's credential file; then
+the queued transfers are cancelled and queued again against the new settings,
+and retries start afresh. Changing
 `paths.identity_dir` requires a restart and is retained at its previous value
 until then because it changes the installation's identity and authorization
 boundary.
