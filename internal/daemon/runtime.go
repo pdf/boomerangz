@@ -555,7 +555,20 @@ func (r *Runtime) enqueueInactive(dataset string, active bool) {
 		if serviceErr != nil {
 			return Outcome{State: "failed", Reason: serviceErr.Error()}
 		}
-		plan, reconcileErr := service.ReconcileInactive(ctx, dataset, active, r.now(), r.daemonConfig().InactiveGracePeriod.Duration, true)
+		// The marker's time starts the grace period, so a concurrent change
+		// is re-planned around at once rather than after a delay. A source
+		// that keeps changing is retried later: a refusal on a state change
+		// wrote nothing, and nothing else would run the job again.
+		plan, reconcileErr := replan(func() (lifecycle.InactivePlan, error) {
+			return service.ReconcileInactive(ctx, dataset, active, r.now(), r.daemonConfig().InactiveGracePeriod.Duration, true)
+		})
+		var changed *lifecycle.StateChangedError
+		if errors.As(reconcileErr, &changed) {
+			if delay, delayErr := transfer.DefaultRetryPolicy().Delay(1, rand.Float64()); delayErr == nil {
+				r.schedule(id, r.now().Add(delay), func() { r.retryInactive(dataset, active) })
+			}
+			return Outcome{State: "waiting-retry", Reason: reconcileErr.Error()}
+		}
 		if reconcileErr != nil {
 			return Outcome{State: "blocked", Reason: reconcileErr.Error()}
 		}
@@ -570,6 +583,18 @@ func (r *Runtime) enqueueInactive(dataset string, active bool) {
 	}})
 	if err != nil {
 		r.logger.Error("queue inactive reconciliation", "dataset", dataset, "error", err)
+	}
+}
+
+// retryInactive runs an inactive reconciliation again, unless the dataset's
+// activation has changed since: that change queued its own reconciliation,
+// which a retry of the old one must not undo.
+func (r *Runtime) retryInactive(dataset string, active bool) {
+	r.mu.Lock()
+	current := r.active[dataset]
+	r.mu.Unlock()
+	if current == active {
+		r.enqueueInactive(dataset, active)
 	}
 }
 
@@ -825,25 +850,37 @@ func (r *Runtime) protectAndCoalesce(dataset, snapshot, target string, recursive
 	return nil
 }
 
-// protectAttempts bounds how many times a new snapshot's protection re-plans
-// around concurrent changes to its source. Nothing reschedules a snapshot's
-// protection, so the snapshot job retries it itself; each attempt re-reads
-// the source, and none waits.
-const protectAttempts = 5
+// replanAttempts bounds how many times a lifecycle operation re-plans around
+// concurrent changes to its source. The daemon's own transfers write their
+// source without the lifecycle lock - a first transfer records its target
+// binding - so an operation can find the source changed between its read and
+// its write, which refuses with a StateChangedError. Each attempt re-reads the
+// source, and none waits.
+const replanAttempts = 5
 
-// protectSet places a reference and holds on snapshots for target. The
-// daemon's own transfers write their source without the lifecycle lock - a
-// first transfer records its target binding - so protection can find the
-// source changed under it, and re-plans rather than leaving the snapshot
-// unprotected.
-func protectSet(service *lifecycle.Service, dataset string, snapshots []string, target string) error {
-	var err error
-	for range protectAttempts {
+// replan runs operation until it does anything but refuse on a state change,
+// at most replanAttempts times, and returns its last result.
+func replan[T any](operation func() (T, error)) (T, error) {
+	var (
+		result T
+		err    error
+	)
+	for range replanAttempts {
 		var changed *lifecycle.StateChangedError
-		if _, err = service.ProtectSet(context.Background(), dataset, snapshots, target); !errors.As(err, &changed) {
-			return err
+		if result, err = operation(); !errors.As(err, &changed) {
+			return result, err
 		}
 	}
+	return result, err
+}
+
+// protectSet places a reference and holds on snapshots for target, re-planning
+// around concurrent changes. Nothing reschedules a new snapshot's protection,
+// so leaving it to a later attempt would leave the snapshot unprotected.
+func protectSet(service *lifecycle.Service, dataset string, snapshots []string, target string) error {
+	_, err := replan(func() (lifecycle.Reference, error) {
+		return service.ProtectSet(context.Background(), dataset, snapshots, target)
+	})
 	return err
 }
 
