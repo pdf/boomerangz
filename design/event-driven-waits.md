@@ -30,8 +30,9 @@ This is the pattern for a condition this process owns.
 ([internal/daemon/status.go:52](../internal/daemon/status.go)), exposed as
 `Runtime.WaitStatus` ([internal/daemon/runtime.go:1245](../internal/daemon/runtime.go)).
 `WatchStatus` uses it in production: it sends a snapshot, then blocks on the
-revision, with the client's interval acting only as a heartbeat cap
-([internal/control/service.go:69](../internal/control/service.go)).
+revision, re-sending after a client-chosen interval if nothing moves
+([internal/control/service.go:69](../internal/control/service.go)). Section 3.6
+is about what that interval is still covering for.
 
 **Request channel plus ticker.** `discovery.Scanner.Run` waits on cancellation,
 the interval ticker, an explicit reconcile request, and an interval change
@@ -136,7 +137,7 @@ free simplification: a test must subscribe before the action it observes, where
 today its helpers look back at whatever `Status()` happens to hold. It is the
 better constraint, because "subscribe, act, wait" cannot silently observe the
 wrong occurrence of a repeated state the way a backward look can, but it does
-mean the helpers in chunk D are written around the subscription rather than
+mean the helpers in chunk E are written around the subscription rather than
 around the assertion.
 
 **3.3 Progress is a separate topic.** `recordProgress` writes an event per
@@ -159,8 +160,7 @@ the transitions observed since the previous message, and a flag marking a
 message as a resync after an overflow ended the server's subscription. The
 snapshot stays as it is, so existing clients are unaffected and a client joining
 mid-stream still gets a self-describing message. The handler subscribes, sends
-the snapshot, and then forwards from its channel, with the client's interval
-continuing to cap the heartbeat.
+the snapshot, and then forwards from its channel.
 
 `Runtime.WaitStatus` exists for exactly this handler
 ([internal/control/service.go:18](../internal/control/service.go),
@@ -182,6 +182,54 @@ untouched; the man page gains a sentence with the docs.
 This is the part I would have cut for being bigger than the tests needed. It is
 the half of the defect a user can hit.
 
+**3.6 The watch interval retires.** `--interval` was specified before the
+stream was: the plan has non-interactive watch "emit newline-delimited JSON at
+`--interval`" ([PLAN.md:1025](../PLAN.md)), which is `watch(1)` - sample every N
+seconds. The control plane landed with revision waiting in the same commit
+(`b007c3a`), so the flag never had that meaning in practice; it became "send on
+change, and at least every N", and the help text says so ("Maximum interval
+between watch updates", [internal/cli/commands.go:172](../internal/cli/commands.go)).
+Its original purpose is gone. What remains is a heartbeat, and the heartbeat is
+quietly covering for two real gaps rather than doing a job of its own.
+
+*State that changes without an event.* Of the non-job state a snapshot carries,
+only a config reload records a transition
+([internal/daemon/runtime.go:330](../internal/daemon/runtime.go)). A published
+discovery generation, the set of datasets and their activation, and the
+scheduler's next-snapshot deadlines all change silently. A watcher sees a newly
+enabled dataset when some unrelated job happens to transition, or when the
+interval expires - up to two seconds by default, indefinitely if the client
+asked for an hour. That is this document's defect in another place: a state
+change that is not an event. Publish them - a generation, an activation change,
+a deadline change - on the same stream, and the snapshot a watcher holds is
+never stale while connected. This also supplies the generation anchor 4.3 needs,
+so 4.3 stops being a test-only addition.
+
+*A peer that has gone away without saying so.* No gRPC keepalive is configured
+on either side. Over the local socket that does not matter - a dead peer closes
+it. Over a paired TCP listener, the periodic `Send` is incidentally the only
+thing that makes the server notice a vanished client, and nothing at all makes
+the client notice a vanished server: `Recv` has no deadline and the absence of a
+heartbeat is never checked ([internal/cli/control.go:73](../internal/cli/control.go)).
+Under publication, a silently dead client would hold its subscription until its
+queue overflowed. Liveness belongs to the transport: server and client
+keepalive parameters, with an enforcement policy, on the TCP listeners.
+
+With both addressed the interval has no remaining function, and it should go
+rather than linger as a knob whose effect nobody can describe. `--interval` is
+removed from the CLI, `interval_milliseconds` is reserved in the proto so an
+older client still sending it is not misread, and the flag leaves
+`docs/reference/cli.md`, the operations guide
+([docs/operations/index.md:30](../docs/operations/index.md)), the man page and
+all three completions in the same change. Whether removal passes through a
+release as a hidden, ignored flag first is a compatibility decision for whoever
+cuts that release, not a design question; the design's position is that the
+flag has no behaviour to preserve.
+
+If a client wants to redraw on a clock - an elapsed time, a countdown to the
+next snapshot - that is a client-side ticker over the snapshot it holds. It
+needs nothing from the server.
+
 ## 4. What the tests then stop doing
 
 **4.1 In-process waiter.** A helper in `internal/testutil` taking a runtime, a
@@ -199,8 +247,8 @@ missing file has no notifier short of inotify, and the bound is short.
 500ms and then asserts that no further snapshot appeared
 ([test/integration/control/guest_test.go:285](../test/integration/control/guest_test.go)).
 The sleep is a guess at how long "nothing else happened" has to be to mean
-something. Publishing a generation should move the status revision, so a waiter
-can block until the generation ID exceeds one it captured
+something. With generations published as events (3.6), a waiter can block
+until the generation ID exceeds one it captured
 ([internal/discovery/discovery.go:59](../internal/discovery/discovery.go)) and
 the assertion hangs off a positive event: two further scans have completed and
 the snapshot count is unchanged.
@@ -267,29 +315,40 @@ transition subscriber. Done when a subscriber receives every transition recorded
 after it subscribed, or is told its subscription ended.
 
 **Chunk B - the control plane carries transitions.** 3.4 and 3.5, retiring
-`WaitStatus` with them, and the docs in the same change. Done when `status --watch --json` emits every transition a
-job made while the client was connected, and a test asserts that a sequence
-which collapses in the snapshot survives in the stream.
+`WaitStatus` with them, and the docs in the same change. Done when
+`status --watch --json` emits every transition a job made while the client was
+connected, and a test asserts that a sequence which collapses in the snapshot
+survives in the stream.
 
-**Chunk C - the listener drain.** Section 5's last paragraph, independent of the
+**Chunk C - every state change is an event.** 3.6: publish generations,
+activation changes and next-snapshot deadlines; configure transport keepalive on
+the TCP listeners; remove `--interval` and reserve its proto field, with docs,
+man page and completions. Done when a watcher's snapshot reflects a newly
+enabled dataset without any job transitioning, a client over TCP detects a
+vanished daemon within the keepalive bound, and nothing in the tree describes a
+watch interval.
+
+**Chunk D - the listener drain.** Section 5's last paragraph, independent of the
 rest. Done when a call in flight across a reload completes, with a test.
 
-**Chunk D - the in-process waiter.** 4.1, converting the four helpers. Done when
+**Chunk E - the in-process waiter.** 4.1, converting the four helpers. Done when
 nothing in `test/integration/daemon/` sleeps while watching status, and a forced
 failure prints the transitions observed.
 
-**Chunk E - the out-of-process waiter.** 4.2, on chunk B's stream. Done when the
+**Chunk F - the out-of-process waiter.** 4.2, on chunk B's stream. Done when the
 control suite watches the daemon over the socket it is testing rather than by
 re-running the CLI.
 
-**Chunk F - the generation anchor.** 4.3. Done when no bare sleep remains in
-`test/integration/control/`.
+**Chunk G - the generation anchor.** 4.3, on chunk C's generation events. Done
+when no bare sleep remains in `test/integration/control/`.
 
-**Chunk G - ZFS waits behind transitions.** 4.4, last because it depends on D
+**Chunk H - ZFS waits behind transitions.** 4.4, last because it depends on E
 and changes what those tests assert rather than how they wait.
 
-A through C are the defect. D through G are the cleanup the fix makes possible,
-and each is independently droppable without leaving the contract half-changed.
+A through C are the defect: the contract, the stream that carries it, and the
+state changes it was missing. D is an unrelated sleep fixed while nearby. E
+through H are the cleanup the fix makes possible, and each is independently
+droppable without leaving the contract half-changed.
 
 ## 7. Risks
 
@@ -306,7 +365,7 @@ and each is independently droppable without leaving the contract half-changed.
 - **Subscribe-before-act is a requirement, not a convention.** A helper that
   subscribes after the action it observes waits for an event that has already
   been published, and the failure looks like the daemon never did the work.
-  Chunk D's waiter should take the subscription in its constructor so the
+  Chunk E's waiter should take the subscription in its constructor so the
   ordering is structural rather than remembered.
 - **Additive proto fields still change output.** `--json` consumers gain a
   field; that is compatible for anything selecting known keys and not for
@@ -317,4 +376,4 @@ and each is independently droppable without leaving the contract half-changed.
   sequence, or the suite gets brittle in a new way.
 - **More test code coupled to the status vocabulary.** Job IDs and state names
   become load-bearing in more places. They are already public - the CLI prints
-  them - but chunk G should not invent states to make a wait convenient.
+  them - but chunk H should not invent states to make a wait convenient.
