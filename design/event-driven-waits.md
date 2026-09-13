@@ -1,6 +1,6 @@
 # Design: event-driven waits
 
-Status: chunks A, B, C, D, E, and J have landed; F, G, H, and I have not.
+Status: chunks A, B, C, D, E, F, I, and J have landed; G and H have not.
 
 The daemon's status contract is a map of the latest event per job. Everything
 that wants to know what the daemon did - a test, an operator, a log pipeline -
@@ -1194,6 +1194,41 @@ from the subscription. `waitForSendIntervals` waits on a broadcast channel in
 `observedLocalStream`. Done when none of those five sleeps, and a forced failure
 prints the transitions observed.
 
+As built, the waiter subscribes in its constructor, `statuswait.New`, and a
+goroutine drains the subscription into a recorded sequence and wakes waiters by
+closing and replacing a channel, so a test busy between two waits never makes
+its subscription overflow. A wait takes a cursor into that sequence and returns
+the cursor past what it found, which is how a test names "the second
+`succeeded`".
+
+`Outcome` waits for a job to report a state and fails at once on any other
+outcome of that job, rather than waiting out its bound. Which outcomes are
+followed by another run is read from the code, not guessed per wait. The
+daemon runs a job again after `waiting-retry`, by the local transfer's `After`,
+the remote job's backoff timer, and retirement's backoff timer; and after a
+snapshot job's `scheduled`, by `Scheduler.Retry` at the deadline. It does not
+after `blocked`, `cancelled`, a retirement's `scheduled`, or a remote run that
+ends `probing` with the error that stopped it. A snapshot's `failed` is retried
+by the scheduler, but on the test's healthy pools it is a fault. So each wait
+names the retries its scenario allows, running and pending states are skipped,
+and every other outcome is a failure.
+
+A test cannot learn from delivery order which daemon work came before one of
+its own reads, since a transition recorded before the read can be delivered
+after it. `Settle` gives that order without a clock: after the read, it asks
+the owner for its revision, which is answered behind every transition sent
+before the request (3.1), and returns the cursor once a delivered state has
+reached it. Everything past that cursor was recorded after the read. The
+concurrency test settles before each trigger, so the snapshot job it waits for
+is the one the trigger ran. Settling is exact while the forwarder delivers
+every transition a state includes with that state, which fails only while it
+holds its full bound undelivered. `Changed` lets a wait also watch something
+outside the daemon, such as the concurrency test's recorded sends, without
+missing a delivery in between.
+
+The package's own tests force each failure, the outcome rules, and settling
+against a scripted subscription.
+
 **Chunk G - the out-of-process waiter.** 4.2, on chunk B's log subscriber and
 chunk D's "discovery complete" line. A log writer the tests attach to the daemon
 subprocess, with predicates over decoded lines, occurrence counting, failure on a
@@ -1227,6 +1262,66 @@ and J and changes what those tests assert rather than how they wait. It covers t
 scheduling test's `waitFor` and the outage test's hold loops (2.3); for the
 latter, which transition follows the hold being placed has not been traced, and
 that tracing comes first.
+
+As built, on identity rather than timing. A first cut anchored two
+assertions on how long the daemon takes: after the first snapshot it required
+exactly one held snapshot, which holds only while the read beats the next
+cadence - and `Scheduler.Retry`, a forced run, or a rescan can all bring the
+deadline forward - and it read the inactive marker once, which must land
+inside the two-second grace period before retirement clears it. Both are
+replaced.
+
+A pool read is interpreted against the runs recorded before it. The test
+reads, then settles (F), and classifies each relevant run by the cursor. A run
+that reported its outcome before the cursor has all its effects in the read.
+One that started without an outcome may or may not. One that had not started
+has none, because the pool records a run's start state before calling `Run`
+([internal/daemon/pool.go:325](../internal/daemon/pool.go)) and a job's effects
+happen only inside `Run`. `statuswait.Runs` groups transitions by run ID and
+`Run.Effects` returns that classification. The test asserts only what it
+implies. Sequence facts - which run did what, in what order, how it ended,
+and what it names - are asserted from events alone, with no read.
+
+The outage test:
+
+1. Its first `succeeded` names S1 and its second names S2, which must differ.
+2. After each, one read requires the named snapshot to hold a pending
+   reference for the target, unless a later snapshot run that could coalesce
+   it had started before the cursor. A run that ended `scheduled` touched no
+   holds. No transfer succeeds during the outage, which the events confirm.
+3. The failed attempt and the reconnected transfer each name a snapshot a
+   snapshot job reported creating, the latter S2 or newer.
+
+The scheduling test:
+
+1. Each dataset's snapshot must be present in one read unless a prune or
+   retirement run may have destroyed it.
+2. `inactive:<dataset>:false` must report the marker action `set`.
+3. The marker is read once. If it is absent, retirement must have started
+   before the cursor and must then succeed; it is eligible only while the
+   marker is present (`lifecycle.Retire`).
+4. The source's retirement names what it destroyed. That list must include
+   every snapshot its snapshot jobs created and its prunes did not destroy,
+   and a read must not find any of them.
+
+Waiting on snapshot jobs' outcomes exposed a daemon race that sampling had
+hidden. When a snapshot appears, discovery can queue a transfer for the same
+dataset while the snapshot job is still protecting it. A first transfer writes
+its target binding to the source outside the lifecycle lock, `ProtectSet` then
+finds the source changed and refuses, and the snapshot job ended `failed` with
+its snapshot never held for the target. A run that passed had logged it once.
+The refusal is now a typed temporary `StateChangedError`: the snapshot job
+re-plans its protection a bounded number of times, and transfers retry the
+refusal as `waiting-retry`. The inactive job had the same exposure and no
+retry. It re-plans the same way, and one whose source keeps changing reports
+`waiting-retry` and runs again, unless the dataset's activation has changed in
+the meantime.
+
+The prune test checks the names its prune reports against the expired
+snapshots and one read. The concurrency test ties each send and each transfer
+outcome to the snapshot its phase's snapshot job created, or a newer one. The
+native and backoff tests require each attempt and outcome to name a snapshot a
+snapshot job reported creating.
 
 A through D are the defect: the transitions the daemon was not recording, the
 contract, the stream that carries it, and the state changes it was missing. E is

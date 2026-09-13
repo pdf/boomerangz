@@ -95,7 +95,7 @@ failure attributable to the transport instead of to the test.
 
 | Behaviour | Owned by |
 | --- | --- |
-| Scheduling and retirement | `TestGuestDaemonSchedulingAndRetirement` |
+| Scheduling and retirement, checked against the snapshots, marker action, and destroyed snapshots the jobs name | `TestGuestDaemonSchedulingAndRetirement` |
 | Concurrent siblings, ancestor exclusion, conservative destination setup | `TestGuestLocalTransferConcurrency` |
 | Remote outage: `waiting-retry` with reason retained, pending-snapshot coalescing, reconnection, canonical target identity | `TestGuestRemoteOutageReconnection` |
 | Daemon-driven native replication through an imported pairing credential | `TestGuestDaemonNativeReplication` |
@@ -180,25 +180,22 @@ result no longer says which, so a narrowed run says
 `PARTIAL RUN - NOT VERIFICATION` at both ends and in each stage summary. See
 [AGENTS.md](../../AGENTS.md); an unfiltered run is what "verified" means.
 
-Tests that split into phases pass the running `*testing.T` to every helper
-rather than capturing one. A closure that closes over an outer `t` reports a
-phase's failure against the whole test, and a `t.Cleanup` registered inside a
-phase destroys its fixture when that phase ends rather than when the test
-does - both silent, and both invisible in a diff, because moving a line into a
-`t.Run` rebinds `t` without changing the token. Register cleanup at the scope
-that declares the state. The `chain` helpers are the deliberate exception:
-they call `t.Run` and so must use the parent's `t`.
+A test that waits for an in-process daemon waits on its status subscription,
+through `internal/statuswait`, never by sleeping and re-reading `Status()` or
+the pool. The subscription is lossless from the moment it is taken and has
+nothing before it, so create the waiter before `Runtime.Run` starts or before
+the action it observes, and name repeated occurrences with the cursor a wait
+returns rather than by looking back. Wait for the outcome the behaviour is
+about with `Outcome`, naming the retries the daemon makes in that scenario, so
+any other outcome fails at once.
 
-Tests own their fixtures. `zfstest.FixtureName` names a dataset for one test,
-`zfstest.PayloadVolume` creates and seeds a zvol on demand, and
-`zfstest.RegisterCleanup` destroys the tree afterwards, releasing holds first.
-`bootstrap.sh` creates pools and delegates permissions; it builds no fixtures,
-so stage order carries no meaning and can be shuffled.
-
-A fixture left behind is not just untidy. The pools live for the whole run, so
-an abandoned source root that still carries `enabled=on` and a cadence is work
-the next stage's daemon adopts as its own: it discovers every dataset on the
-host, and with bounded management workers, one stale root whose transfer is
-still running holds a worker for the length of that send. That is how the
-transfer stage once starved the first daemon test of a worker for 30 seconds.
-Register cleanup for every dataset a test creates, on both pools.
+Assert on what events name, not on moments. A transition carries the identity
+it acted on - the snapshot a job created or sent, what a prune destroyed, the
+marker action - so sequence facts come from the events alone. When a test does
+read the pool, it reads once, then `Settle`s, and classifies each relevant run
+by that cursor with `Run.Effects`: a run that reported its outcome has all its
+effects in the read, one that started without an outcome may or may not, and
+one that had not started has none. Assert only what that implies. Never rely on
+a cadence, a grace period, or elapsed time to keep a read ahead of the daemon's
+next action. A failed wait lists every transition it received, which is the
+first thing to read when one times out.
