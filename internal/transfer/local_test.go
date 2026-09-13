@@ -192,8 +192,11 @@ func (s remoteTestStream) Run(_ context.Context, send zfs.SendOptions, receive z
 	return zfs.Progress{Bytes: estimate.Bytes}, nil
 }
 
-func (s localTestStream) Run(_ context.Context, send zfs.SendOptions, receive zfs.ReceiveOptions, estimate zfs.Estimate, _ func(zfs.Progress)) (zfs.Progress, error) {
+func (s localTestStream) Run(_ context.Context, send zfs.SendOptions, receive zfs.ReceiveOptions, estimate zfs.Estimate, report func(zfs.Progress)) (zfs.Progress, error) {
 	s.backend.writes = append(s.backend.writes, "stream")
+	if report != nil {
+		report(zfs.Progress{Estimate: estimate})
+	}
 	if s.fail {
 		return zfs.Progress{}, errors.New("injected receiver failure")
 	}
@@ -575,5 +578,65 @@ func TestApplyRetainsNewerPendingRecoveryReference(t *testing.T) {
 		return reference.Target == newer.Target && reference.SnapshotName(request.Source) == newer.SnapshotName(request.Source)
 	}) {
 		t.Fatalf("newer pending reference was released: refs=%+v err=%v", references, err)
+	}
+}
+
+// recordReports returns a reporter that describes each report as a phase name
+// or "progress", in the order the engine reported them.
+func recordReports(reports *[]string) Reporter {
+	return func(report Report) {
+		switch {
+		case report.Phase != "" && report.Progress == nil:
+			*reports = append(*reports, string(report.Phase))
+		case report.Phase == "" && report.Progress != nil:
+			*reports = append(*reports, "progress")
+		default:
+			*reports = append(*reports, fmt.Sprintf("malformed %+v", report))
+		}
+	}
+}
+
+func TestApplyReportsPhasesAroundStream(t *testing.T) {
+	t.Parallel()
+	backend, request := newLocalBackend(t)
+	request.Policy.Incremental = "latest"
+	engine, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reports []string
+	result, err := engine.Apply(t.Context(), request, recordReports(&reports))
+	if err != nil || !result.Verified {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if want := []string{"sending", "progress", "verifying"}; !slices.Equal(reports, want) {
+		t.Fatalf("reports = %v, want %v", reports, want)
+	}
+
+	// The target now holds the newest snapshot. Nothing is sent, so neither
+	// phase is reported: a job that sends nothing never shows sending.
+	reports = nil
+	result, err = engine.Apply(t.Context(), request, recordReports(&reports))
+	if err != nil || !result.Verified || result.Plan.Mode != "up-to-date" {
+		t.Fatalf("up-to-date result=%+v err=%v", result, err)
+	}
+	if len(reports) != 0 {
+		t.Fatalf("up-to-date target reported %v", reports)
+	}
+}
+
+func TestApplyReportsNoVerifyingAfterFailedStream(t *testing.T) {
+	t.Parallel()
+	backend, request := newLocalBackend(t)
+	engine, err := NewLocal(backend, localTestStream{backend: backend, fail: true}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reports []string
+	if _, err := engine.Apply(t.Context(), request, recordReports(&reports)); err == nil {
+		t.Fatal("injected stream failure succeeded")
+	}
+	if want := []string{"sending", "progress"}; !slices.Equal(reports, want) {
+		t.Fatalf("reports = %v, want %v", reports, want)
 	}
 }

@@ -896,7 +896,12 @@ the forwarder high-water mark here, record its peak across an unfiltered
 `make integration-test`, and set the transition bound from it (7) - one bound,
 shared by the log subscriber (3.9). `Offer` sends
 `pending-<pool>` with its queue view (3.1), with a unit test that a job popped
-immediately never records `pending` after its start state.
+immediately never records `pending` after its start state. The race is already
+observable: `TestPoolSilentOutcomeLeavesTheReportedStateStanding`
+([internal/daemon/pool_test.go:252](../internal/daemon/pool_test.go)) records
+`probing` before `pending-transfer` within a few hundred runs of
+`go test -race -count=300`, and chunk A's job-state tests ignore `pending-*` for
+the same reason; both stop needing to once `Offer` sends it.
 
 Chunk B also moves transition logging to the log subscriber (3.9):
 `reportWorkerState`'s logging goes, the configuration reload record gains its

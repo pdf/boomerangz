@@ -110,8 +110,10 @@ func TestGuestDestinationExhaustion(t *testing.T) {
 
 	chain("receive-exhausts-destination", func(t *testing.T) {
 		var observed atomic.Uint64
-		result, applyErr := engine.Apply(t.Context(), request(t), func(progress zfs.Progress) {
-			observed.Store(progress.Bytes)
+		result, applyErr := engine.Apply(t.Context(), request(t), func(report transfer.Report) {
+			if report.Progress != nil {
+				observed.Store(report.Progress.Bytes)
+			}
 		})
 		if applyErr == nil || result.Verified {
 			t.Fatalf("a %dMiB quota accepted the whole stream: result=%+v", quotaMiB, result)

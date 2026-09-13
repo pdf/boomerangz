@@ -3,6 +3,7 @@ package transfer
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -81,9 +82,18 @@ type scriptedApply struct {
 	calls   []Request
 }
 
-func (s *scriptedApply) Apply(_ context.Context, request Request, _ func(zfs.Progress)) (Result, error) {
+// Apply reports the phases a real engine would for the scripted result: a
+// plan with something to send reports sending, one sample, and verifying.
+func (s *scriptedApply) Apply(_ context.Context, request Request, report Reporter) (Result, error) {
 	s.calls = append(s.calls, request)
 	index := len(s.calls) - 1
+	if s.results[index].Plan.Mode != "" && s.results[index].Plan.Mode != "up-to-date" {
+		report.phase(PhaseSending)
+		report.progress()(zfs.Progress{Bytes: uint64(index)})
+		if s.errors[index] == nil {
+			report.phase(PhaseVerifying)
+		}
+	}
 	return s.results[index], s.errors[index]
 }
 
@@ -111,9 +121,15 @@ func TestRoadwarriorResumesBeforeCoalescedSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	outcome, err := recovery.Reconcile(t.Context(), nil)
+	var reports []string
+	outcome, err := recovery.Reconcile(t.Context(), recordReports(&reports))
 	if err != nil || outcome.Status != "succeeded" || len(outcome.Results) != 2 || len(engine.calls) != 2 {
 		t.Fatalf("outcome=%+v err=%v calls=%v", outcome, err, engine.calls)
+	}
+	// Both passes report through the one reporter, in order, so the second
+	// send is visible as its own phase rather than as a counter going back.
+	if want := []string{"sending", "progress", "verifying", "sending", "progress", "verifying"}; !slices.Equal(reports, want) {
+		t.Fatalf("reports = %v, want %v", reports, want)
 	}
 	if engine.calls[0].Snapshot != newest.Name || engine.calls[1].Snapshot != newest.Name {
 		t.Fatalf("coalesced selection was not retained across resume: %v", engine.calls)

@@ -38,7 +38,7 @@ type remoteApplier struct {
 	lifecycle    *lifecycle.Service
 }
 
-func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, report func(zfs.Progress)) (transfer.Result, error) {
+func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, report transfer.Reporter) (transfer.Result, error) {
 	endpoint, err := a.client.Open(ctx)
 	if err != nil {
 		return transfer.Result{}, err
@@ -886,7 +886,7 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 	if err != nil {
 		return snapshot == ""
 	}
-	job := Job{ID: jobID, Group: dataset, Scope: dataset, LockKey: canonical, LockScope: lockScope, StartState: "sending", Drop: ticket.Finish}
+	job := Job{ID: jobID, Group: dataset, Scope: dataset, LockKey: canonical, LockScope: lockScope, StartState: "planning", Drop: ticket.Finish}
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		r.clearDirty(jobID)
@@ -913,9 +913,7 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 		if hasPending {
 			requestSnapshot = pending.Name
 		}
-		result, applyErr := engine.Apply(ticket.Context(), transfer.Request{Source: dataset, DestinationRoot: target, Snapshot: requestSnapshot, Policy: effective}, func(progress zfs.Progress) {
-			r.recordProgress("transfer", jobID, dataset, canonical, progress)
-		})
+		result, applyErr := engine.Apply(ticket.Context(), transfer.Request{Source: dataset, DestinationRoot: target, Snapshot: requestSnapshot, Policy: effective}, r.transferReporter(r.local, job))
 		if applyErr != nil {
 			if errors.Is(applyErr, context.Canceled) {
 				return blockedOrCancelled(applyErr)
@@ -1010,9 +1008,7 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 		if startErr := ticket.Start(); startErr != nil {
 			return blockedOrCancelled(startErr)
 		}
-		outcome, reconcileErr := road.coordinator.Reconcile(ticket.Context(), func(progress zfs.Progress) {
-			r.recordProgress("transfer", jobID, dataset, road.request.CanonicalTarget, progress)
-		})
+		outcome, reconcileErr := road.coordinator.Reconcile(ticket.Context(), r.transferReporter(r.remote, job))
 		if outcome.Status == "waiting-retry" && !outcome.NotBefore.IsZero() {
 			r.schedule(jobID, outcome.NotBefore, func() { r.enqueueRemote(dataset, remote, effective, "") })
 		}
@@ -1061,8 +1057,24 @@ func (r *Runtime) isDirty(key string) bool {
 	return r.dirty[key]
 }
 
-func (r *Runtime) recordProgress(pool, job, dataset, target string, progress zfs.Progress) {
-	event := Event{Pool: pool, Job: job, Scope: dataset, Target: target, State: "sending", At: r.now().UTC(), Bytes: progress.Bytes, TotalBytes: progress.Estimate.Bytes, BytesPerSecond: progress.BytesPerSecond, TotalKnown: progress.Estimate.Known}
+// transferReporter turns one running job's transfer reports into status. A
+// phase change is a transition the pool emits for the job, as it emits the
+// job's start state and outcome; a progress sample updates the job's progress.
+func (r *Runtime) transferReporter(pool *Pool, job Job) transfer.Reporter {
+	return func(report transfer.Report) {
+		switch {
+		case report.Phase != "":
+			pool.emit(job, string(report.Phase), "")
+		case report.Progress != nil:
+			r.recordProgress(pool.name, job, *report.Progress)
+		}
+	}
+}
+
+// recordProgress records a sample under the sending state, which is the only
+// phase in which a stream runs and so the state the preceding transition set.
+func (r *Runtime) recordProgress(pool string, job Job, progress zfs.Progress) {
+	event := Event{Pool: pool, Job: job.ID, Scope: job.Scope, Target: job.LockKey, State: string(transfer.PhaseSending), At: r.now().UTC(), Bytes: progress.Bytes, TotalBytes: progress.Estimate.Bytes, BytesPerSecond: progress.BytesPerSecond, TotalKnown: progress.Estimate.Known}
 	if progress.ETA != nil {
 		event.ETA = *progress.ETA
 	}

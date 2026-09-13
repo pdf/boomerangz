@@ -183,7 +183,7 @@ func (p RetryPolicy) Delay(failures int, random float64) (time.Duration, error) 
 }
 
 type transferApplier interface {
-	Apply(context.Context, Request, func(zfs.Progress)) (Result, error)
+	Apply(context.Context, Request, Reporter) (Result, error)
 }
 
 // RecoveryOutcome describes one explicit or due remote reconciliation attempt.
@@ -246,7 +246,7 @@ func (r *Roadwarrior) Offer(snapshot PendingSnapshot) (bool, error) {
 
 // Reconcile resumes durable state first, then sends the newest coalesced or
 // currently eligible snapshot. Only temporary transport failures enter retry.
-func (r *Roadwarrior) Reconcile(ctx context.Context, report func(zfs.Progress)) (RecoveryOutcome, error) {
+func (r *Roadwarrior) Reconcile(ctx context.Context, report Reporter) (RecoveryOutcome, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
