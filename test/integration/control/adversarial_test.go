@@ -105,7 +105,7 @@ func waitForCondition(t *testing.T, description string, log *lockedBuffer, timeo
 // the restarted daemon runs unimpeded.
 func killingZFS(t *testing.T, subcommand, match, armPath string) string {
 	t.Helper()
-	real, err := exec.LookPath("zfs")
+	zfsPath, err := exec.LookPath("zfs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ if [ -f %[3]q ] && [ "$1" = %[2]q ]; then
 	done
 fi
 exec %[1]q "$@"
-`, real, subcommand, armPath, match)
+`, zfsPath, subcommand, armPath, match)
 	path := filepath.Join(directory, "zfs")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -378,7 +378,7 @@ func TestGuestDaemonSocketContention(t *testing.T) {
 		// Anything already bound to the control path - a daemon under another
 		// configuration, or an unrelated process - must stop a daemon taking
 		// it over, because taking it over would silently orphan the owner.
-		listener, err := net.Listen("unix", socket)
+		listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", socket)
 		if err != nil {
 			t.Fatal(err)
 		}
