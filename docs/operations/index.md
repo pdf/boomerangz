@@ -20,6 +20,7 @@ the daemon recorded it. The line carries these keys:
 
 | Key | Meaning |
 |---|---|
+| `run_id` | The run the change belongs to; see [job identity](#job-identity) |
 | `pool` | The worker pool: `management`, `transfer`, or `configuration` for a configuration reload |
 | `job` | The job, for example `snapshot:tank/data` or `remote:tank/data:offsite` |
 | `scope` | The dataset the job belongs to |
@@ -27,6 +28,11 @@ the daemon recorded it. The line carries these keys:
 | `state` | The state the job moved to; see [job states](#job-states) |
 | `reason` | Why, when the state carries one |
 | `pending` | Jobs waiting in the job's queue when the change was recorded |
+
+A line also carries the [identity](#job-identity) keys its change sets:
+`snapshot`, `base`, `mode`, `destination`, `marker`, `destroyed` with
+`destroyed_count`, and `config_generation`. A key the change does not set is
+left out of the line.
 
 A `failed` state is logged at error level, `blocked` and `waiting-retry` at
 warning level, and every other state at info level. A successful
@@ -97,7 +103,7 @@ When watch output is redirected, or when `--json` is supplied, it becomes
 newline-delimited JSON. Each object carries the snapshot fields and
 `transitions`: every job state change since the previous object, in the order
 the daemon recorded it, with the same fields as an entry in `jobs` apart from
-transfer progress. A job that changed state several times between two objects
+transfer progress, including the [identity](#job-identity) fields it sets. A job that changed state several times between two objects
 has one entry in `jobs` and one entry in `transitions` for each change. The
 first object, and an object sent for a change that was not a job state change,
 carry an empty `transitions` array.
@@ -136,6 +142,33 @@ A transfer that resumes an interrupted stream and then has newer state to send
 reports `sending` twice, once for each stream, so its byte count starting again
 from zero has a visible cause. A remote transfer whose destination is already
 up to date goes from `probing` to `succeeded` without `sending`.
+
+### Job identity
+
+A job name such as `snapshot:tank/data` names work that recurs. Each state
+change also says which run of that work it belongs to and what that run acted
+on, so a change can be tied to the snapshot or dataset it concerns. In JSON
+output an unset field is omitted; in the job state lines an unset key is left
+out.
+
+| Field | Set on | Meaning |
+|---|---|---|
+| `run_id` | Every state change of a job | The run: its pending state, start state, transfer phases, and outcome share one number. A configuration reload is a run of its own. Numbers are unique while the daemon runs and start again when it restarts. |
+| `snapshot` | `snapshot:` `succeeded` | The snapshot the job created |
+| | `snapshot:` `scheduled` | The owned snapshot whose age set the next deadline |
+| | Transfer `sending` | The source snapshot the stream sends |
+| | Transfer `succeeded` | The snapshot now on the destination |
+| | Transfer `waiting-retry`, `blocked`, `cancelled` | The pending snapshot the run was carrying, or, for a run that stopped before taking one, the snapshot pending when it stopped. A transfer cancelled while still queued, before it started, names none. |
+| `base` | Transfer `sending` | The snapshot or bookmark an incremental stream is based on |
+| `mode` | Transfer `sending` | `full`, `incremental-latest`, `incremental-all`, or `resume` |
+| `destination` | Transfer `succeeded` | The destination dataset |
+| `marker` | `inactive:` `succeeded` | What reconciliation did to the inactive marker: `set`, `cleared`, or `none` |
+| `destroyed` | `prune:`, `retire:` `succeeded` | The snapshots destroyed, at most 64 of them |
+| `destroyed_count` | `prune:`, `retire:` `succeeded` | How many snapshots were destroyed; larger than the length of `destroyed` when that list was cut |
+| `config_generation` | `config:reload` `succeeded` | The configuration generation the reload published |
+
+In a terminal, the recent transitions beneath a watch show these fields as
+`key=value` pairs before the reason, with `destroyed` shown as its count.
 
 ## Request a snapshot
 

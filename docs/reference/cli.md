@@ -35,10 +35,13 @@ object; redirected watch output is newline-delimited JSON. Add `--json` to emit
 that structured output even when standard output is a terminal. A watch
 sends an update whenever the daemon's status changes, and only then. Each watch
 object also carries `transitions`, every job state change since the previous
-object in the order the daemon recorded it. A watch that falls too far behind
+object in the order the daemon recorded it. Each job entry names its run and
+what that run acted on, such as the snapshot a transfer sent, in the job
+identity fields. A watch that falls too far behind
 the daemon ends with an `Aborted` error and exits with status one rather than
 continuing with changes missing. See
-[View status](/operations/#view-status) for the fields and the job states.
+[View status](/operations/#view-status) for the fields and the job states, and
+[Job identity](/operations/#job-identity) for the identity fields.
 
 ## Dataset lifecycle
 

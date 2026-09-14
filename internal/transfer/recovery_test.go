@@ -88,10 +88,11 @@ func (s *scriptedApply) Apply(_ context.Context, request Request, report Reporte
 	s.calls = append(s.calls, request)
 	index := len(s.calls) - 1
 	if s.results[index].Plan.Mode != "" && s.results[index].Plan.Mode != "up-to-date" {
-		report.phase(PhaseSending)
+		plan := s.results[index].Plan
+		report.phase(PhaseSending, &plan)
 		report.progress()(zfs.Progress{Bytes: uint64(index)})
 		if s.errors[index] == nil {
-			report.phase(PhaseVerifying)
+			report.phase(PhaseVerifying, nil)
 		}
 	}
 	return s.results[index], s.errors[index]

@@ -257,7 +257,8 @@ func (s *Status) register(log bool) *forwarder {
 }
 
 func logTransition(logger *slog.Logger, event Event) {
-	args := []any{"pool", event.Pool, "job", event.Job, "scope", event.Scope, "target", event.Target, "state", event.State, "reason", event.Reason, "pending", event.Pending}
+	args := []any{"run_id", event.RunID, "pool", event.Pool, "job", event.Job, "scope", event.Scope, "target", event.Target, "state", event.State, "reason", event.Reason, "pending", event.Pending}
+	args = append(args, identityAttrs(event.Identity)...)
 	switch event.State {
 	case "failed":
 		logger.Error("worker state", args...)
@@ -266,6 +267,30 @@ func logTransition(logger *slog.Logger, event Event) {
 	default:
 		logger.Info("worker state", args...)
 	}
+}
+
+// identityAttrs logs the identity fields a transition sets. An unset field
+// is omitted: it does not apply to that transition.
+func identityAttrs(identity daemonstate.Identity) []any {
+	var args []any
+	for _, field := range []struct{ key, value string }{
+		{"snapshot", identity.Snapshot},
+		{"base", identity.Base},
+		{"mode", identity.Mode},
+		{"destination", identity.Destination},
+		{"marker", identity.Marker},
+	} {
+		if field.value != "" {
+			args = append(args, field.key, field.value)
+		}
+	}
+	if identity.DestroyedCount > 0 {
+		args = append(args, "destroyed", identity.Destroyed, "destroyed_count", identity.DestroyedCount)
+	}
+	if identity.ConfigGeneration > 0 {
+		args = append(args, "config_generation", identity.ConfigGeneration)
+	}
+	return args
 }
 
 // Subscription is one live status subscription.

@@ -19,6 +19,9 @@ type Outcome struct {
 	State  string
 	Reason string
 	Silent bool
+	// Identity names what the run acted on, and reaches the outcome's
+	// transition.
+	Identity daemonstate.Identity
 }
 
 // Job is typed daemon work. ID deduplicates equivalent queued work, Group is
@@ -26,7 +29,11 @@ type Outcome struct {
 // shared resource, and an optional LockScope permits non-overlapping hierarchy
 // members to run concurrently.
 type Job struct {
-	ID         string
+	ID string
+	// RunID names this run of the job and is stamped on every transition of
+	// it. It is taken from nextRunID when the job is built, so each Job value
+	// is one run; a job without one is refused.
+	RunID      uint64
 	Group      string
 	Scope      string
 	LockKey    string
@@ -81,7 +88,7 @@ func (q *FairQueue) signal() {
 
 // Offer adds a job, returning false when its ID is already pending.
 func (q *FairQueue) Offer(job Job) (bool, error) {
-	if job.ID == "" || job.Group == "" || job.Scope == "" || job.Run == nil {
+	if job.ID == "" || job.RunID == 0 || job.Group == "" || job.Scope == "" || job.Run == nil {
 		return false, fmt.Errorf("complete queue job metadata is required")
 	}
 	q.mu.Lock()

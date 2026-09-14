@@ -1,6 +1,6 @@
 # Design: event-driven waits
 
-Status: proposed. Nothing here has landed.
+Status: chunks A, B, C, D, E, and J have landed; F, G, H, and I have not.
 
 The daemon's status contract is a map of the latest event per job. Everything
 that wants to know what the daemon did - a test, an operator, a log pipeline -
@@ -497,6 +497,76 @@ start marker relies on both stream implementations happening to emit before
 copying, which is the same unstated coupling as `recordProgress` hard-coding
 `sending`. And `Roadwarrior` cannot decide, because it knows whether a stream ran
 only after `Apply` returns.
+
+*Identity.* A phase says what a transfer is doing, not what it is doing it to,
+and neither does any other transition. An event names its job, and a job ID
+names work that recurs: `snapshot:tank/data` is every snapshot of that dataset,
+and `remote:tank/data:offsite` every transfer to that remote. So neither an
+operator nor a test can tie a transition to an object. Which snapshot did that
+`succeeded` create? Which one did this `waiting-retry` fail to send? And which
+of two runs' transitions belong together, other than by order? A test that
+needs those answers falls back on reading the pool at a moment it chooses, and
+then on how long the daemon takes to do the next thing, and so on a cadence
+or a grace period holding off the daemon's next action.
+
+Any event tied to an identity carries that identity, as typed fields rather
+than text in `Reason`, since a consumer that matches on text breaks when the
+wording changes. `Event` gains a run ID and an `Identity`:
+
+| Field | Set on | Meaning |
+|---|---|---|
+| `RunID` | every transition of a job | one run: its `pending-<pool>`, start state, phases, and outcome; a configuration reload is a run of its own |
+| `Snapshot` | `snapshot:` `succeeded` / `scheduled` | the snapshot created / the owned snapshot that set the deadline |
+| | transfer `sending` / `succeeded` | the source snapshot sent / the snapshot now on the destination |
+| | transfer `waiting-retry`, `blocked`, `cancelled` | the pending snapshot a run carried, or, if it ended before taking one, the one pending then; none when cancelled still queued |
+| `Base`, `Mode` | transfer `sending` | the incremental base, and the plan's mode |
+| `Destination` | transfer `succeeded` | the destination dataset |
+| `Marker` | `inactive:` `succeeded` | `set`, `cleared`, or `none` |
+| `Destroyed`, `DestroyedCount` | `prune:`, `retire:` `succeeded` | the snapshots destroyed, and how many |
+| `ConfigGeneration` | `config:reload` `succeeded` | the generation published |
+
+The run ID comes from one process-wide counter, so it is unique across pools
+and restarts with the daemon. A job takes its ID when it is built, as ordinary
+data on the `Job`, so every copy carries it, including the one its own `Run`
+closure holds; the queue refuses a job without one. The first cut assigned the
+ID in `Submit`, and the phase transitions a transfer reports from inside `Run`
+came out without it, because the closure had captured the job before `Submit`
+gave the queue's copy an ID. `Send` (3.3) stays internal: it numbers streams
+within a run and exists for the owner's discard rule. A transfer that leaves its pool without running -
+removed on deactivation, discarded by a reload or shutdown, or popped by a
+stopped pool - records `cancelled` with its run ID but names no snapshot.
+The pool records that transition under the queue lock, in the message whose
+queue view removes the job, and knows nothing of pending snapshots. A first cut
+had a transfer job carry a function naming its pending snapshot for the pool
+to call. That read the pending set's lock inside the queue lock, which is safe
+only while `PendingSet` never calls out - an ordering rule nothing would
+enforce, against a lock that orders `pending-<pool>` and `cancelled` against a
+worker's start. Recording the snapshot on the job when it is queued would go
+stale, since a newer coalesced snapshot does not replace a queued job, and
+building the transition after the lock is released would give up the
+same-message guarantee. The run never took a snapshot, and one pending stays
+pending and is named by the next run that ends with it, so the name is left
+out rather than any of those paid for it.
+
+`Mode` is the plan's own mode - `full`, `incremental-latest`,
+`incremental-all`, `resume` - rather than a coarser `incremental`, since the
+planner already distinguishes them and a consumer asking which base an
+incremental used wants to know which kind it was. A transfer reports it with
+`PhaseSending`: `Report` carries the plan beside the phase, which is where the
+decision to send is made (above).
+
+`Destroyed` is a list cut at 64 names, with `DestroyedCount` always the total,
+rather than a count alone or an unbounded list. A count cannot be checked
+against a pool, which is the point of carrying identity. An unbounded list
+makes one transition as large as a prune of years of snapshots, and that
+transition sits in every slow subscriber's channel (3.2) and on one log line
+(3.9). 64 is more than a policy's grid destroys in one pass in practice, and
+a reader knows when the list was cut because the count exceeds it.
+
+The fields reach the wire as additive `JobStatus` fields, the "worker state"
+line as keys present only when set, and the interactive tail as `key=value`
+pairs. The operations guide documents them. Since 3.9 makes that line a
+contract, the keys are part of it.
 
 **3.5 A stalled transfer currently reports nothing.** A sample is emitted only
 when bytes are written, and the rate is the cumulative average since the
@@ -1145,8 +1215,15 @@ sleep remains in `test/integration/control/`, and a restart that created a
 duplicate snapshot fails on the job ending `succeeded` rather than on a count
 taken after a guessed delay.
 
+**Chunk J - events carry identity.** 3.4's identity: the run ID and `Identity`
+on `Event`, additive `JobStatus` fields, the log keys, the interactive tail, and
+the docs and man page. It lands before I, which asserts on it. Done when each
+field in the table is set on the transitions it names and on no other, a run's
+transitions share one run ID including the phases reported from inside `Run`,
+and a job built without a run ID is refused, each with a unit test.
+
 **Chunk I - ZFS waits behind transitions.** 4.4, last because it depends on F
-and changes what those tests assert rather than how they wait. It covers the
+and J and changes what those tests assert rather than how they wait. It covers the
 scheduling test's `waitFor` and the outage test's hold loops (2.3); for the
 latter, which transition follows the hold being placed has not been traced, and
 that tracing comes first.
@@ -1155,7 +1232,8 @@ A through D are the defect: the transitions the daemon was not recording, the
 contract, the stream that carries it, and the state changes it was missing. E is
 an unrelated sleep fixed while nearby. F through I are the cleanup the fix makes
 possible, and each is independently droppable without leaving the contract
-half-changed.
+half-changed. J extends the contract so that what I asserts can be tied to
+objects rather than to moments.
 
 ## 7. Risks
 

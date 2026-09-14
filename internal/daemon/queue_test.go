@@ -7,7 +7,7 @@ import (
 )
 
 func queueJob(id, group, scope string) Job {
-	return Job{ID: id, Group: group, Scope: scope, Run: func(context.Context) Outcome { return Outcome{} }}
+	return Job{RunID: nextRunID(), ID: id, Group: group, Scope: scope, Run: func(context.Context) Outcome { return Outcome{} }}
 }
 
 func TestFairQueueDeduplicatesBoundsAndRotatesGroups(t *testing.T) {

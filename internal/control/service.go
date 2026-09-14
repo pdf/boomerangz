@@ -65,7 +65,9 @@ func toSnapshot(snapshot daemonstate.ControlSnapshot) *controlrpc.StatusSnapshot
 }
 
 func toJobStatus(event daemonstate.Event) *controlrpc.JobStatus {
-	return &controlrpc.JobStatus{Pool: event.Pool, Job: event.Job, Dataset: event.Scope, Target: event.Target, State: event.State, Reason: event.Reason, ChangedUnixNano: event.At.UnixNano(), Pending: uint32(event.Pending), QueuePosition: uint32(event.Position), Bytes: event.Bytes, TotalBytes: event.TotalBytes, BytesPerSecond: event.BytesPerSecond, EtaNanoseconds: int64(event.ETA), TotalKnown: event.TotalKnown}
+	return &controlrpc.JobStatus{Pool: event.Pool, Job: event.Job, Dataset: event.Scope, Target: event.Target, State: event.State, Reason: event.Reason, ChangedUnixNano: event.At.UnixNano(), Pending: uint32(event.Pending), QueuePosition: uint32(event.Position), Bytes: event.Bytes, TotalBytes: event.TotalBytes, BytesPerSecond: event.BytesPerSecond, EtaNanoseconds: int64(event.ETA), TotalKnown: event.TotalKnown,
+		RunId: event.RunID, Snapshot: event.Snapshot, Base: event.Base, Mode: event.Mode, Destination: event.Destination, Marker: event.Marker,
+		Destroyed: event.Destroyed, DestroyedCount: uint32(event.DestroyedCount), ConfigGeneration: event.ConfigGeneration}
 }
 
 // toWatchResponse pairs an update's state with the transitions that produced

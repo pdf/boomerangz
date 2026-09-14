@@ -123,3 +123,29 @@ func TestTailKeepsTheNewestTransitionsOldestFirst(t *testing.T) {
 		}
 	}
 }
+
+func TestTailNamesWhatEachTransitionActedOn(t *testing.T) {
+	t.Parallel()
+	tail := NewTail(4)
+	tail.Add([]*controlrpc.JobStatus{
+		{Job: "local:tank/a:backup/a", State: "sending", Snapshot: "tank/a@two", Base: "tank/a@one", Mode: "incremental-latest"},
+		{Job: "prune:tank/a", State: "succeeded", Destroyed: []string{"tank/a@old"}, DestroyedCount: 1},
+		{Job: "remote:tank/a:offsite", State: "waiting-retry", Snapshot: "tank/a@two", Reason: "connection refused"},
+		{Job: "config:reload", State: "succeeded", ConfigGeneration: 3},
+	})
+	var output bytes.Buffer
+	if err := tail.Terminal(&output, 200); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	for index, want := range []string{
+		"snapshot=tank/a@two base=tank/a@one mode=incremental-latest",
+		"destroyed=1",
+		"snapshot=tank/a@two connection refused",
+		"config_generation=3",
+	} {
+		if !strings.HasSuffix(strings.TrimSpace(lines[index+1]), want) {
+			t.Fatalf("line %d = %q, want it to end %q", index+1, lines[index+1], want)
+		}
+	}
+}

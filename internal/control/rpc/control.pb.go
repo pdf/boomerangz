@@ -278,8 +278,35 @@ type JobStatus struct {
 	BytesPerSecond  float64                `protobuf:"fixed64,12,opt,name=bytes_per_second,json=bytesPerSecond,proto3" json:"bytes_per_second,omitempty"`
 	EtaNanoseconds  int64                  `protobuf:"varint,13,opt,name=eta_nanoseconds,json=etaNanoseconds,proto3" json:"eta_nanoseconds,omitempty"`
 	TotalKnown      bool                   `protobuf:"varint,14,opt,name=total_known,json=totalKnown,proto3" json:"total_known,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// run_id is shared by every transition of one run of a job, and is unique
+	// within one daemon process.
+	RunId uint64 `protobuf:"varint,15,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// The identity fields are each set only on the transitions they describe.
+	// snapshot: a snapshot job's created snapshot (succeeded) or the owned
+	// snapshot that set its deadline (scheduled); a transfer's source snapshot
+	// (sending), the snapshot now on the destination (succeeded), or the
+	// pending snapshot a run carried (waiting-retry, blocked, cancelled; not
+	// cancelled while still queued).
+	Snapshot string `protobuf:"bytes,16,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
+	// base: the snapshot or bookmark an incremental transfer is based on
+	// (sending).
+	Base string `protobuf:"bytes,17,opt,name=base,proto3" json:"base,omitempty"`
+	// mode: full, incremental-latest, incremental-all, or resume (sending).
+	Mode string `protobuf:"bytes,18,opt,name=mode,proto3" json:"mode,omitempty"`
+	// destination: the destination dataset of a transfer (succeeded).
+	Destination string `protobuf:"bytes,19,opt,name=destination,proto3" json:"destination,omitempty"`
+	// marker: set, cleared, or none, for an inactive reconciliation
+	// (succeeded).
+	Marker string `protobuf:"bytes,20,opt,name=marker,proto3" json:"marker,omitempty"`
+	// destroyed: at most 64 snapshots a prune or retirement destroyed
+	// (succeeded); destroyed_count is the total.
+	Destroyed      []string `protobuf:"bytes,21,rep,name=destroyed,proto3" json:"destroyed,omitempty"`
+	DestroyedCount uint32   `protobuf:"varint,22,opt,name=destroyed_count,json=destroyedCount,proto3" json:"destroyed_count,omitempty"`
+	// config_generation: the generation a configuration reload published
+	// (succeeded).
+	ConfigGeneration uint64 `protobuf:"varint,23,opt,name=config_generation,json=configGeneration,proto3" json:"config_generation,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *JobStatus) Reset() {
@@ -408,6 +435,69 @@ func (x *JobStatus) GetTotalKnown() bool {
 		return x.TotalKnown
 	}
 	return false
+}
+
+func (x *JobStatus) GetRunId() uint64 {
+	if x != nil {
+		return x.RunId
+	}
+	return 0
+}
+
+func (x *JobStatus) GetSnapshot() string {
+	if x != nil {
+		return x.Snapshot
+	}
+	return ""
+}
+
+func (x *JobStatus) GetBase() string {
+	if x != nil {
+		return x.Base
+	}
+	return ""
+}
+
+func (x *JobStatus) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *JobStatus) GetDestination() string {
+	if x != nil {
+		return x.Destination
+	}
+	return ""
+}
+
+func (x *JobStatus) GetMarker() string {
+	if x != nil {
+		return x.Marker
+	}
+	return ""
+}
+
+func (x *JobStatus) GetDestroyed() []string {
+	if x != nil {
+		return x.Destroyed
+	}
+	return nil
+}
+
+func (x *JobStatus) GetDestroyedCount() uint32 {
+	if x != nil {
+		return x.DestroyedCount
+	}
+	return 0
+}
+
+func (x *JobStatus) GetConfigGeneration() uint64 {
+	if x != nil {
+		return x.ConfigGeneration
+	}
+	return 0
 }
 
 type DatasetStatus struct {
@@ -1226,7 +1316,7 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\rR\bcapacity\x12\x18\n" +
 	"\apending\x18\x03 \x01(\rR\apending\x12\x17\n" +
-	"\ajob_ids\x18\x04 \x03(\tR\x06jobIds\"\xa9\x03\n" +
+	"\ajob_ids\x18\x04 \x03(\tR\x06jobIds\"\xb2\x05\n" +
 	"\tJobStatus\x12\x12\n" +
 	"\x04pool\x18\x01 \x01(\tR\x04pool\x12\x10\n" +
 	"\x03job\x18\x02 \x01(\tR\x03job\x12\x18\n" +
@@ -1244,7 +1334,16 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"\x10bytes_per_second\x18\f \x01(\x01R\x0ebytesPerSecond\x12'\n" +
 	"\x0feta_nanoseconds\x18\r \x01(\x03R\x0eetaNanoseconds\x12\x1f\n" +
 	"\vtotal_known\x18\x0e \x01(\bR\n" +
-	"totalKnown\"\x90\x01\n" +
+	"totalKnown\x12\x15\n" +
+	"\x06run_id\x18\x0f \x01(\x04R\x05runId\x12\x1a\n" +
+	"\bsnapshot\x18\x10 \x01(\tR\bsnapshot\x12\x12\n" +
+	"\x04base\x18\x11 \x01(\tR\x04base\x12\x12\n" +
+	"\x04mode\x18\x12 \x01(\tR\x04mode\x12 \n" +
+	"\vdestination\x18\x13 \x01(\tR\vdestination\x12\x16\n" +
+	"\x06marker\x18\x14 \x01(\tR\x06marker\x12\x1c\n" +
+	"\tdestroyed\x18\x15 \x03(\tR\tdestroyed\x12'\n" +
+	"\x0fdestroyed_count\x18\x16 \x01(\rR\x0edestroyedCount\x12+\n" +
+	"\x11config_generation\x18\x17 \x01(\x04R\x10configGeneration\"\x90\x01\n" +
 	"\rDatasetStatus\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x12\x1c\n" +

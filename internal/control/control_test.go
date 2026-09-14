@@ -127,6 +127,19 @@ func TestUnixControlAPI(t *testing.T) {
 	}
 }
 
+func TestJobStatusCarriesEveryIdentityField(t *testing.T) {
+	t.Parallel()
+	event := daemonstate.Event{Kind: daemonstate.EventTransition, RunID: 12, Job: "retire:tank/a", State: "succeeded", Identity: daemonstate.Identity{
+		Snapshot: "tank/a@two", Base: "tank/a@one", Mode: "incremental-all", Destination: "backup/a", Marker: "set",
+		Destroyed: []string{"tank/a@old"}, DestroyedCount: 70, ConfigGeneration: 4,
+	}}
+	got := toJobStatus(event)
+	if got.GetRunId() != 12 || got.GetSnapshot() != "tank/a@two" || got.GetBase() != "tank/a@one" || got.GetMode() != "incremental-all" || got.GetDestination() != "backup/a" || got.GetMarker() != "set" ||
+		!reflect.DeepEqual(got.GetDestroyed(), []string{"tank/a@old"}) || got.GetDestroyedCount() != 70 || got.GetConfigGeneration() != 4 {
+		t.Fatalf("job status = %v", got)
+	}
+}
+
 func TestWatchStatusSendsEachUpdateWithItsTransitions(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

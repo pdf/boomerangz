@@ -96,7 +96,11 @@ func (t *Tail) Terminal(writer io.Writer, width int) error {
 		if event.GetChangedUnixNano() != 0 {
 			at = time.Unix(0, event.GetChangedUnixNano()).UTC().Format(time.RFC3339)
 		}
-		if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", at, displayJobName(event.GetJob()), event.GetState(), event.GetReason()); err != nil {
+		detail := identitySummary(event)
+		if reason := event.GetReason(); reason != "" {
+			detail = strings.TrimSpace(detail + " " + reason)
+		}
+		if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", at, displayJobName(event.GetJob()), event.GetState(), detail); err != nil {
 			return err
 		}
 	}
@@ -104,6 +108,30 @@ func (t *Tail) Terminal(writer io.Writer, width int) error {
 		return err
 	}
 	return writeCut(writer, rows.String(), width)
+}
+
+// identitySummary names what a transition acted on, as the key=value pairs
+// it sets, in a fixed order.
+func identitySummary(event *controlrpc.JobStatus) string {
+	var parts []string
+	for _, field := range []struct{ key, value string }{
+		{"snapshot", event.GetSnapshot()},
+		{"base", event.GetBase()},
+		{"mode", event.GetMode()},
+		{"destination", event.GetDestination()},
+		{"marker", event.GetMarker()},
+	} {
+		if field.value != "" {
+			parts = append(parts, field.key+"="+field.value)
+		}
+	}
+	if count := event.GetDestroyedCount(); count > 0 {
+		parts = append(parts, fmt.Sprintf("destroyed=%d", count))
+	}
+	if generation := event.GetConfigGeneration(); generation > 0 {
+		parts = append(parts, fmt.Sprintf("config_generation=%d", generation))
+	}
+	return strings.Join(parts, " ")
 }
 
 // writeCut writes each line of rows, trailing space removed and cut to width.

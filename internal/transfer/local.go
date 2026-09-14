@@ -38,9 +38,12 @@ const (
 )
 
 // Report is one ordered observation from a transfer: a phase change or a
-// progress sample. Exactly one field is set.
+// progress sample. Exactly one of Phase and Progress is set.
 type Report struct {
-	Phase    Phase         // set on a phase change
+	Phase Phase // set on a phase change
+	// Plan is set with PhaseSending: the plan the stream carries out, naming
+	// the snapshot sent, its base, and the mode.
+	Plan     *Plan
 	Progress *zfs.Progress // set on a sample
 }
 
@@ -49,9 +52,9 @@ type Report struct {
 // phase that follows the stream.
 type Reporter func(Report)
 
-func (r Reporter) phase(phase Phase) {
+func (r Reporter) phase(phase Phase, plan *Plan) {
 	if r != nil {
-		r(Report{Phase: phase})
+		r(Report{Phase: phase, Plan: plan})
 	}
 }
 
@@ -516,7 +519,8 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 	}
 	targetID := plan.TargetBinding.CanonicalTarget
 	if plan.Mode != "up-to-date" {
-		report.phase(PhaseSending)
+		sending := plan
+		report.phase(PhaseSending, &sending)
 		result.Estimate, err = l.backend.EstimateSend(ctx, plan.Send)
 		if err != nil {
 			return result, err
@@ -533,7 +537,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 			}
 			return result, fmt.Errorf("transfer failed; source recovery references retained: %w", err)
 		}
-		report.phase(PhaseVerifying)
+		report.phase(PhaseVerifying, nil)
 	}
 	destination, err := l.target.InspectState(ctx, plan.Destination, true)
 	if err != nil {

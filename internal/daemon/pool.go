@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pdf/boomerangz/internal/daemonstate"
@@ -272,15 +273,31 @@ func (p *Pool) complete(id string) {
 	p.mu.Unlock()
 }
 
+// runIDs numbers runs across every pool in the process, so a run ID names one
+// run of one job wherever it appears.
+var runIDs atomic.Uint64
+
+// nextRunID returns a new run ID. A job takes one when it is built, so every
+// copy of it, including the one its own Run closure holds, carries the ID.
+func nextRunID() uint64 { return runIDs.Add(1) }
+
 // event builds a job transition. Its queue fields are stamped by the status
 // owner from the newest view of the pool's queue.
 func (p *Pool) event(job Job, state, reason string) Event {
-	return Event{Kind: EventTransition, Pool: p.name, Job: job.ID, Scope: job.Scope, Target: job.LockKey, State: state, Reason: reason, At: time.Now().UTC()}
+	return Event{Kind: EventTransition, RunID: job.RunID, Pool: p.name, Job: job.ID, Scope: job.Scope, Target: job.LockKey, State: state, Reason: reason, At: time.Now().UTC()}
 }
 
 func (p *Pool) emit(job Job, state, reason string) {
+	p.emitOutcome(job, Outcome{State: state, Reason: reason})
+}
+
+// emitOutcome reports a transition carrying the identity of what the run
+// acted on.
+func (p *Pool) emitOutcome(job Job, outcome Outcome) {
 	if p.report != nil {
-		p.report(p.event(job, state, reason))
+		event := p.event(job, outcome.State, outcome.Reason)
+		event.Identity = outcome.Identity
+		p.report(event)
 	}
 }
 
@@ -321,7 +338,7 @@ func (p *Pool) worker(runCtx, workerCtx context.Context) {
 			outcome.State = "succeeded"
 		}
 		if !outcome.Silent {
-			p.emit(job, outcome.State, outcome.Reason)
+			p.emitOutcome(job, outcome)
 		}
 		p.complete(job.ID)
 		if job.After != nil {

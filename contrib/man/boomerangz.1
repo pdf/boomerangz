@@ -25,7 +25,8 @@ to follow changes as they happen, and
 for structured output. A watch also shows every job state change since its
 previous update, in the order the daemon recorded them, and one that falls too
 far behind the daemon ends with an error rather than continuing with changes
-missing.
+missing. Each job state change names its run and what that run acted on, such
+as the snapshot a transfer sent or the snapshots a prune destroyed.
 .TP
 .B trigger
 Queue an immediate snapshot for selected active roots, or all active roots when

@@ -287,7 +287,8 @@ func TestApplyConfigPublishesGenerationAndRetainsIdentityDirectory(t *testing.T)
 	}
 	runtime.status.flush(t.Context())
 	if !slices.ContainsFunc(log.snapshot(), func(line map[string]string) bool {
-		return line["msg"] == "worker state" && line["pool"] == "configuration" && line["job"] == "config:reload" && line["state"] == "succeeded"
+		return line["msg"] == "worker state" && line["pool"] == "configuration" && line["job"] == "config:reload" && line["state"] == "succeeded" &&
+			line["run_id"] != "0" && line["config_generation"] == "2"
 	}) {
 		t.Fatalf("the configuration reload was not logged: %v", log.snapshot())
 	}
@@ -343,7 +344,7 @@ func TestListenerReloadFailureRollsBackDaemonConfiguration(t *testing.T) {
 func queueRemoteWork(t *testing.T, runtime *Runtime, dataset, remote string) string {
 	t.Helper()
 	id := "remote:" + dataset + ":" + remote
-	if added, err := runtime.remote.Submit(Job{ID: id, Group: dataset, Scope: dataset, StartState: "probing", Run: func(context.Context) Outcome { return Outcome{} }}); err != nil || !added {
+	if added, err := runtime.remote.Submit(Job{RunID: nextRunID(), ID: id, Group: dataset, Scope: dataset, StartState: "probing", Run: func(context.Context) Outcome { return Outcome{} }}); err != nil || !added {
 		t.Fatalf("submit %s: added=%t err=%v", id, added, err)
 	}
 	runtime.mu.Lock()

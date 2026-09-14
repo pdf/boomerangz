@@ -21,7 +21,7 @@ func TestPoolsHaveIndependentCapacityAndDeduplicateRunningJobs(t *testing.T) {
 	blocked := make(chan struct{})
 	started := make(chan struct{}, 2)
 	job := func(id string) Job {
-		return Job{ID: id, Group: id, Scope: id, Run: func(context.Context) Outcome {
+		return Job{RunID: nextRunID(), ID: id, Group: id, Scope: id, Run: func(context.Context) Outcome {
 			started <- struct{}{}
 			<-blocked
 			return Outcome{}
@@ -188,7 +188,7 @@ func TestPoolResizeDoesNotCancelRunningJob(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	finished := make(chan error, 1)
-	_, err = pool.Submit(Job{ID: "active", Group: "active", Scope: "active", Run: func(ctx context.Context) Outcome {
+	_, err = pool.Submit(Job{RunID: nextRunID(), ID: "active", Group: "active", Scope: "active", Run: func(ctx context.Context) Outcome {
 		close(started)
 		<-release
 		finished <- ctx.Err()
@@ -225,7 +225,7 @@ func TestPoolSilentOutcomeLeavesTheReportedStateStanding(t *testing.T) {
 	defer cancel()
 	_ = pool.Start(ctx)
 	after := make(chan Outcome, 1)
-	job := Job{ID: "remote:tank/data:home", Group: "tank/data", Scope: "tank/data", StartState: "probing",
+	job := Job{RunID: nextRunID(), ID: "remote:tank/data:home", Group: "tank/data", Scope: "tank/data", StartState: "probing",
 		Run:   func(context.Context) Outcome { return Outcome{State: "waiting-retry", Reason: "offline", Silent: true} },
 		After: func(outcome Outcome) { after <- outcome }}
 	if added, err := pool.Submit(job); err != nil || !added {
@@ -272,7 +272,7 @@ func TestPoolRecordsPendingBeforeAJobPoppedImmediatelyStarts(t *testing.T) {
 	const jobs = 50
 	for index := range jobs {
 		id := "job-" + strconv.Itoa(index)
-		if added, err := pool.Submit(Job{ID: id, Group: id, Scope: id, StartState: "probing", Run: func(context.Context) Outcome { return Outcome{} }}); err != nil || !added {
+		if added, err := pool.Submit(Job{RunID: nextRunID(), ID: id, Group: id, Scope: id, StartState: "probing", Run: func(context.Context) Outcome { return Outcome{} }}); err != nil || !added {
 			t.Fatalf("submit %s: added=%v err=%v", id, added, err)
 		}
 	}

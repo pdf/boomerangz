@@ -221,7 +221,7 @@ func managementPool(t *testing.T, status *Status, datasets ...string) *Pool {
 		t.Fatal(err)
 	}
 	for _, dataset := range datasets {
-		job := Job{ID: "reconcile:" + dataset, Group: dataset, Scope: dataset, LockKey: dataset, StartState: "reconciling", Run: func(context.Context) Outcome { return Outcome{} }}
+		job := Job{RunID: nextRunID(), ID: "reconcile:" + dataset, Group: dataset, Scope: dataset, LockKey: dataset, StartState: "reconciling", Run: func(context.Context) Outcome { return Outcome{} }}
 		if added, err := pool.Submit(job); err != nil || !added {
 			t.Fatalf("submit %s: added=%t err=%v", dataset, added, err)
 		}
