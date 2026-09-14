@@ -356,7 +356,7 @@ func TestGuestDaemonPowerLoss(t *testing.T) {
 func TestGuestDaemonSocketContention(t *testing.T) {
 	binary, sourcePool, _ := guestCLI(t)
 	configPath, dropInDir, _ := scratchConfig(t)
-	socket := filepath.Join(filepath.Dir(configPath), "control.sock")
+	socket := controlSocket(configPath)
 
 	root := sourcePool + "/data/contention-" + time.Now().UTC().Format("150405.000")
 	zfsCreate(t, root)

@@ -241,6 +241,4 @@ BOOMERANGZ_REMOTE_GUEST_CLI="/usr/bin/boomerangz" \
 run_stage control \
 BOOMERANGZ_CONTROL_GUEST_RUN="$run_id" \
 BOOMERANGZ_CONTROL_GUEST_CLI="$artifact_dir/boomerangz" \
-BOOMERANGZ_CONTROL_GUEST_CONFIG="$config" \
-BOOMERANGZ_CONTROL_GUEST_SOCKET="$socket" \
 	"$artifact_dir/control.test"

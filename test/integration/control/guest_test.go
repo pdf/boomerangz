@@ -22,27 +22,11 @@ import (
 
 // This test is opt-in and must run in the disposable guest, never on the host.
 func TestGuestDaemonControl(t *testing.T) {
-	runID := os.Getenv("BOOMERANGZ_CONTROL_GUEST_RUN")
-	if runID == "" {
-		t.Fatal("BOOMERANGZ_CONTROL_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
-	}
-	binary := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CLI")
-	configPath := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CONFIG")
-	if binary == "" || configPath == "" {
-		t.Fatal("guest boomerangz executable and configuration paths are required")
-	}
-	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
-	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
-	if sourceDevice == "" || destinationDevice == "" {
-		t.Fatal("source and destination test devices are required")
-	}
-	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, destinationDevice); err != nil {
-		t.Fatal(err)
-	}
+	binary, sourcePool, _ := guestCLI(t)
+	// The test reloads a changed configuration, so it owns one rather than
+	// changing a file another test starts a daemon from.
+	configPath, dropInDir, _ := scratchConfig(t)
+	socket := controlSocket(configPath)
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
 		t.Fatal(err)
@@ -60,14 +44,10 @@ func TestGuestDaemonControl(t *testing.T) {
 	zfstest.RegisterCleanup(t, source)
 	command("zfs", "set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x5m", source)
 
-	daemon := runGuestDaemon(t, binary, "", "daemon", "--config", configPath)
-	socket := os.Getenv("BOOMERANGZ_CONTROL_GUEST_SOCKET")
-	if socket == "" {
-		t.Fatal("guest control socket path is required")
-	}
+	daemon := startGuestDaemon(t, binary, configPath, dropInDir, "")
 	status := func(t *testing.T) []byte {
 		t.Helper()
-		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
+		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath, "--config-dir", dropInDir).CombinedOutput()
 		if statusErr != nil {
 			t.Fatalf("guest status: %v: %s", statusErr, output)
 		}
@@ -137,7 +117,7 @@ func TestGuestDaemonControl(t *testing.T) {
 	snapshotJob := "snapshot:" + source
 	initial, afterInitial := daemon.log.Outcome(t, 30*time.Second, 0, snapshotJob, "succeeded")
 	ownedSnapshot(t, initial.Snapshot)
-	trigger := command(binary, "trigger", "--config", configPath, source)
+	trigger := command(binary, "trigger", "--config", configPath, "--config-dir", dropInDir, source)
 	if !strings.Contains(trigger, source) {
 		t.Fatalf("trigger response did not accept %s: %s", source, trigger)
 	}
@@ -164,28 +144,11 @@ func TestGuestDaemonControl(t *testing.T) {
 }
 
 func TestGuestDaemonAbruptRestart(t *testing.T) {
-	runID := os.Getenv("BOOMERANGZ_CONTROL_GUEST_RUN")
-	if runID == "" {
-		t.Fatal("BOOMERANGZ_CONTROL_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
-	}
-	binary := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CLI")
-	configPath := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CONFIG")
-	socket := os.Getenv("BOOMERANGZ_CONTROL_GUEST_SOCKET")
-	if binary == "" || configPath == "" || socket == "" {
-		t.Fatal("guest boomerangz executable, configuration, and socket paths are required")
-	}
-	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
-	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
-	if sourceDevice == "" || destinationDevice == "" {
-		t.Fatal("source and destination test devices are required")
-	}
-	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, destinationDevice); err != nil {
-		t.Fatal(err)
-	}
+	binary, sourcePool, _ := guestCLI(t)
+	// Both daemons share this test's own configuration, so what they start
+	// with does not depend on which other tests ran before it.
+	configPath, dropInDir, _ := scratchConfig(t)
+	socket := controlSocket(configPath)
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +167,7 @@ func TestGuestDaemonAbruptRestart(t *testing.T) {
 	command("zfs", "set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x5m", source)
 
 	snapshotJob := "snapshot:" + source
-	first := runGuestDaemon(t, binary, "", "daemon", "--config", configPath)
+	first := startGuestDaemon(t, binary, configPath, dropInDir, "")
 	initial, _ := first.log.Outcome(t, 30*time.Second, 0, snapshotJob, "succeeded")
 	state, err := direct.InspectState(t.Context(), source, false)
 	if err != nil {
@@ -230,7 +193,7 @@ func TestGuestDaemonAbruptRestart(t *testing.T) {
 	// restart that lost track of it would create a duplicate and end
 	// succeeded. The job's first outcome is the answer, rather than a count
 	// taken after a guessed delay.
-	second := runGuestDaemon(t, binary, "", "daemon", "--config", configPath)
+	second := startGuestDaemon(t, binary, configPath, dropInDir, "")
 	restarted, _ := second.log.Ended(t, 30*time.Second, 0, snapshotJob)
 	if restarted.State == "succeeded" {
 		t.Fatalf("restart created a duplicate snapshot %s beside %s\n%s", restarted.Snapshot, initial.Snapshot, second.log.Describe())
@@ -247,7 +210,7 @@ func TestGuestDaemonAbruptRestart(t *testing.T) {
 	}
 	// The job ran, so the restarted daemon had started and replaced the stale
 	// socket; one read shows it serving the root it scheduled.
-	if output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput(); statusErr != nil || !bytes.Contains(output, []byte(source)) {
+	if output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath, "--config-dir", dropInDir).CombinedOutput(); statusErr != nil || !bytes.Contains(output, []byte(source)) {
 		t.Fatalf("the restarted daemon does not serve status listing %s: %v: %s", source, statusErr, output)
 	}
 	if err := second.command.Process.Signal(syscall.SIGTERM); err != nil {
