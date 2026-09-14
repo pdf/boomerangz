@@ -171,7 +171,11 @@ func TestGuestLocalTransfer(t *testing.T) {
 				t.Fatalf("full preview=%v err=%v", preview, err)
 			}
 			var bytes uint64
-			result, err := engine.Apply(t.Context(), req, func(p zfs.Progress) { bytes = p.Bytes })
+			result, err := engine.Apply(t.Context(), req, func(report transfer.Report) {
+				if report.Progress != nil {
+					bytes = report.Progress.Bytes
+				}
+			})
 			if err != nil || !result.Verified || bytes == 0 {
 				t.Fatalf("full result=%+v err=%v", result, err)
 			}

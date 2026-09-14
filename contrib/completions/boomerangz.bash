@@ -51,7 +51,7 @@ _boomerangz_complete_reseed_targets() {
 
 _boomerangz_option_takes_value() {
     case $1 in
-        --config|--config-dir|--socket|--credential|--interval|-i|--listener|\
+        --config|--config-dir|--socket|--credential|--listener|\
             --client-cert|--client-key|--scope|--expires-in|--owner)
             return 0
             ;;
@@ -72,7 +72,7 @@ _boomerangz_options() {
             printf '%s' '-h --help --config --config-dir'
             ;;
         'status ')
-            printf '%s' '-h --help --config --config-dir --credential -w --watch -i --interval --json'
+            printf '%s' '-h --help --config --config-dir --credential -w --watch --json'
             ;;
         'trigger ')
             printf '%s' '-h --help --config --config-dir --credential'

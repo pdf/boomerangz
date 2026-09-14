@@ -245,40 +245,16 @@ type Progress struct {
 	Completed      bool           `json:"completed"`
 }
 
+// countWriter counts the bytes the receiver accepts.
 type countWriter struct {
 	io.Writer
-	bytes       uint64
-	start, last time.Time
-	estimate    Estimate
-	report      func(Progress)
+	meter *ProgressMeter
 }
 
 func (w *countWriter) Write(p []byte) (int, error) {
 	n, err := w.Writer.Write(p)
-	w.bytes += uint64(n)
-	if time.Since(w.last) >= 250*time.Millisecond {
-		w.emit(false)
-	}
+	w.meter.Add(uint64(n))
 	return n, err
-}
-func (w *countWriter) emit(completed bool) Progress {
-	now := time.Now()
-	p := Progress{Bytes: w.bytes, Estimate: w.estimate, Completed: completed}
-	if elapsed := now.Sub(w.start).Seconds(); elapsed > 0 {
-		p.BytesPerSecond = float64(w.bytes) / elapsed
-	}
-	if w.estimate.Known && w.estimate.Bytes >= w.bytes && p.BytesPerSecond > 0 {
-		seconds := float64(w.estimate.Bytes-w.bytes) / p.BytesPerSecond
-		if seconds < float64(time.Duration(1<<63-1))/float64(time.Second) {
-			eta := time.Duration(seconds * float64(time.Second))
-			p.ETA = &eta
-		}
-	}
-	w.last = now
-	if w.report != nil {
-		w.report(p)
-	}
-	return p
 }
 
 // diagnosticBuffer drains stderr while retaining only a bounded prefix.
@@ -391,8 +367,8 @@ func RunPipeline(ctx context.Context, send SendOptions, receive ReceiveOptions, 
 		}
 		received <- err
 	}()
-	writer := countWriter{Writer: input, start: time.Now(), last: time.Now(), estimate: estimate, report: report}
-	writer.emit(false)
+	meter := StartProgress(estimate, report)
+	writer := countWriter{Writer: input, meter: meter}
 	_, copyErr := io.CopyBuffer(&writer, output, make([]byte, 128*1024))
 	closeErr := input.Close()
 	if copyErr != nil {
@@ -404,7 +380,7 @@ func RunPipeline(ctx context.Context, send SendOptions, receive ReceiveOptions, 
 	}
 	receiveErr := <-received
 	err = errors.Join(copyErr, closeErr, sendErr, receiveErr, ctx.Err())
-	result := writer.emit(err == nil)
+	result := meter.Finish(err == nil)
 	if err != nil {
 		return result, fmt.Errorf("stream pipeline: %w; sender: %s; receiver: %s", err, sendLog.String(), receiveLog.String())
 	}

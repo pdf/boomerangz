@@ -251,7 +251,7 @@ func (r *Runtime) enqueueDestinationPrune(dataset string, effective policy.Effec
 	if err != nil {
 		return
 	}
-	job := Job{ID: "destination-prune:" + dataset + ":" + lifecycle.TargetID(canonical), Group: dataset, Scope: dataset, LockKey: canonical, LockScope: lockScope, StartState: "pruning", Drop: ticket.Finish}
+	job := Job{RunID: nextRunID(), ID: "destination-prune:" + dataset + ":" + lifecycle.TargetID(canonical), Group: dataset, Scope: dataset, LockKey: canonical, LockScope: lockScope, StartState: "pruning", Drop: ticket.Finish}
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		if startErr := ticket.Start(); startErr != nil {

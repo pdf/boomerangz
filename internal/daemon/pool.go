@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pdf/boomerangz/internal/daemonstate"
@@ -138,6 +139,8 @@ type Pool struct {
 	workers int
 	queue   *FairQueue
 	report  Reporter
+	status  *Status
+	view    string
 	locks   *keyLocks
 	mu      sync.Mutex
 	known   map[string]bool
@@ -156,7 +159,43 @@ func NewPool(name string, workers, queueCapacity int, report Reporter) (*Pool, e
 	if err != nil {
 		return nil, err
 	}
-	return &Pool{name: name, workers: workers, queue: queue, report: report, locks: &keyLocks{}, known: make(map[string]bool)}, nil
+	pool := &Pool{name: name, workers: workers, queue: queue, report: report, locks: &keyLocks{}, known: make(map[string]bool)}
+	queue.observe = pool.observeQueue
+	return pool, nil
+}
+
+// newStatusPool constructs a pool that reports its transitions and its queue
+// views, under the name view, to status.
+func newStatusPool(name, view string, workers, queueCapacity int, status *Status) (*Pool, error) {
+	pool, err := NewPool(name, workers, queueCapacity, status.record)
+	if err != nil {
+		return nil, err
+	}
+	pool.status, pool.view = status, view
+	return pool, nil
+}
+
+// observeQueue runs under the queue lock. An offer's pending transition is
+// reported there, before a worker can pop the job and report its start, and
+// so is the cancelled transition of each job the change dropped, so that no
+// job keeps a pending state after it has left the queue.
+func (p *Pool) observeQueue(view QueueSnapshot, change queueChange) {
+	var transitions []Event
+	if change.offered != nil {
+		transitions = append(transitions, p.event(*change.offered, "pending-"+p.name, ""))
+	}
+	for _, job := range change.dropped {
+		transitions = append(transitions, p.event(job, "cancelled", change.reason))
+	}
+	if p.status != nil {
+		p.status.publishQueue(p.view, view, transitions)
+		return
+	}
+	if p.report != nil {
+		for _, transition := range transitions {
+			p.report(transition)
+		}
+	}
 }
 
 // Start begins worker execution once.
@@ -225,9 +264,6 @@ func (p *Pool) Submit(job Job) (bool, error) {
 	if err != nil || !added {
 		p.complete(job.ID)
 	}
-	if added {
-		p.emit(job, "pending-"+p.name, "")
-	}
 	return added, err
 }
 
@@ -237,9 +273,31 @@ func (p *Pool) complete(id string) {
 	p.mu.Unlock()
 }
 
+// runIDs numbers runs across every pool in the process, so a run ID names one
+// run of one job wherever it appears.
+var runIDs atomic.Uint64
+
+// nextRunID returns a new run ID. A job takes one when it is built, so every
+// copy of it, including the one its own Run closure holds, carries the ID.
+func nextRunID() uint64 { return runIDs.Add(1) }
+
+// event builds a job transition. Its queue fields are stamped by the status
+// owner from the newest view of the pool's queue.
+func (p *Pool) event(job Job, state, reason string) Event {
+	return Event{Kind: EventTransition, RunID: job.RunID, Pool: p.name, Job: job.ID, Scope: job.Scope, Target: job.LockKey, State: state, Reason: reason, At: time.Now().UTC()}
+}
+
 func (p *Pool) emit(job Job, state, reason string) {
+	p.emitOutcome(job, Outcome{State: state, Reason: reason})
+}
+
+// emitOutcome reports a transition carrying the identity of what the run
+// acted on.
+func (p *Pool) emitOutcome(job Job, outcome Outcome) {
 	if p.report != nil {
-		p.report(Event{Pool: p.name, Job: job.ID, Scope: job.Scope, Target: job.LockKey, State: state, Reason: reason, At: time.Now().UTC(), Pending: p.queue.Snapshot().Pending, Position: p.queue.Position(job.ID)})
+		event := p.event(job, outcome.State, outcome.Reason)
+		event.Identity = outcome.Identity
+		p.report(event)
 	}
 }
 
@@ -251,6 +309,9 @@ func (p *Pool) worker(runCtx, workerCtx context.Context) {
 			return
 		}
 		if err := runCtx.Err(); err != nil {
+			// The job has left the queue without starting, so it reports that
+			// rather than keeping the pending state it was queued with.
+			p.emit(job, "cancelled", "worker pool stopped before the job started")
 			if job.Drop != nil {
 				job.Drop()
 			}
@@ -277,7 +338,7 @@ func (p *Pool) worker(runCtx, workerCtx context.Context) {
 			outcome.State = "succeeded"
 		}
 		if !outcome.Silent {
-			p.emit(job, outcome.State, outcome.Reason)
+			p.emitOutcome(job, outcome)
 		}
 		p.complete(job.ID)
 		if job.After != nil {
@@ -289,17 +350,16 @@ func (p *Pool) worker(runCtx, workerCtx context.Context) {
 	}
 }
 
-// RemoveScope removes work that has not started for a deactivated root.
-func (p *Pool) RemoveScope(scope string) int { return p.queue.RemoveScope(scope) }
+// RemoveScope removes work that has not started for a deactivated root. Each
+// removed job records cancelled, with reason.
+func (p *Pool) RemoveScope(scope, reason string) int { return p.queue.RemoveScope(scope, reason) }
 
-// DiscardPending removes all work that has not started.
-func (p *Pool) DiscardPending() int { return p.queue.DiscardAll() }
+// DiscardPending removes all work that has not started. Each removed job
+// records cancelled, with reason.
+func (p *Pool) DiscardPending(reason string) int { return p.queue.DiscardAll(reason) }
 
 // Close stops submissions and drains queued work unless the worker context is cancelled.
 func (p *Pool) Close() { p.queue.Close() }
 
 // Wait waits until every worker has exited.
 func (p *Pool) Wait() { p.wait.Wait() }
-
-// Snapshot returns the current pending queue view.
-func (p *Pool) Snapshot() QueueSnapshot { return p.queue.Snapshot() }

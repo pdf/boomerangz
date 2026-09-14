@@ -25,6 +25,46 @@ type Stream interface {
 	Run(context.Context, zfs.SendOptions, zfs.ReceiveOptions, zfs.Estimate, func(zfs.Progress)) (zfs.Progress, error)
 }
 
+// Phase names a stage of a transfer that its caller reports as a state change.
+type Phase string
+
+const (
+	// PhaseSending starts when a plan has newer state to send: the stream is
+	// estimated and run.
+	PhaseSending Phase = "sending"
+	// PhaseVerifying starts when the stream has completed: received GUIDs,
+	// the target binding, and destination properties are checked.
+	PhaseVerifying Phase = "verifying"
+)
+
+// Report is one ordered observation from a transfer: a phase change or a
+// progress sample. Exactly one of Phase and Progress is set.
+type Report struct {
+	Phase Phase // set on a phase change
+	// Plan is set with PhaseSending: the plan the stream carries out, naming
+	// the snapshot sent, its base, and the mode.
+	Plan     *Plan
+	Progress *zfs.Progress // set on a sample
+}
+
+// Reporter receives a transfer's reports in the order they happened. A
+// stream's samples are emitted inside its run, so every sample precedes the
+// phase that follows the stream.
+type Reporter func(Report)
+
+func (r Reporter) phase(phase Phase, plan *Plan) {
+	if r != nil {
+		r(Report{Phase: phase, Plan: plan})
+	}
+}
+
+func (r Reporter) progress() func(zfs.Progress) {
+	if r == nil {
+		return nil
+	}
+	return func(progress zfs.Progress) { r(Report{Progress: &progress}) }
+}
+
 // Result distinguishes successful byte transport from verified replication.
 type Result struct {
 	Plan           Plan         `json:"plan"`
@@ -374,7 +414,9 @@ func (l *Local) prepareReceiveParents(ctx context.Context, request Request, view
 // Apply rebuilds the plan, pins owned source endpoints and snapshot bases, sends,
 // verifies every expected GUID, and only then advances/relinquishes references.
 // Failures retain references and any receive token; no implicit reseed or abort.
-func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Progress)) (Result, error) {
+// Phases are reported only for work that happens: PhaseSending before a stream
+// and PhaseVerifying after it completes, so an up-to-date target reports none.
+func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Result, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var result Result
@@ -477,11 +519,13 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 	}
 	targetID := plan.TargetBinding.CanonicalTarget
 	if plan.Mode != "up-to-date" {
+		sending := plan
+		report.phase(PhaseSending, &sending)
 		result.Estimate, err = l.backend.EstimateSend(ctx, plan.Send)
 		if err != nil {
 			return result, err
 		}
-		result.Progress, err = l.stream.Run(ctx, plan.Send, plan.Receive, result.Estimate, report)
+		result.Progress, err = l.stream.Run(ctx, plan.Send, plan.Receive, result.Estimate, report.progress())
 		if err != nil {
 			probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
@@ -493,6 +537,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report func(zfs.Prog
 			}
 			return result, fmt.Errorf("transfer failed; source recovery references retained: %w", err)
 		}
+		report.phase(PhaseVerifying, nil)
 	}
 	destination, err := l.target.InspectState(ctx, plan.Destination, true)
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,10 +34,18 @@ import (
 
 type fakeRuntime struct {
 	mu        sync.Mutex
-	revision  uint64
-	changed   chan struct{}
 	triggered []string
+	updates   chan daemonstate.Update // nil: deliver the current state once, then nothing
+	ended     error
 }
+
+type fakeSubscription struct {
+	updates <-chan daemonstate.Update
+	err     error
+}
+
+func (s *fakeSubscription) Updates() <-chan daemonstate.Update { return s.updates }
+func (s *fakeSubscription) Err() error                         { return s.err }
 
 type remoteTestBackend struct{ zfs.Executor }
 
@@ -48,27 +57,18 @@ func (remoteTestBackend) InspectDatasetIdentity(_ context.Context, dataset strin
 }
 
 func (f *fakeRuntime) ControlStatus() daemonstate.ControlSnapshot {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return daemonstate.ControlSnapshot{Revision: f.revision, Observed: time.Unix(10, 0), Generation: 7, Datasets: []daemonstate.DatasetStatus{{Name: "tank/data", Active: true}}, Queues: map[string]daemonstate.QueueSnapshot{"management": {Capacity: 8}}}
+	return daemonstate.ControlSnapshot{Observed: time.Unix(10, 0), Generation: 7, Datasets: []daemonstate.DatasetStatus{{Name: "tank/data", Active: true}}, Queues: map[string]daemonstate.QueueSnapshot{"management": {Capacity: 8}}}
 }
-func (f *fakeRuntime) WaitStatus(ctx context.Context, after uint64) error {
-	f.mu.Lock()
-	if f.revision > after {
-		f.mu.Unlock()
-		return nil
+
+// SubscribeStatus delivers f.updates when set. Otherwise, like the daemon, it
+// delivers the current state first, and then nothing.
+func (f *fakeRuntime) SubscribeStatus(context.Context) (daemonstate.Subscription, error) {
+	if f.updates != nil {
+		return &fakeSubscription{updates: f.updates, err: f.ended}, nil
 	}
-	if f.changed == nil {
-		f.changed = make(chan struct{})
-	}
-	changed := f.changed
-	f.mu.Unlock()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-changed:
-		return nil
-	}
+	initial := make(chan daemonstate.Update, 1)
+	initial <- daemonstate.Update{State: f.ControlStatus()}
+	return &fakeSubscription{updates: initial}, nil
 }
 func (f *fakeRuntime) Trigger(names []string) ([]string, error) {
 	f.mu.Lock()
@@ -127,6 +127,86 @@ func TestUnixControlAPI(t *testing.T) {
 	}
 }
 
+func TestJobStatusCarriesEveryIdentityField(t *testing.T) {
+	t.Parallel()
+	event := daemonstate.Event{Kind: daemonstate.EventTransition, RunID: 12, Job: "retire:tank/a", State: "succeeded", Identity: daemonstate.Identity{
+		Snapshot: "tank/a@two", Base: "tank/a@one", Mode: "incremental-all", Destination: "backup/a", Marker: "set",
+		Destroyed: []string{"tank/a@old"}, DestroyedCount: 70, ConfigGeneration: 4,
+	}}
+	got := toJobStatus(event)
+	if got.GetRunId() != 12 || got.GetSnapshot() != "tank/a@two" || got.GetBase() != "tank/a@one" || got.GetMode() != "incremental-all" || got.GetDestination() != "backup/a" || got.GetMarker() != "set" ||
+		!reflect.DeepEqual(got.GetDestroyed(), []string{"tank/a@old"}) || got.GetDestroyedCount() != 70 || got.GetConfigGeneration() != 4 {
+		t.Fatalf("job status = %v", got)
+	}
+}
+
+func TestWatchStatusSendsEachUpdateWithItsTransitions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(dir, "control.sock")
+	cfg.Paths.IdentityDir = filepath.Join(dir, "identity")
+	updates := make(chan daemonstate.Update)
+	server, err := StartServer(cfg, &fakeRuntime{updates: updates, ended: errors.New("status subscriber fell behind")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	client, err := DialLocal(t.Context(), cfg.Paths.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Connection.Close() }()
+	stream, err := client.Status.WatchStatus(t.Context(), &controlrpc.WatchStatusRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates <- daemonstate.Update{State: daemonstate.ControlSnapshot{Revision: 1}}
+	response, err := stream.Recv()
+	if err != nil || response.GetStatus().GetRevision() != 1 || len(response.GetTransitions()) != 0 {
+		t.Fatalf("initial response=%v err=%v", response, err)
+	}
+	at := time.Unix(30, 0).UTC()
+	transitions := []daemonstate.Event{
+		{Kind: daemonstate.EventTransition, Pool: "transfer", Job: "remote:tank/data:offsite", Scope: "tank/data", Target: "offsite", State: "sending", At: at},
+		{Kind: daemonstate.EventTransition, Pool: "transfer", Job: "remote:tank/data:offsite", Scope: "tank/data", Target: "offsite", State: "waiting-retry", Reason: "connection reset", At: at.Add(time.Second)},
+	}
+	updates <- daemonstate.Update{Transitions: transitions, State: daemonstate.ControlSnapshot{Revision: 3, Jobs: transitions[1:]}}
+	response, err = stream.Recv()
+	if err != nil || response.GetStatus().GetRevision() != 3 {
+		t.Fatalf("update response=%v err=%v", response, err)
+	}
+	var got []string
+	for _, transition := range response.GetTransitions() {
+		got = append(got, strings.Join([]string{transition.GetPool(), transition.GetJob(), transition.GetDataset(), transition.GetTarget(), transition.GetState(), transition.GetReason(), strconv.FormatInt(transition.GetChangedUnixNano(), 10)}, "|"))
+	}
+	want := []string{
+		"transfer|remote:tank/data:offsite|tank/data|offsite|sending||" + strconv.FormatInt(at.UnixNano(), 10),
+		"transfer|remote:tank/data:offsite|tank/data|offsite|waiting-retry|connection reset|" + strconv.FormatInt(at.Add(time.Second).UnixNano(), 10),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("transitions=%q, want %q", got, want)
+	}
+	// An update that changed state without a transition, such as a view
+	// change, is sent as it arrives and carries no transitions.
+	updates <- daemonstate.Update{State: daemonstate.ControlSnapshot{Revision: 4, Jobs: transitions[1:]}}
+	response, err = stream.Recv()
+	if err != nil || response.GetStatus().GetRevision() != 4 || len(response.GetTransitions()) != 0 {
+		t.Fatalf("state-only response=%v err=%v", response, err)
+	}
+	// A subscription that ends while the client is connected ends the watch
+	// with an error rather than leaving it silently stale.
+	close(updates)
+	for {
+		if _, err = stream.Recv(); err != nil {
+			break
+		}
+	}
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("ended watch err=%v, want Aborted", err)
+	}
+}
+
 func TestServerReloadMovesDefaultUnixSocket(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -151,14 +231,9 @@ func TestServerReloadMovesDefaultUnixSocket(t *testing.T) {
 	if _, err := client.Status.GetStatus(t.Context(), &controlrpc.GetStatusRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Lstat(cfg.Paths.SocketPath); errors.Is(err, os.ErrNotExist) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if _, err := os.Lstat(cfg.Paths.SocketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("previous control socket was not retired: %v", err)
 	}
-	t.Fatal("previous control socket was not retired")
 }
 
 func TestServerReloadFailureRetainsActiveListeners(t *testing.T) {

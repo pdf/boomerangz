@@ -1,5 +1,11 @@
 version: "2"
 
+run:
+  # Integration tests are gated by this tag; linting without it would skip
+  # them. No file is excluded by the tag, so this lints a superset.
+  build-tags:
+    - integration
+
 linters:
   default: standard
   enable:

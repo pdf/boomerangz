@@ -183,12 +183,14 @@ func (p RetryPolicy) Delay(failures int, random float64) (time.Duration, error) 
 }
 
 type transferApplier interface {
-	Apply(context.Context, Request, func(zfs.Progress)) (Result, error)
+	Apply(context.Context, Request, Reporter) (Result, error)
 }
 
 // RecoveryOutcome describes one explicit or due remote reconciliation attempt.
 type RecoveryOutcome struct {
-	Status    string    `json:"status"`
+	Status string `json:"status"`
+	// Pending is the pending snapshot the attempt carried, if any.
+	Pending   string    `json:"pending,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
 	NotBefore time.Time `json:"not_before,omitempty"`
 	Results   []Result  `json:"results,omitempty"`
@@ -246,16 +248,19 @@ func (r *Roadwarrior) Offer(snapshot PendingSnapshot) (bool, error) {
 
 // Reconcile resumes durable state first, then sends the newest coalesced or
 // currently eligible snapshot. Only temporary transport failures enter retry.
-func (r *Roadwarrior) Reconcile(ctx context.Context, report func(zfs.Progress)) (RecoveryOutcome, error) {
+func (r *Roadwarrior) Reconcile(ctx context.Context, report Reporter) (RecoveryOutcome, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
 	if now.Before(r.notBefore) {
 		// An attempt made before the backoff deadline reports the failure that
-		// set it. Returning the bare status instead would overwrite the reason
-		// in the daemon's status store, which keeps only the latest event per
-		// job, and leave an operator watching a retry with no cause.
-		return RecoveryOutcome{Status: "waiting-retry", Reason: r.reason, NotBefore: r.notBefore}, nil
+		// set it, so a caller that shows this outcome as the job's latest state
+		// never shows a retry with no cause.
+		outcome := RecoveryOutcome{Status: "waiting-retry", Reason: r.reason, NotBefore: r.notBefore}
+		if pending, found := r.pending.Peek(r.request.Source, canonicalTarget(r.request)); found {
+			outcome.Pending = pending.Name
+		}
+		return outcome, nil
 	}
 	request := r.request
 	pending, hasPending := r.pending.Begin(request.Source, canonicalTarget(request))
@@ -266,7 +271,7 @@ func (r *Roadwarrior) Reconcile(ctx context.Context, report func(zfs.Progress)) 
 	if hasPending {
 		request.Snapshot = pending.Name
 	}
-	outcome := RecoveryOutcome{Status: "probing"}
+	outcome := RecoveryOutcome{Status: "probing", Pending: request.Snapshot}
 	for attempts := 0; attempts < 2; attempts++ {
 		result, err := r.engine.Apply(ctx, request, report)
 		outcome.Results = append(outcome.Results, result)

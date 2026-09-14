@@ -26,12 +26,22 @@ Commands that read configuration accept:
 | Command | Options and arguments |
 | --- | --- |
 | `boomerangz daemon` | Run management in the foreground. |
-| `boomerangz status` | `--credential NAME_OR_PATH`, `--watch`/`-w`, `--interval DURATION` (default `2s`), and `--json`. |
+| `boomerangz status` | `--credential NAME_OR_PATH`, `--watch`/`-w`, and `--json`. |
 | `boomerangz trigger [DATASET...]` | Empty selects every active root; `--credential NAME_OR_PATH` addresses a paired listener. |
 
-Interactive status uses a readable terminal view. Redirected one-shot output is
-one JSON object; redirected watch output is newline-delimited JSON. Add `--json`
-to emit that structured output even when standard output is a terminal.
+Interactive status uses a readable terminal view; an interactive watch adds the
+most recent job state changes beneath it. Redirected one-shot output is one JSON
+object; redirected watch output is newline-delimited JSON. Add `--json` to emit
+that structured output even when standard output is a terminal. A watch
+sends an update whenever the daemon's status changes, and only then. Each watch
+object also carries `transitions`, every job state change since the previous
+object in the order the daemon recorded it. Each job entry names its run and
+what that run acted on, such as the snapshot a transfer sent, in the job
+identity fields. A watch that falls too far behind
+the daemon ends with an `Aborted` error and exits with status one rather than
+continuing with changes missing. See
+[View status](/operations/#view-status) for the fields and the job states, and
+[Job identity](/operations/#job-identity) for the identity fields.
 
 ## Dataset lifecycle
 

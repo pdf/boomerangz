@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -287,5 +288,28 @@ func TestHierarchyLocksSerializeOverlappingRoots(t *testing.T) {
 		release()
 	case <-time.After(time.Second):
 		t.Fatal("descendant lock was not released")
+	}
+}
+
+func TestStateChangeRefusalIsTypedAndTemporary(t *testing.T) {
+	t.Parallel()
+	b := backendWithSnapshots(t)
+	addTestAuthority(b)
+	// ProtectSet reads the source, then reads it again to check nothing
+	// changed before it writes; a property set in between is a change.
+	b.beforeRead = func(b *memoryBackend) {
+		if b.reads == 2 {
+			b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: "org.boomerangz:state:concurrent", Value: "{}", Source: zfs.SourceLocal})
+		}
+	}
+	s, _ := NewService(b, testInstallation)
+	_, err := s.Protect(t.Context(), "tank/data", b.state.Objects[1].Name, "local:backup/data")
+	var changed *StateChangedError
+	if !errors.As(err, &changed) || len(b.writes) != 0 {
+		t.Fatalf("err = %v writes = %v, want a StateChangedError and no write", err, b.writes)
+	}
+	var temporary interface{ Temporary() bool }
+	if !errors.As(err, &temporary) || !temporary.Temporary() {
+		t.Fatalf("err = %v is not temporary", err)
 	}
 }

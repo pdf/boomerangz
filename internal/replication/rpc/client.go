@@ -189,31 +189,6 @@ func NewStreamWithSender(client *Client, sender zfs.CommandFactory, label string
 	return &Stream{client: client, sender: sender, label: label}, nil
 }
 
-type streamProgress struct {
-	bytes    uint64
-	estimate zfs.Estimate
-	start    time.Time
-	last     time.Time
-	report   func(zfs.Progress)
-}
-
-func (p *streamProgress) emit(completed bool) zfs.Progress {
-	now := time.Now()
-	result := zfs.Progress{Bytes: p.bytes, Estimate: p.estimate, Completed: completed}
-	if elapsed := now.Sub(p.start).Seconds(); elapsed > 0 {
-		result.BytesPerSecond = float64(p.bytes) / elapsed
-	}
-	if p.estimate.Known && p.estimate.Bytes >= p.bytes && result.BytesPerSecond > 0 {
-		eta := time.Duration(float64(p.estimate.Bytes-p.bytes) / result.BytesPerSecond * float64(time.Second))
-		result.ETA = &eta
-	}
-	p.last = now
-	if p.report != nil {
-		p.report(result)
-	}
-	return result
-}
-
 // Run executes one bounded sender and gRPC client-streaming receive.
 func (s *Stream) Run(ctx context.Context, send zfs.SendOptions, receive zfs.ReceiveOptions, estimate zfs.Estimate, report func(zfs.Progress)) (zfs.Progress, error) {
 	args, err := zfs.SendArguments(send, false)
@@ -245,8 +220,7 @@ func (s *Stream) Run(ctx context.Context, send zfs.SendOptions, receive zfs.Rece
 		_ = output.Close()
 		return zfs.Progress{}, err
 	}
-	progress := streamProgress{estimate: estimate, start: time.Now(), last: time.Now(), report: report}
-	progress.emit(false)
+	progress := zfs.StartProgress(estimate, report)
 	buffer := make([]byte, 128*1024)
 	var copyErr error
 	for {
@@ -257,10 +231,7 @@ func (s *Stream) Run(ctx context.Context, send zfs.SendOptions, receive zfs.Rece
 				cancel()
 				break
 			}
-			progress.bytes += uint64(n)
-			if time.Since(progress.last) >= 250*time.Millisecond {
-				progress.emit(false)
-			}
+			progress.Add(uint64(n))
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
@@ -274,11 +245,11 @@ func (s *Stream) Run(ctx context.Context, send zfs.SendOptions, receive zfs.Rece
 	senderErr := sender.Wait()
 	response, receiveErr := stream.CloseAndRecv()
 	receiveErr = s.client.mapError(receiveErr)
-	if response != nil && response.GetBytes() != progress.bytes {
+	if response != nil && response.GetBytes() != progress.Bytes() {
 		receiveErr = errors.Join(receiveErr, fmt.Errorf("remote receive byte count differs from sent stream"))
 	}
 	err = errors.Join(copyErr, senderErr, receiveErr, ctx.Err())
-	result := progress.emit(err == nil)
+	result := progress.Finish(err == nil)
 	if err != nil {
 		return result, fmt.Errorf("%s stream: %w; sender: %s", s.label, err, diagnostics.String())
 	}

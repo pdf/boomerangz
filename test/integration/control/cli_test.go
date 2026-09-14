@@ -49,10 +49,11 @@ func guestCLI(t *testing.T) (string, string, string) {
 }
 
 // scratchConfig writes a configuration naming only this test's own paths and
-// returns it with the identity the CLI will adopt from it. The shared guest
-// configuration is not usable here: TestGuestDaemonControl appends to it and
-// asserts a reload generation, and its identity directory already belongs to
-// another installation.
+// returns it with the identity the CLI will adopt from it. No test uses a
+// configuration another test can see: a test that reloads a changed
+// configuration would otherwise change what later tests start with, and an
+// identity directory shared across tests is an installation that owns every
+// test's datasets. The control socket is at controlSocket(configPath).
 func scratchConfig(t *testing.T) (string, string, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -60,7 +61,7 @@ func scratchConfig(t *testing.T) (string, string, string) {
 	dropInDir := filepath.Join(root, "config.d")
 	identityDir := filepath.Join(root, "identity")
 	document := fmt.Sprintf("[paths]\ncredentials_dir = %q\nidentity_dir = %q\nsocket_path = %q\n",
-		filepath.Join(root, "credentials"), identityDir, filepath.Join(root, "control.sock"))
+		filepath.Join(root, "credentials"), identityDir, controlSocket(configPath))
 	if err := os.WriteFile(configPath, []byte(document), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +71,11 @@ func scratchConfig(t *testing.T) (string, string, string) {
 		}
 	}
 	return configPath, dropInDir, identityDir
+}
+
+// controlSocket is the control socket path scratchConfig names.
+func controlSocket(configPath string) string {
+	return filepath.Join(filepath.Dir(configPath), "control.sock")
 }
 
 // datasetStatuses parses the `dataset list` table into dataset to status. The

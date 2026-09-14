@@ -17,31 +17,16 @@ import (
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/testutil/zfstest"
 	"github.com/pdf/boomerangz/internal/zfs"
+	"github.com/pdf/boomerangz/test/integration/internal/statuswait"
 )
 
 // This test is opt-in and must run in the disposable guest, never on the host.
 func TestGuestDaemonControl(t *testing.T) {
-	runID := os.Getenv("BOOMERANGZ_CONTROL_GUEST_RUN")
-	if runID == "" {
-		t.Fatal("BOOMERANGZ_CONTROL_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
-	}
-	binary := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CLI")
-	configPath := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CONFIG")
-	if binary == "" || configPath == "" {
-		t.Fatal("guest boomerangz executable and configuration paths are required")
-	}
-	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
-	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
-	if sourceDevice == "" || destinationDevice == "" {
-		t.Fatal("source and destination test devices are required")
-	}
-	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, destinationDevice); err != nil {
-		t.Fatal(err)
-	}
+	binary, sourcePool, _ := guestCLI(t)
+	// The test reloads a changed configuration, so it owns one rather than
+	// changing a file another test starts a daemon from.
+	configPath, dropInDir, _ := scratchConfig(t)
+	socket := controlSocket(configPath)
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
 		t.Fatal(err)
@@ -59,45 +44,37 @@ func TestGuestDaemonControl(t *testing.T) {
 	zfstest.RegisterCleanup(t, source)
 	command("zfs", "set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x5m", source)
 
-	var daemonLog bytes.Buffer
-	daemon := exec.CommandContext(t.Context(), binary, "daemon", "--config", configPath)
-	daemon.Stdout = &daemonLog
-	daemon.Stderr = &daemonLog
-	daemon.WaitDelay = 5 * time.Second
-	if err := daemon.Start(); err != nil {
-		t.Fatal(err)
-	}
-	stopped := false
-	t.Cleanup(func() {
-		if !stopped && daemon.Process != nil {
-			_ = daemon.Process.Kill()
-			_ = daemon.Wait()
-		}
-	})
-
-	socket := os.Getenv("BOOMERANGZ_CONTROL_GUEST_SOCKET")
-	if socket == "" {
-		t.Fatal("guest control socket path is required")
-	}
-	waitFor := func(description string, check func() bool) {
+	daemon := startGuestDaemon(t, binary, configPath, dropInDir, "")
+	status := func(t *testing.T) []byte {
 		t.Helper()
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			if check() {
-				return
-			}
-			time.Sleep(100 * time.Millisecond)
+		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath, "--config-dir", dropInDir).CombinedOutput()
+		if statusErr != nil {
+			t.Fatalf("guest status: %v: %s", statusErr, output)
 		}
-		t.Fatalf("timed out waiting for %s; daemon log: %s", description, daemonLog.String())
+		return output
 	}
-	waitFor("control socket", func() bool {
-		info, statErr := os.Lstat(socket)
-		return statErr == nil && info.Mode()&os.ModeSocket != 0 && info.Mode().Perm() == 0o660
-	})
-	waitFor("dataset in control status", func() bool {
-		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
-		return statusErr == nil && bytes.Contains(output, []byte(source))
-	})
+	ownedSnapshot := func(t *testing.T, name string) {
+		t.Helper()
+		state, inspectErr := direct.InspectState(t.Context(), source, false)
+		if inspectErr != nil {
+			t.Fatal(inspectErr)
+		}
+		if !slices.ContainsFunc(lifecycle.Snapshots(state, source), func(snapshot lifecycle.Snapshot) bool { return snapshot.Name == name }) {
+			t.Fatalf("the snapshot job reported creating %s, which the pool does not hold: %+v", name, state.Objects)
+		}
+	}
+
+	daemon.waitStarted(t, 30*time.Second)
+	if info, statErr := os.Lstat(socket); statErr != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o660 {
+		t.Fatalf("the started daemon's control socket is not a 0660 socket: %v %v", info, statErr)
+	}
+	// The dataset exists before the daemon starts, so the first discovery
+	// generation holds it, and the generation's line follows status
+	// reflecting it.
+	daemon.log.Next(t, "the first discovery generation", 30*time.Second, 0, statuswait.Discovered)
+	if output := status(t); !bytes.Contains(output, []byte(source)) {
+		t.Fatalf("status after the first discovery generation does not list %s: %s", source, output)
+	}
 	configFile, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +86,7 @@ func TestGuestDaemonControl(t *testing.T) {
 	if err := configFile.Close(); err != nil {
 		t.Fatal(err)
 	}
+	reloadMark := daemon.log.Mark()
 	reloadOutput := command(binary, "config", "reload", "--socket", socket)
 	var reload struct {
 		Generation      uint64   `json:"generation"`
@@ -121,60 +99,44 @@ func TestGuestDaemonControl(t *testing.T) {
 	if reload.Generation != 2 || !slices.Contains(reload.Applied, "daemon.local_transfer_workers") || len(reload.RestartRequired) != 0 {
 		t.Fatalf("unexpected reload result: %#v", reload)
 	}
-	waitFor("reloaded configuration generation", func() bool {
-		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
-		if statusErr != nil {
-			return false
-		}
-		var status struct {
-			ConfigGeneration uint64 `json:"config_generation"`
-		}
-		return json.Unmarshal(output, &status) == nil && status.ConfigGeneration == 2
-	})
-	initialSnapshots := 0
-	waitFor("initial owned snapshot", func() bool {
-		state, inspectErr := direct.InspectState(t.Context(), source, false)
-		if inspectErr != nil {
-			return false
-		}
-		initialSnapshots = len(lifecycle.Snapshots(state, source))
-		return initialSnapshots > 0
-	})
-	waitFor("completed initial snapshot job", func() bool {
-		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
-		if statusErr != nil {
-			return false
-		}
-		type jobStatus struct {
-			Job   string `json:"job"`
-			State string `json:"state"`
-		}
-		var status struct {
-			Jobs []jobStatus `json:"jobs"`
-		}
-		if json.Unmarshal(output, &status) != nil {
-			return false
-		}
-		return slices.ContainsFunc(status.Jobs, func(job jobStatus) bool {
-			return job.Job == "snapshot:"+source && job.State == "succeeded"
-		})
-	})
-	trigger := command(binary, "trigger", "--config", configPath, source)
+	// The reload publishes the generation and records itself before it
+	// replies, so one read sees it without waiting.
+	var reloaded struct {
+		ConfigGeneration uint64 `json:"config_generation"`
+	}
+	if output := status(t); json.Unmarshal(output, &reloaded) != nil || reloaded.ConfigGeneration != 2 {
+		t.Fatalf("status after the reload replied does not carry configuration generation 2: %s", output)
+	}
+	// The log writer can lag the reply, so the reload's own line is waited
+	// for.
+	reloadEvent, _ := daemon.log.Outcome(t, 30*time.Second, reloadMark, "config:reload", "succeeded")
+	if reloadEvent.ConfigGeneration != 2 {
+		t.Fatalf("the reload's log line names configuration generation %d, want 2: %+v", reloadEvent.ConfigGeneration, reloadEvent)
+	}
+
+	snapshotJob := "snapshot:" + source
+	initial, afterInitial := daemon.log.Outcome(t, 30*time.Second, 0, snapshotJob, "succeeded")
+	ownedSnapshot(t, initial.Snapshot)
+	trigger := command(binary, "trigger", "--config", configPath, "--config-dir", dropInDir, source)
 	if !strings.Contains(trigger, source) {
 		t.Fatalf("trigger response did not accept %s: %s", source, trigger)
 	}
-	waitFor("triggered owned snapshot", func() bool {
-		state, inspectErr := direct.InspectState(t.Context(), source, false)
-		return inspectErr == nil && len(lifecycle.Snapshots(state, source)) > initialSnapshots
-	})
+	// Counted from the first success rather than from the trigger's reply,
+	// which the log writer can lag. A forced run skips the deadline check, so
+	// the next success is the triggered snapshot; a scheduled run between them
+	// found the first snapshot's deadline and changed nothing.
+	triggered, _ := daemon.log.Outcome(t, 30*time.Second, afterInitial, snapshotJob, "succeeded", "scheduled")
+	if triggered.Snapshot == initial.Snapshot {
+		t.Fatalf("the triggered run reported the initial snapshot %s again", initial.Snapshot)
+	}
+	ownedSnapshot(t, triggered.Snapshot)
 
-	if err := daemon.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := daemon.command.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	if err := daemon.Wait(); err != nil {
-		t.Fatalf("daemon did not stop cleanly: %v: %s", err, daemonLog.String())
+	if err := <-daemon.exited; err != nil {
+		t.Fatalf("daemon did not stop cleanly: %v: %s", err, daemon.log.String())
 	}
-	stopped = true
 	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
 		t.Fatalf("daemon left its control socket behind: %v", err)
 	}
@@ -182,28 +144,11 @@ func TestGuestDaemonControl(t *testing.T) {
 }
 
 func TestGuestDaemonAbruptRestart(t *testing.T) {
-	runID := os.Getenv("BOOMERANGZ_CONTROL_GUEST_RUN")
-	if runID == "" {
-		t.Fatal("BOOMERANGZ_CONTROL_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
-	}
-	binary := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CLI")
-	configPath := os.Getenv("BOOMERANGZ_CONTROL_GUEST_CONFIG")
-	socket := os.Getenv("BOOMERANGZ_CONTROL_GUEST_SOCKET")
-	if binary == "" || configPath == "" || socket == "" {
-		t.Fatal("guest boomerangz executable, configuration, and socket paths are required")
-	}
-	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
-	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
-	if sourceDevice == "" || destinationDevice == "" {
-		t.Fatal("source and destination test devices are required")
-	}
-	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, destinationDevice); err != nil {
-		t.Fatal(err)
-	}
+	binary, sourcePool, _ := guestCLI(t)
+	// Both daemons share this test's own configuration, so what they start
+	// with does not depend on which other tests ran before it.
+	configPath, dropInDir, _ := scratchConfig(t)
+	socket := controlSocket(configPath)
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
 		t.Fatal(err)
@@ -221,82 +166,59 @@ func TestGuestDaemonAbruptRestart(t *testing.T) {
 	zfstest.RegisterCleanup(t, source)
 	command("zfs", "set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x5m", source)
 
-	var firstLog bytes.Buffer
-	first := exec.CommandContext(t.Context(), binary, "daemon", "--config", configPath)
-	first.Stdout, first.Stderr = &firstLog, &firstLog
-	if err := first.Start(); err != nil {
-		t.Fatal(err)
-	}
-	firstStopped := false
-	t.Cleanup(func() {
-		if !firstStopped && first.Process != nil {
-			_ = first.Process.Kill()
-			_ = first.Wait()
-		}
-	})
-	waitFor := func(description string, log *bytes.Buffer, check func() bool) {
-		t.Helper()
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			if check() {
-				return
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		t.Fatalf("timed out waiting for %s; daemon log: %s", description, log.String())
-	}
-	firstSnapshots := 0
-	waitFor("initial snapshot before abrupt stop", &firstLog, func() bool {
-		state, inspectErr := direct.InspectState(t.Context(), source, false)
-		if inspectErr != nil {
-			return false
-		}
-		firstSnapshots = len(lifecycle.Snapshots(state, source))
-		return firstSnapshots > 0
-	})
-	if err := first.Process.Kill(); err != nil {
-		t.Fatal(err)
-	}
-	if err := first.Wait(); err == nil {
-		t.Fatal("abruptly stopped daemon exited successfully")
-	}
-	firstStopped = true
-	if info, err := os.Lstat(socket); err != nil || info.Mode()&os.ModeSocket == 0 {
-		t.Fatalf("abrupt stop did not leave the expected stale socket: %v", err)
-	}
-
-	var secondLog bytes.Buffer
-	second := exec.CommandContext(t.Context(), binary, "daemon", "--config", configPath)
-	second.Stdout, second.Stderr = &secondLog, &secondLog
-	if err := second.Start(); err != nil {
-		t.Fatal(err)
-	}
-	secondStopped := false
-	t.Cleanup(func() {
-		if !secondStopped && second.Process != nil {
-			_ = second.Process.Kill()
-			_ = second.Wait()
-		}
-	})
-	waitFor("control socket after restart", &secondLog, func() bool {
-		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
-		return statusErr == nil && bytes.Contains(output, []byte(source))
-	})
-	time.Sleep(500 * time.Millisecond)
+	snapshotJob := "snapshot:" + source
+	first := startGuestDaemon(t, binary, configPath, dropInDir, "")
+	initial, _ := first.log.Outcome(t, 30*time.Second, 0, snapshotJob, "succeeded")
 	state, err := direct.InspectState(t.Context(), source, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count := len(lifecycle.Snapshots(state, source)); count != firstSnapshots {
-		t.Fatalf("restart created a duplicate snapshot: before=%d after=%d", firstSnapshots, count)
+	firstSnapshots := lifecycle.Snapshots(state, source)
+	if !slices.ContainsFunc(firstSnapshots, func(snapshot lifecycle.Snapshot) bool { return snapshot.Name == initial.Snapshot }) {
+		t.Fatalf("the snapshot job reported creating %s, which the pool does not hold: %+v", initial.Snapshot, state.Objects)
 	}
-	if err := second.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := first.command.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	if err := second.Wait(); err != nil {
-		t.Fatalf("restarted daemon did not stop cleanly: %v: %s", err, secondLog.String())
+	if err := <-first.exited; err == nil {
+		t.Fatal("abruptly stopped daemon exited successfully")
 	}
-	secondStopped = true
+	if info, err := os.Lstat(socket); err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("abrupt stop did not leave the expected stale socket: %v", err)
+	}
+
+	// The restarted daemon's first scan makes the root due at once, so its
+	// snapshot job always runs. With the first daemon's snapshot adopted, that
+	// snapshot sets a later deadline and the job ends scheduled naming it; a
+	// restart that lost track of it would create a duplicate and end
+	// succeeded. The job's first outcome is the answer, rather than a count
+	// taken after a guessed delay.
+	second := startGuestDaemon(t, binary, configPath, dropInDir, "")
+	restarted, _ := second.log.Ended(t, 30*time.Second, 0, snapshotJob)
+	if restarted.State == "succeeded" {
+		t.Fatalf("restart created a duplicate snapshot %s beside %s\n%s", restarted.Snapshot, initial.Snapshot, second.log.Describe())
+	}
+	if restarted.State != "scheduled" || restarted.Reason != "existing owned snapshot sets the next deadline" || restarted.Snapshot != initial.Snapshot {
+		t.Fatalf("the restarted daemon did not take its deadline from %s: %+v\n%s", initial.Snapshot, restarted, second.log.Describe())
+	}
+	state, err = direct.InspectState(t.Context(), source, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := len(lifecycle.Snapshots(state, source)); count != len(firstSnapshots) {
+		t.Fatalf("restart created a duplicate snapshot: before=%d after=%d", len(firstSnapshots), count)
+	}
+	// The job ran, so the restarted daemon had started and replaced the stale
+	// socket; one read shows it serving the root it scheduled.
+	if output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath, "--config-dir", dropInDir).CombinedOutput(); statusErr != nil || !bytes.Contains(output, []byte(source)) {
+		t.Fatalf("the restarted daemon does not serve status listing %s: %v: %s", source, statusErr, output)
+	}
+	if err := second.command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second.exited; err != nil {
+		t.Fatalf("restarted daemon did not stop cleanly: %v: %s", err, second.log.String())
+	}
 	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
 		t.Fatalf("restarted daemon left its control socket behind: %v", err)
 	}

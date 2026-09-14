@@ -44,10 +44,11 @@ func terminalWidth(writer io.Writer) (bool, int) {
 	return true, width
 }
 
-func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential string, watch, useJSON bool, interval time.Duration) error {
-	if interval < 100*time.Millisecond || interval > time.Hour {
-		return fmt.Errorf("status interval must be between 100ms and 1h")
-	}
+// watchTailLength is how many recent transitions an interactive watch shows
+// under the status table.
+const watchTailLength = 10
+
+func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential string, watch, useJSON bool) error {
 	client, err := controlClient(ctx, cfg, credential)
 	if err != nil {
 		return err
@@ -65,11 +66,14 @@ func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential
 		}
 		return statusui.JSON(out, response.GetStatus())
 	}
-	stream, err := client.Status.WatchStatus(ctx, &controlrpc.WatchStatusRequest{IntervalMilliseconds: uint32(interval.Milliseconds())})
+	stream, err := client.Status.WatchStatus(ctx, &controlrpc.WatchStatusRequest{})
 	if err != nil {
 		return err
 	}
+	tail := statusui.NewTail(watchTailLength)
 	for {
+		// A watch that fell behind ends with an error here rather than
+		// continuing with a gap, and the command exits non-zero.
 		response, receiveErr := stream.Recv()
 		if receiveErr != nil {
 			if errors.Is(receiveErr, io.EOF) || ctx.Err() != nil {
@@ -78,6 +82,7 @@ func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential
 			return receiveErr
 		}
 		if interactive {
+			tail.Add(response.GetTransitions())
 			if _, err := fmt.Fprint(out, "\x1b[H\x1b[2J"); err != nil {
 				return err
 			}
@@ -85,7 +90,10 @@ func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential
 			if err := statusui.Terminal(out, response.GetStatus(), width); err != nil {
 				return err
 			}
-		} else if err := statusui.JSON(out, response.GetStatus()); err != nil {
+			if err := tail.Terminal(out, width); err != nil {
+				return err
+			}
+		} else if err := statusui.WatchJSON(out, response); err != nil {
 			return err
 		}
 	}

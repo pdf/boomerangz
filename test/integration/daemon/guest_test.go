@@ -22,6 +22,7 @@ import (
 	"github.com/pdf/boomerangz/internal/testutil/zfstest"
 	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
+	"github.com/pdf/boomerangz/test/integration/internal/statuswait"
 )
 
 type sendInterval struct{ start, end int64 }
@@ -47,15 +48,24 @@ func (b *scopedDaemonBackend) GetLifecycleProperties(ctx context.Context) ([]zfs
 	return b.scoped(properties), err
 }
 
+// observedLocalStream records when each tracked send ran, and which snapshot
+// it sent, so a test can tie a send to the snapshot job that created it.
 type observedLocalStream struct {
 	delegate transfer.Stream
 	delay    time.Duration
 	tracked  map[string]bool
 	mu       sync.Mutex
-	interval []struct {
-		dataset string
-		sendInterval
-	}
+	changed  chan struct{} // closed and replaced on every recorded send
+	sends    []observedSend
+}
+
+type observedSend struct {
+	snapshot string
+	sendInterval
+}
+
+func newObservedLocalStream(delegate transfer.Stream, delay time.Duration, tracked map[string]bool) *observedLocalStream {
+	return &observedLocalStream{delegate: delegate, delay: delay, tracked: tracked, changed: make(chan struct{})}
 }
 
 func (s *observedLocalStream) Run(ctx context.Context, send zfs.SendOptions, receive zfs.ReceiveOptions, estimate zfs.Estimate, report func(zfs.Progress)) (zfs.Progress, error) {
@@ -72,81 +82,77 @@ func (s *observedLocalStream) Run(ctx context.Context, send zfs.SendOptions, rec
 	}
 	progress, err := s.delegate.Run(ctx, send, receive, estimate, report)
 	s.mu.Lock()
-	s.interval = append(s.interval, struct {
-		dataset string
-		sendInterval
-	}{dataset: send.Source, sendInterval: sendInterval{start: started, end: time.Now().UnixNano()}})
+	s.sends = append(s.sends, observedSend{snapshot: send.Snapshot, sendInterval: sendInterval{start: started, end: time.Now().UnixNano()}})
+	close(s.changed)
+	s.changed = make(chan struct{})
 	s.mu.Unlock()
 	return progress, err
 }
 
-func (s *observedLocalStream) reset() {
-	s.mu.Lock()
-	s.interval = nil
-	s.mu.Unlock()
-}
-
-func (s *observedLocalStream) snapshot() map[string]sendInterval {
+// recorded returns the sends recorded so far, and a channel closed on the
+// next one.
+func (s *observedLocalStream) recorded() ([]observedSend, <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	result := make(map[string]sendInterval, len(s.interval))
-	for _, interval := range s.interval {
-		if _, exists := result[interval.dataset]; !exists {
-			result[interval.dataset] = interval.sendInterval
-		}
-	}
-	return result
+	return slices.Clone(s.sends), s.changed
 }
 
-func waitForSendIntervals(t *testing.T, stream *observedLocalStream, runtime *daemon.Runtime, datasets []string) map[string]sendInterval {
+// waitForSends waits for each dataset's send of the snapshot its snapshot job
+// created at created[dataset], or of one its snapshot jobs created later,
+// which supersedes it, and returns when each ran.
+func waitForSends(t *testing.T, stream *observedLocalStream, waiter *statuswait.Waiter, created map[string]statuswait.Cursor) map[string]sendInterval {
 	t.Helper()
-	deadline := time.Now().Add(45 * time.Second)
-	for time.Now().Before(deadline) {
-		intervals := stream.snapshot()
-		complete := true
-		for _, dataset := range datasets {
-			if intervals[dataset].end == 0 {
-				complete = false
-				break
+	timeout := time.NewTimer(45 * time.Second)
+	defer timeout.Stop()
+	for {
+		sends, sent := stream.recorded()
+		delivered := waiter.Changed()
+		transitions := waiter.Transitions()
+		intervals := make(map[string]sendInterval, len(created))
+		for dataset, from := range created {
+			accepted := snapshotsCreated(transitions[from:], dataset)
+			if index := slices.IndexFunc(sends, func(send observedSend) bool { return slices.Contains(accepted, send.snapshot) }); index >= 0 {
+				intervals[dataset] = sends[index].sendInterval
 			}
 		}
-		if complete {
+		if len(intervals) == len(created) {
 			return intervals
 		}
-		time.Sleep(25 * time.Millisecond)
+		select {
+		case <-sent:
+		case <-delivered:
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for sends of %v, found %+v among %+v; transitions: %+v", created, intervals, sends, transitions)
+		}
 	}
-	t.Fatalf("timed out waiting for ZFS sends from %v: %+v", datasets, runtime.Status())
-	return nil
 }
 
 func sendIntervalsOverlap(a, b sendInterval) bool { return a.start < b.end && b.start < a.end }
 
-func waitForTransferSuccesses(t *testing.T, runtime *daemon.Runtime, jobs []string, after time.Time) {
+// waitForTransferred waits for job to succeed naming the snapshot dataset's
+// snapshot job created at created, or one it created later. A run that
+// succeeds naming an older snapshot found its target already holding that one
+// and is skipped; so are the outcomes in retried. Any other outcome fails the
+// wait at once.
+func waitForTransferred(t *testing.T, waiter *statuswait.Waiter, job, dataset string, created statuswait.Cursor, retried ...string) daemon.Event {
 	t.Helper()
-	deadline := time.Now().Add(45 * time.Second)
-	for time.Now().Before(deadline) {
-		latest := make(map[string]daemon.Event, len(jobs))
-		for _, event := range runtime.Status() {
-			if slices.Contains(jobs, event.Job) && event.At.After(after) {
-				latest[event.Job] = event
+	var landed daemon.Event
+	waiter.Until(t, job+" to transfer the snapshot created at transition "+strconv.Itoa(int(created)), 45*time.Second, created, func(transitions []daemon.Event) (bool, error) {
+		accepted := snapshotsCreated(transitions, dataset)
+		for _, event := range transitions {
+			switch {
+			case event.Job != job || statuswait.Running(event) || slices.Contains(retried, event.State):
+			case event.State == "succeeded" && slices.Contains(accepted, event.Snapshot):
+				landed = event
+				return true, nil
+			case event.State == "succeeded":
+			default:
+				return false, fmt.Errorf("%s ended %s carrying %q: %s", job, event.State, event.Snapshot, event.Reason)
 			}
 		}
-		succeeded := 0
-		for _, job := range jobs {
-			event := latest[job]
-			if event.State == "succeeded" {
-				succeeded++
-			}
-			if event.State == "failed" || event.State == "blocked" || event.State == "waiting-retry" {
-				t.Fatalf("transfer %s ended in %s: %s", job, event.State, event.Reason)
-			}
-		}
-		if succeeded == len(jobs) {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for completed transfers %v: %+v", jobs, runtime.Status())
+		return false, nil
+	})
+	return landed
 }
 
 // This test is opt-in and must run in the disposable guest, never on the host.
@@ -192,59 +198,73 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waiter := statuswait.New(t, runtime)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
-	waitFor := func(description string, check func() bool) {
+	// Each wait is for the outcome the behaviour is about, which names what it
+	// acted on. The pool is then read once and checked against those names,
+	// as far as the runs recorded before the read decide them.
+	sourceSnapshot, _ := createdSnapshot(t, waiter, 30*time.Second, 0, source)
+	childSnapshot, _ := createdSnapshot(t, waiter, 30*time.Second, 0, child)
+	requireSnapshotAgreesWithEvents(t, direct, waiter, source, sourceSnapshot)
+	requireSnapshotAgreesWithEvents(t, direct, waiter, child, childSnapshot)
+
+	// Disabling a dataset reconciles it inactive, which reports setting the
+	// marker once it has verified it. Retirement clears the marker, and is
+	// eligible only while the marker is present, so a read that misses the
+	// marker is a failure unless retirement had started by then, and
+	// retirement must then succeed.
+	requireInactiveMarker := func(t *testing.T, dataset string) {
 		t.Helper()
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			if check() {
-				return
-			}
-			time.Sleep(100 * time.Millisecond)
+		command("set", policy.Namespace+"enabled=off", dataset)
+		reconciled, _ := waiter.Outcome(t, 30*time.Second, 0, "inactive:"+dataset+":false", "succeeded")
+		if reconciled.Marker != "set" {
+			t.Fatalf("inactive reconciliation of %s reported marker action %q, want set", dataset, reconciled.Marker)
 		}
-		// The queue view says which job the daemon is actually on, which is
-		// the difference between "the behaviour is wrong" and "another
-		// dataset's work was ahead of this one".
-		t.Fatalf("timed out waiting for %s: %+v", description, runtime.Status())
+		state, inspectErr := direct.InspectState(t.Context(), dataset, false)
+		if inspectErr != nil {
+			t.Fatal(inspectErr)
+		}
+		settled := waiter.Settle(t, 30*time.Second)
+		if slices.ContainsFunc(state.Properties, func(property zfs.Property) bool {
+			return property.Dataset == dataset && property.Name == lifecycle.InactiveProperty && property.Source == zfs.SourceLocal
+		}) {
+			return
+		}
+		retire := "retire:" + dataset
+		if !slices.ContainsFunc(statuswait.Runs(waiter.Transitions()[:settled], retire), statuswait.Run.Started) {
+			t.Fatalf("inactive reconciliation of %s set its marker, but the marker was absent before retirement started; transitions: %+v", dataset, waiter.Transitions()[:settled])
+		}
+		waiter.Outcome(t, 30*time.Second, 0, retire, "succeeded", "waiting-retry")
 	}
-	waitFor("scheduled source and descendant snapshots", func() bool {
-		sourceState, sourceErr := direct.InspectState(t.Context(), source, false)
-		childState, childErr := direct.InspectState(t.Context(), child, false)
-		return sourceErr == nil && childErr == nil && len(lifecycle.Snapshots(sourceState, source)) == 1 && len(lifecycle.Snapshots(childState, child)) == 1
-	})
-	command("set", policy.Namespace+"enabled=off", child)
-	waitFor("independent descendant deactivation", func() bool {
-		state, inspectErr := direct.InspectState(t.Context(), child, false)
-		if inspectErr != nil {
-			return false
+	requireInactiveMarker(t, child)
+	requireInactiveMarker(t, source)
+
+	// Retirement destroys every owned snapshot of the source, so it names
+	// each one the source's snapshot jobs created and its prunes did not
+	// destroy. Every snapshot it names is then absent: a destroyed name does
+	// not come back.
+	retired, after := waiter.Outcome(t, 30*time.Second, 0, "retire:"+source, "succeeded", "waiting-retry")
+	if retired.DestroyedCount != len(retired.Destroyed) {
+		t.Fatalf("source retirement destroyed %d snapshots but named %d", retired.DestroyedCount, len(retired.Destroyed))
+	}
+	before := waiter.Transitions()[:after]
+	for _, snapshot := range snapshotsCreated(before, source) {
+		if !slices.Contains(retired.Destroyed, snapshot) && destructionOf(before, snapshot, "prune:"+source) == notDestroyed {
+			t.Fatalf("source retirement did not destroy %s, which no prune destroyed: %v", snapshot, retired.Destroyed)
 		}
-		for _, property := range state.Properties {
-			if property.Dataset == child && property.Name == lifecycle.InactiveProperty && property.Source == zfs.SourceLocal {
-				return true
-			}
+	}
+	sourceState, err := direct.InspectState(t.Context(), source, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, snapshot := range lifecycle.Snapshots(sourceState, source) {
+		if slices.Contains(retired.Destroyed, snapshot.Name) {
+			t.Fatalf("source retirement reported destroying %s, which remains", snapshot.Name)
 		}
-		return false
-	})
-	command("set", policy.Namespace+"enabled=off", source)
-	waitFor("inactive marker", func() bool {
-		state, inspectErr := direct.InspectState(t.Context(), source, false)
-		if inspectErr != nil {
-			return false
-		}
-		for _, property := range state.Properties {
-			if property.Dataset == source && property.Name == lifecycle.InactiveProperty && property.Source == zfs.SourceLocal {
-				return true
-			}
-		}
-		return false
-	})
-	waitFor("source retirement", func() bool {
-		sourceState, sourceErr := direct.InspectState(t.Context(), source, false)
-		return sourceErr == nil && len(lifecycle.Snapshots(sourceState, source)) == 0
-	})
+	}
 	cancel()
 	select {
 	case runErr := <-done:
@@ -303,11 +323,7 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	}
 	// Keep each acquired transfer lock observable without relying on fixture
 	// data volume, while delegating every stream to the real local ZFS pipeline.
-	observed := &observedLocalStream{
-		delegate: localStream,
-		delay:    2 * time.Second,
-		tracked:  map[string]bool{root: true, left: true, right: true},
-	}
+	observed := newObservedLocalStream(localStream, 2*time.Second, map[string]bool{root: true, left: true, right: true})
 	cfg := config.Defaults()
 	cfg.Daemon.ReconcileInterval.Duration = 100 * time.Millisecond
 	cfg.Daemon.ManagementWorkers = 3
@@ -322,41 +338,60 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	job := func(dataset string) string { return "local:" + dataset + ":" + target }
-	phase := time.Now().UTC()
+	waiter := statuswait.New(t, runtime)
 	go func() { done <- runtime.Run(ctx) }()
+
+	// Each phase names the snapshots it transfers: the ones its snapshot jobs
+	// report creating. Its sends and transfer outcomes are those that carry
+	// them, whatever else ran around them.
+	phase := func(t *testing.T, from statuswait.Cursor, datasets []string, retried ...string) map[string]sendInterval {
+		t.Helper()
+		created := make(map[string]statuswait.Cursor, len(datasets))
+		for _, dataset := range datasets {
+			_, started := waiter.Next(t, "a snapshot job for "+dataset, 45*time.Second, from, statuswait.Job("snapshot:"+dataset, "snapshotting"))
+			// A scheduled run found the deadline not yet due and is followed
+			// by the forced one.
+			_, after := createdSnapshot(t, waiter, 45*time.Second, started, dataset, "scheduled")
+			created[dataset] = after - 1
+		}
+		intervals := waitForSends(t, observed, waiter, created)
+		for _, dataset := range datasets {
+			waitForTransferred(t, waiter, job(dataset), dataset, created[dataset], retried...)
+		}
+		return intervals
+	}
 
 	// All mapped destinations are initially absent, so the root must establish
 	// the shared hierarchy before either descendant starts. Once it has, the
-	// sibling setup streams no longer conflict with one another.
-	initial := waitForSendIntervals(t, observed, runtime, []string{root, left, right})
+	// sibling setup streams no longer conflict with one another. A descendant
+	// that runs first reports waiting-retry for the missing ancestor and is
+	// retried; once the destinations exist, nothing should wait.
+	initial := phase(t, 0, []string{root, left, right}, "waiting-retry")
 	if initial[root].end > initial[left].start || initial[root].end > initial[right].start {
 		t.Fatalf("initial destination setup overlapped hierarchy-conflicting sends: %+v", initial)
 	}
-	waitForTransferSuccesses(t, runtime, []string{job(root), job(left), job(right)}, phase)
 
-	observed.reset()
-	phase = time.Now().UTC()
+	// A triggered snapshot job starts after the trigger, so settling first
+	// finds the snapshot job the trigger ran rather than an earlier one.
+	from := waiter.Settle(t, 30*time.Second)
 	accepted, err := runtime.Trigger([]string{left, right})
 	if err != nil || len(accepted) != 2 {
 		t.Fatalf("trigger siblings=%v err=%v", accepted, err)
 	}
-	siblings := waitForSendIntervals(t, observed, runtime, []string{left, right})
+	siblings := phase(t, from, []string{left, right})
 	if !sendIntervalsOverlap(siblings[left], siblings[right]) {
 		t.Fatalf("existing sibling destinations did not send concurrently: %+v", siblings)
 	}
-	waitForTransferSuccesses(t, runtime, []string{job(left), job(right)}, phase)
 
-	observed.reset()
-	phase = time.Now().UTC()
+	from = waiter.Settle(t, 30*time.Second)
 	accepted, err = runtime.Trigger([]string{root, left})
 	if err != nil || len(accepted) != 2 {
 		t.Fatalf("trigger ancestor pair=%v err=%v", accepted, err)
 	}
-	ancestorPair := waitForSendIntervals(t, observed, runtime, []string{root, left})
+	ancestorPair := phase(t, from, []string{root, left})
 	if sendIntervalsOverlap(ancestorPair[root], ancestorPair[left]) {
 		t.Fatalf("ancestor and descendant destinations sent concurrently: %+v", ancestorPair)
 	}
-	waitForTransferSuccesses(t, runtime, []string{job(root), job(left)}, phase)
 
 	cancel()
 	select {
@@ -433,75 +468,81 @@ func TestGuestRemoteOutageReconnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waiter := statuswait.New(t, runtime)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
 	remoteJob := "remote:" + source + ":home"
-	waitForEvent := func(state string, timeout time.Duration) daemon.Event {
-		t.Helper()
-		deadline := time.Now().Add(timeout)
-		for time.Now().Before(deadline) {
-			for _, event := range runtime.Status() {
-				if event.Job == remoteJob && event.State == state {
-					return event
-				}
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		t.Fatalf("timed out waiting for remote state %q: %+v", state, runtime.Status())
-		return daemon.Event{}
-	}
-	failure := waitForEvent("waiting-retry", 30*time.Second)
+	snapshotJob := "snapshot:" + source
+	failure, afterFailure := waiter.Outcome(t, 30*time.Second, 0, remoteJob, "waiting-retry")
 	if failure.Reason == "" {
 		t.Fatal("outage did not retain its transport failure reason")
 	}
-	initialName := ""
-	initialDeadline := time.Now().Add(30 * time.Second)
-	for initialName == "" {
+	// An attempt names the pending snapshot it carried, which a snapshot job
+	// of this dataset created. A run discovery queued when the snapshot first
+	// appeared can start before the snapshot job has protected it, and then
+	// carries none.
+	if failure.Snapshot != "" {
+		waitForCreation(t, waiter, 30*time.Second, 0, source, failure.Snapshot)
+	}
+
+	// requireHeld reads the source once and requires snapshot to hold a
+	// pending reference for the target. A later snapshot job coalescing
+	// supersedes the reference and may release it, so the requirement holds
+	// only while no snapshot job after the one that created snapshot had
+	// started before the read. No transfer can release it during the outage,
+	// and the events must agree.
+	requireHeld := func(t *testing.T, snapshot string, created statuswait.Cursor) {
+		t.Helper()
 		state, inspectErr := direct.InspectState(t.Context(), source, true)
-		if inspectErr == nil {
-			lineage, authorityErr := lifecycle.RootAuthority(state, source, "abcdefab-cdef-4abc-8def-abcdefabcdef")
-			references, referenceErr := lifecycle.References(state, source, lineage)
-			for _, reference := range references {
-				snapshot := reference.SnapshotName(source)
-				if authorityErr == nil && referenceErr == nil && reference.Target == failure.Target && slices.Contains(state.Holds[snapshot], reference.HoldName()) {
-					initialName = snapshot
-				}
-			}
+		if inspectErr != nil {
+			t.Fatal(inspectErr)
 		}
-		if time.Now().After(initialDeadline) {
-			t.Fatalf("timed out waiting for the initial pending snapshot hold: %+v", runtime.Status())
+		settled := waiter.Settle(t, 30*time.Second)
+		recorded := waiter.Transitions()[:settled]
+		if slices.ContainsFunc(recorded, statuswait.Job(remoteJob, "succeeded")) {
+			t.Fatalf("a transfer succeeded during the outage; transitions: %+v", recorded)
 		}
-		if initialName == "" {
-			time.Sleep(100 * time.Millisecond)
+		if slices.ContainsFunc(statuswait.Runs(recorded[created:], snapshotJob), func(run statuswait.Run) bool {
+			// A run that found the deadline not yet due touched no holds.
+			outcome, ended := run.Outcome()
+			return run.Started() && (!ended || outcome.State != "scheduled")
+		}) {
+			return
+		}
+		lineage, authorityErr := lifecycle.RootAuthority(state, source, "abcdefab-cdef-4abc-8def-abcdefabcdef")
+		if authorityErr != nil {
+			t.Fatal(authorityErr)
+		}
+		references, referenceErr := lifecycle.References(state, source, lineage)
+		if referenceErr != nil {
+			t.Fatal(referenceErr)
+		}
+		if !slices.ContainsFunc(references, func(reference lifecycle.Reference) bool {
+			return reference.Target == failure.Target && reference.SnapshotName(source) == snapshot && slices.Contains(state.Holds[snapshot], reference.HoldName())
+		}) {
+			t.Fatalf("%s holds no pending reference for %s, and no later snapshot job had started", snapshot, failure.Target)
 		}
 	}
-	coalesceDeadline := time.Now().Add(90 * time.Second)
-	for {
-		state, inspectErr := direct.InspectState(t.Context(), source, true)
-		if inspectErr == nil {
-			lineage, authorityErr := lifecycle.RootAuthority(state, source, "abcdefab-cdef-4abc-8def-abcdefabcdef")
-			references, referenceErr := lifecycle.References(state, source, lineage)
-			if authorityErr == nil && referenceErr == nil && slices.ContainsFunc(references, func(reference lifecycle.Reference) bool {
-				snapshot := reference.SnapshotName(source)
-				return reference.Target == failure.Target && snapshot != initialName && slices.Contains(state.Holds[snapshot], reference.HoldName())
-			}) {
-				break
-			}
-		}
-		if time.Now().After(coalesceDeadline) {
-			t.Fatalf("timed out waiting for a newer coalesced snapshot hold: %+v", runtime.Status())
-		}
-		time.Sleep(100 * time.Millisecond)
+	initial, afterInitial := createdSnapshot(t, waiter, 30*time.Second, 0, source)
+	requireHeld(t, initial, afterInitial)
+	// A snapshot run that finds the deadline not yet due is scheduled again.
+	newer, afterNewer := createdSnapshot(t, waiter, 90*time.Second, afterInitial, source, "scheduled")
+	if newer == initial {
+		t.Fatalf("two snapshot jobs reported creating the same snapshot %s", newer)
 	}
+	requireHeld(t, newer, afterNewer)
 	if _, err := fmt.Fprintln(os.Stdout, "BOOMERANGZ_REMOTE_OUTAGE_OBSERVED"); err != nil {
 		t.Fatal(err)
 	}
-	success := waitForEvent("succeeded", 3*time.Minute)
+	success, _ := waiter.Outcome(t, 3*time.Minute, afterFailure, remoteJob, "succeeded", "waiting-retry")
 	if success.Target == "" {
 		t.Fatal("reconnected transfer did not retain canonical target identity")
 	}
+	// The reconnected transfer lands the newest coalesced snapshot: the newer
+	// one or a snapshot created after it.
+	waitForCreation(t, waiter, 30*time.Second, afterInitial, source, success.Snapshot)
 	cancel()
 	select {
 	case runErr := <-done:

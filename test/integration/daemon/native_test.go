@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/testutil/zfstest"
 	"github.com/pdf/boomerangz/internal/zfs"
+	"github.com/pdf/boomerangz/test/integration/internal/statuswait"
 )
 
 const guestInstallation = "abcdefab-cdef-4abc-8def-abcdefabcdef"
@@ -56,14 +58,16 @@ func zfsCommand(t *testing.T, args ...string) {
 }
 
 // runDaemon starts a runtime and returns it already serving, stopping it when
-// the test that owns the state ends.
-func runDaemon(t *testing.T, cfg config.Config, backend *scopedDaemonBackend) *daemon.Runtime {
+// the test that owns the state ends. The waiter subscribes before the runtime
+// runs, so it observes every transition the runtime records.
+func runDaemon(t *testing.T, cfg config.Config, backend *scopedDaemonBackend) (*daemon.Runtime, *statuswait.Waiter) {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	runtime, err := daemon.New(cfg, backend, guestInstallation, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
+	waiter := statuswait.New(t, runtime)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
@@ -78,22 +82,7 @@ func runDaemon(t *testing.T, cfg config.Config, backend *scopedDaemonBackend) *d
 			t.Error("daemon did not shut down")
 		}
 	})
-	return runtime
-}
-
-func waitForJobState(t *testing.T, runtime *daemon.Runtime, job, state string, timeout time.Duration) daemon.Event {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		for _, event := range runtime.Status() {
-			if event.Job == job && event.State == state {
-				return event
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s to reach %q: %+v", job, state, runtime.Status())
-	return daemon.Event{}
+	return runtime, waiter
 }
 
 // freePort reserves and releases a loopback port. The pairing bundle has to
@@ -101,7 +90,7 @@ func waitForJobState(t *testing.T, runtime *daemon.Runtime, job, state string, t
 // arrangement the backoff test needs.
 func freePort(t *testing.T) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,12 +177,16 @@ func TestGuestDaemonNativeReplication(t *testing.T) {
 	cfg.Paths.CredentialsDir = credentialsDir
 	cfg.Paths.SocketPath = filepath.Join(pkiDir, "daemon.sock")
 	cfg.Remotes["backup"] = config.RemoteConfig{Transport: "native", Credential: credential, Root: destinationRoot}
-	runtime := runDaemon(t, cfg, &scopedDaemonBackend{Direct: direct, root: source})
+	_, waiter := runDaemon(t, cfg, &scopedDaemonBackend{Direct: direct, root: source})
 
-	success := waitForJobState(t, runtime, "remote:"+source+":backup", "succeeded", 3*time.Minute)
+	success, _ := waiter.Outcome(t, 3*time.Minute, 0, "remote:"+source+":backup", "succeeded")
 	if !strings.HasPrefix(success.Target, "native://") || !strings.HasSuffix(success.Target, "/"+destinationRoot) {
 		t.Fatalf("native transfer did not record a canonical native target: %q", success.Target)
 	}
+	if success.Destination != destinationRoot {
+		t.Fatalf("native transfer landed on %q, want %s", success.Destination, destinationRoot)
+	}
+	waitForCreation(t, waiter, 30*time.Second, 0, source, success.Snapshot)
 	identity, err := direct.InspectDatasetIdentity(t.Context(), destinationRoot)
 	if err != nil {
 		t.Fatalf("destination was not created by the native receive: %v", err)
@@ -205,8 +198,9 @@ func TestGuestDaemonNativeReplication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(state.Objects) == 0 {
-		t.Fatal("destination carries no received snapshot")
+	_, component, _ := strings.Cut(success.Snapshot, "@")
+	if !slices.ContainsFunc(state.Objects, func(object zfs.Object) bool { return object.Name == destinationRoot+"@"+component }) {
+		t.Fatalf("destination does not carry %s, which the transfer reported landing: %+v", success.Snapshot, state.Objects)
 	}
 	t.Logf("daemon replicated %s to %s over %s", source, destinationRoot, success.Target)
 }
@@ -250,35 +244,39 @@ func TestGuestDaemonPruneJob(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Daemon.ReconcileInterval.Duration = 200 * time.Millisecond
 	cfg.Daemon.ManagementWorkers = 2
-	runtime := runDaemon(t, cfg, &scopedDaemonBackend{Direct: direct, root: source})
+	_, waiter := runDaemon(t, cfg, &scopedDaemonBackend{Direct: direct, root: source})
 
-	waitForJobState(t, runtime, "snapshot:"+source, "succeeded", 60*time.Second)
-	waitForJobState(t, runtime, "prune:"+source, "succeeded", 60*time.Second)
-
+	// The prune a snapshot job queues names what it destroyed: the expired
+	// snapshots and not the one the snapshot job created, which the grid
+	// keeps. The pool is read once against those names.
+	kept, _ := createdSnapshot(t, waiter, 60*time.Second, 0, source)
+	pruned, _ := waiter.Outcome(t, 60*time.Second, 0, "prune:"+source, "succeeded")
+	if pruned.DestroyedCount != len(pruned.Destroyed) || slices.Contains(pruned.Destroyed, kept) {
+		t.Fatalf("prune destroyed %v (count %d), want the expired snapshots and not %s", pruned.Destroyed, pruned.DestroyedCount, kept)
+	}
+	for _, snapshot := range expired {
+		if !slices.Contains(pruned.Destroyed, snapshot) {
+			t.Fatalf("prune job succeeded without destroying %s outside the grid: %v", snapshot, pruned.Destroyed)
+		}
+	}
 	state, err := direct.InspectState(t.Context(), source, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	remaining := make(map[string]bool)
 	for _, snapshot := range lifecycle.Snapshots(state, source) {
-		remaining[snapshot.Name] = true
-	}
-	for _, snapshot := range expired {
-		if remaining[snapshot] {
-			t.Fatalf("prune job succeeded but retained %s outside the grid: %v", snapshot, remaining)
+		if slices.Contains(pruned.Destroyed, snapshot.Name) {
+			t.Fatalf("prune reported destroying %s, which remains", snapshot.Name)
 		}
 	}
-	if len(remaining) != 1 {
-		t.Fatalf("prune retained %d snapshots, want the single in-grid one: %v", len(remaining), remaining)
-	}
+	requireSnapshotAgreesWithEvents(t, direct, waiter, source, kept)
 	t.Logf("prune job destroyed %d expired snapshots on %s", len(expired), source)
 }
 
 // TestGuestDaemonRemoteBackoff asserts the retry sequence between an outage
 // and its recovery, not just the endpoints. Every real attempt records its
 // transport failure as the reason, while the reconciler's early returns while
-// a backoff is still running record none, so counting reasoned events counts
-// attempts. The endpoint is named before anything binds it, then the listener
+// a backoff is still running record nothing, so each outcome of the job is an
+// attempt, counted from the subscription. The endpoint is named before anything binds it, then the listener
 // is started under that same name to close the sequence.
 func TestGuestDaemonRemoteBackoff(t *testing.T) {
 	sourcePool, destinationPool := guestPools(t)
@@ -308,24 +306,23 @@ func TestGuestDaemonRemoteBackoff(t *testing.T) {
 	cfg.Paths.CredentialsDir = credentialsDir
 	cfg.Paths.SocketPath = filepath.Join(pkiDir, "daemon.sock")
 	cfg.Remotes["backup"] = config.RemoteConfig{Transport: "native", Credential: credential, Root: destinationRoot}
-	runtime := runDaemon(t, cfg, &scopedDaemonBackend{Direct: direct, root: source})
+	_, waiter := runDaemon(t, cfg, &scopedDaemonBackend{Direct: direct, root: source})
 
 	job := "remote:" + source + ":backup"
 	attempts := make([]time.Time, 0, 3)
-	deadline := time.Now().Add(90 * time.Second)
-	for len(attempts) < 3 && time.Now().Before(deadline) {
-		for _, event := range runtime.Status() {
-			if event.Job != job || event.State != "waiting-retry" || event.Reason == "" {
-				continue
-			}
-			if len(attempts) == 0 || event.At.After(attempts[len(attempts)-1]) {
-				attempts = append(attempts, event.At)
-			}
+	var attempted statuswait.Cursor
+	for range 3 {
+		var attempt daemon.Event
+		attempt, attempted = waiter.Outcome(t, 90*time.Second, attempted, job, "waiting-retry")
+		if attempt.Reason == "" {
+			t.Fatalf("attempt %d reported waiting-retry without its transport failure", len(attempts)+1)
 		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if len(attempts) < 3 {
-		t.Fatalf("observed %d retried attempts in 90s, want 3: %+v", len(attempts), runtime.Status())
+		// An attempt names the pending snapshot it carried, if it carried
+		// one; see TestGuestRemoteOutageReconnection.
+		if attempt.Snapshot != "" {
+			waitForCreation(t, waiter, 30*time.Second, 0, source, attempt.Snapshot)
+		}
+		attempts = append(attempts, attempt.At)
 	}
 	first, second := attempts[1].Sub(attempts[0]), attempts[2].Sub(attempts[1])
 	// DefaultRetryPolicy is 5s doubling with 20% symmetric jitter. The bounds
@@ -352,10 +349,11 @@ func TestGuestDaemonRemoteBackoff(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = server.Close() })
 
-	success := waitForJobState(t, runtime, job, "succeeded", 3*time.Minute)
+	success, _ := waiter.Outcome(t, 3*time.Minute, attempted, job, "succeeded", "waiting-retry")
 	if success.Target == "" {
 		t.Fatal("recovered transfer did not retain canonical target identity")
 	}
+	waitForCreation(t, waiter, 30*time.Second, 0, source, success.Snapshot)
 	if _, err := direct.InspectDatasetIdentity(t.Context(), destinationRoot); err != nil {
 		t.Fatalf("recovered transfer did not create the destination: %v", err)
 	}

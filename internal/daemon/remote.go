@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"reflect"
 
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/control"
@@ -58,6 +59,35 @@ func (r *nativeRemote) Open(ctx context.Context) (openedRemote, error) {
 		return openedRemote{}, err
 	}
 	return openedRemote{mode: "native", executor: endpoint.Executor(), stream: endpoint.Stream(), close: endpoint.Close}, nil
+}
+
+// sameRemoteClients reports whether two sets of remote clients would reach the
+// same remotes the same way. Clients are compared by what they were built
+// from - an SSH remote's setting, a native remote's pairing bundle and root -
+// so a native credential file whose contents changed counts as a change even
+// when the configuration naming it did not.
+func sameRemoteClients(a, b map[string]remoteClient) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, left := range a {
+		switch left := left.(type) {
+		case *sshRemote:
+			right, ok := b[name].(*sshRemote)
+			if !ok || !reflect.DeepEqual(left.setting, right.setting) {
+				return false
+			}
+		case *nativeRemote:
+			right, ok := b[name].(*nativeRemote)
+			if !ok || !reflect.DeepEqual(*left, *right) {
+				return false
+			}
+		default:
+			// A client this cannot inspect is never assumed unchanged.
+			return false
+		}
+	}
+	return true
 }
 
 func buildRemoteClients(settings map[string]config.RemoteConfig, credentialsDir string) (map[string]remoteClient, error) {

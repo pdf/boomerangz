@@ -39,6 +39,115 @@ func JSON(writer io.Writer, snapshot *controlrpc.StatusSnapshot) error {
 	return json.NewEncoder(writer).Encode(normalized(snapshot))
 }
 
+type watchOutput struct {
+	output
+	Transitions []*controlrpc.JobStatus `json:"transitions"`
+}
+
+// WatchJSON writes one watch message as a stable JSON object followed by a
+// newline: the snapshot's fields, and "transitions", every transition since the
+// previous message in the order the daemon recorded them. Transitions are never
+// sorted, and the field is an empty array rather than absent when there are
+// none.
+func WatchJSON(writer io.Writer, response *controlrpc.WatchStatusResponse) error {
+	transitions := slices.Clone(response.GetTransitions())
+	if transitions == nil {
+		transitions = []*controlrpc.JobStatus{}
+	}
+	return json.NewEncoder(writer).Encode(watchOutput{output: normalized(response.GetStatus()), Transitions: transitions})
+}
+
+// Tail holds the most recent transitions a watch has received, oldest first.
+type Tail struct {
+	limit  int
+	events []*controlrpc.JobStatus
+}
+
+// NewTail returns a Tail that keeps at most limit transitions.
+func NewTail(limit int) *Tail {
+	return &Tail{limit: max(limit, 0)}
+}
+
+// Add appends transitions in the order received, discarding the oldest beyond
+// the limit.
+func (t *Tail) Add(transitions []*controlrpc.JobStatus) {
+	t.events = append(t.events, transitions...)
+	if excess := len(t.events) - t.limit; excess > 0 {
+		t.events = slices.Delete(t.events, 0, excess)
+	}
+}
+
+// Terminal writes the held transitions under a heading, oldest first, each
+// line cut to width. It writes nothing when none are held.
+func (t *Tail) Terminal(writer io.Writer, width int) error {
+	if len(t.events) == 0 {
+		return nil
+	}
+	if width <= 0 {
+		width = 80
+	}
+	if _, err := fmt.Fprintln(writer, "\nRECENT TRANSITIONS"); err != nil {
+		return err
+	}
+	var rows strings.Builder
+	table := newTable(&rows)
+	for _, event := range t.events {
+		at := "-"
+		if event.GetChangedUnixNano() != 0 {
+			at = time.Unix(0, event.GetChangedUnixNano()).UTC().Format(time.RFC3339)
+		}
+		detail := identitySummary(event)
+		if reason := event.GetReason(); reason != "" {
+			detail = strings.TrimSpace(detail + " " + reason)
+		}
+		if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", at, displayJobName(event.GetJob()), event.GetState(), detail); err != nil {
+			return err
+		}
+	}
+	if err := table.Flush(); err != nil {
+		return err
+	}
+	return writeCut(writer, rows.String(), width)
+}
+
+// identitySummary names what a transition acted on, as the key=value pairs
+// it sets, in a fixed order.
+func identitySummary(event *controlrpc.JobStatus) string {
+	var parts []string
+	for _, field := range []struct{ key, value string }{
+		{"snapshot", event.GetSnapshot()},
+		{"base", event.GetBase()},
+		{"mode", event.GetMode()},
+		{"destination", event.GetDestination()},
+		{"marker", event.GetMarker()},
+	} {
+		if field.value != "" {
+			parts = append(parts, field.key+"="+field.value)
+		}
+	}
+	if count := event.GetDestroyedCount(); count > 0 {
+		parts = append(parts, fmt.Sprintf("destroyed=%d", count))
+	}
+	if generation := event.GetConfigGeneration(); generation > 0 {
+		parts = append(parts, fmt.Sprintf("config_generation=%d", generation))
+	}
+	return strings.Join(parts, " ")
+}
+
+// writeCut writes each line of rows, trailing space removed and cut to width.
+func writeCut(writer io.Writer, rows string, width int) error {
+	for line := range strings.Lines(rows) {
+		line = strings.TrimRight(line, " \n")
+		if len(line) > width {
+			line = line[:width]
+		}
+		if _, err := fmt.Fprintln(writer, line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func bar(pending, capacity uint32, width int) string {
 	if width < 4 {
 		return ""
@@ -195,14 +304,8 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) 
 		if err := table.Flush(); err != nil {
 			return err
 		}
-		for line := range strings.Lines(rows.String()) {
-			line = strings.TrimSuffix(line, "\n")
-			if len(line) > width {
-				line = line[:width]
-			}
-			if _, err := fmt.Fprintln(writer, line); err != nil {
-				return err
-			}
+		if err := writeCut(writer, rows.String(), width); err != nil {
+			return err
 		}
 	}
 	return nil

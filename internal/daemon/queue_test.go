@@ -7,7 +7,7 @@ import (
 )
 
 func queueJob(id, group, scope string) Job {
-	return Job{ID: id, Group: group, Scope: scope, Run: func(context.Context) Outcome { return Outcome{} }}
+	return Job{RunID: nextRunID(), ID: id, Group: group, Scope: scope, Run: func(context.Context) Outcome { return Outcome{} }}
 }
 
 func TestFairQueueDeduplicatesBoundsAndRotatesGroups(t *testing.T) {
@@ -48,7 +48,7 @@ func TestFairQueueRemovesDeactivatedScope(t *testing.T) {
 	job.Drop = func() { dropped++ }
 	_, _ = queue.Offer(job)
 	_, _ = queue.Offer(queueJob("b", "b", "other"))
-	if removed := queue.RemoveScope("root"); removed != 1 || dropped != 1 {
+	if removed := queue.RemoveScope("root", "dataset deactivated"); removed != 1 || dropped != 1 {
 		t.Fatalf("removed=%d dropped=%d", removed, dropped)
 	}
 	remaining, ok := queue.Pop(t.Context())

@@ -101,11 +101,12 @@ func (x *GetStatusResponse) GetStatus() *StatusSnapshot {
 	return nil
 }
 
+// A watch sends a message whenever the daemon's status changes, and at no other
+// time. Its first message is the status at registration.
 type WatchStatusRequest struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	IntervalMilliseconds uint32                 `protobuf:"varint,1,opt,name=interval_milliseconds,json=intervalMilliseconds,proto3" json:"interval_milliseconds,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WatchStatusRequest) Reset() {
@@ -138,16 +139,13 @@ func (*WatchStatusRequest) Descriptor() ([]byte, []int) {
 	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *WatchStatusRequest) GetIntervalMilliseconds() uint32 {
-	if x != nil {
-		return x.IntervalMilliseconds
-	}
-	return 0
-}
-
 type WatchStatusResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Status        *StatusSnapshot        `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Status *StatusSnapshot        `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	// Every job-state transition since the previous message, in the order the
+	// daemon recorded them. The first message carries none. Progress fields are
+	// unset: a transition is a change of state, not a sample.
+	Transitions   []*JobStatus `protobuf:"bytes,2,rep,name=transitions,proto3" json:"transitions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -185,6 +183,13 @@ func (*WatchStatusResponse) Descriptor() ([]byte, []int) {
 func (x *WatchStatusResponse) GetStatus() *StatusSnapshot {
 	if x != nil {
 		return x.Status
+	}
+	return nil
+}
+
+func (x *WatchStatusResponse) GetTransitions() []*JobStatus {
+	if x != nil {
+		return x.Transitions
 	}
 	return nil
 }
@@ -273,8 +278,35 @@ type JobStatus struct {
 	BytesPerSecond  float64                `protobuf:"fixed64,12,opt,name=bytes_per_second,json=bytesPerSecond,proto3" json:"bytes_per_second,omitempty"`
 	EtaNanoseconds  int64                  `protobuf:"varint,13,opt,name=eta_nanoseconds,json=etaNanoseconds,proto3" json:"eta_nanoseconds,omitempty"`
 	TotalKnown      bool                   `protobuf:"varint,14,opt,name=total_known,json=totalKnown,proto3" json:"total_known,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// run_id is shared by every transition of one run of a job, and is unique
+	// within one daemon process.
+	RunId uint64 `protobuf:"varint,15,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// The identity fields are each set only on the transitions they describe.
+	// snapshot: a snapshot job's created snapshot (succeeded) or the owned
+	// snapshot that set its deadline (scheduled); a transfer's source snapshot
+	// (sending), the snapshot now on the destination (succeeded), or the
+	// pending snapshot a run carried (waiting-retry, blocked, cancelled; not
+	// cancelled while still queued).
+	Snapshot string `protobuf:"bytes,16,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
+	// base: the snapshot or bookmark an incremental transfer is based on
+	// (sending).
+	Base string `protobuf:"bytes,17,opt,name=base,proto3" json:"base,omitempty"`
+	// mode: full, incremental-latest, incremental-all, or resume (sending).
+	Mode string `protobuf:"bytes,18,opt,name=mode,proto3" json:"mode,omitempty"`
+	// destination: the destination dataset of a transfer (succeeded).
+	Destination string `protobuf:"bytes,19,opt,name=destination,proto3" json:"destination,omitempty"`
+	// marker: set, cleared, or none, for an inactive reconciliation
+	// (succeeded).
+	Marker string `protobuf:"bytes,20,opt,name=marker,proto3" json:"marker,omitempty"`
+	// destroyed: at most 64 snapshots a prune or retirement destroyed
+	// (succeeded); destroyed_count is the total.
+	Destroyed      []string `protobuf:"bytes,21,rep,name=destroyed,proto3" json:"destroyed,omitempty"`
+	DestroyedCount uint32   `protobuf:"varint,22,opt,name=destroyed_count,json=destroyedCount,proto3" json:"destroyed_count,omitempty"`
+	// config_generation: the generation a configuration reload published
+	// (succeeded).
+	ConfigGeneration uint64 `protobuf:"varint,23,opt,name=config_generation,json=configGeneration,proto3" json:"config_generation,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *JobStatus) Reset() {
@@ -403,6 +435,69 @@ func (x *JobStatus) GetTotalKnown() bool {
 		return x.TotalKnown
 	}
 	return false
+}
+
+func (x *JobStatus) GetRunId() uint64 {
+	if x != nil {
+		return x.RunId
+	}
+	return 0
+}
+
+func (x *JobStatus) GetSnapshot() string {
+	if x != nil {
+		return x.Snapshot
+	}
+	return ""
+}
+
+func (x *JobStatus) GetBase() string {
+	if x != nil {
+		return x.Base
+	}
+	return ""
+}
+
+func (x *JobStatus) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *JobStatus) GetDestination() string {
+	if x != nil {
+		return x.Destination
+	}
+	return ""
+}
+
+func (x *JobStatus) GetMarker() string {
+	if x != nil {
+		return x.Marker
+	}
+	return ""
+}
+
+func (x *JobStatus) GetDestroyed() []string {
+	if x != nil {
+		return x.Destroyed
+	}
+	return nil
+}
+
+func (x *JobStatus) GetDestroyedCount() uint32 {
+	if x != nil {
+		return x.DestroyedCount
+	}
+	return 0
+}
+
+func (x *JobStatus) GetConfigGeneration() uint64 {
+	if x != nil {
+		return x.ConfigGeneration
+	}
+	return 0
 }
 
 type DatasetStatus struct {
@@ -1212,16 +1307,16 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"#boomerangz/control/v1/control.proto\x12\x15boomerangz.control.v1\"\x12\n" +
 	"\x10GetStatusRequest\"R\n" +
 	"\x11GetStatusResponse\x12=\n" +
-	"\x06status\x18\x01 \x01(\v2%.boomerangz.control.v1.StatusSnapshotR\x06status\"I\n" +
-	"\x12WatchStatusRequest\x123\n" +
-	"\x15interval_milliseconds\x18\x01 \x01(\rR\x14intervalMilliseconds\"T\n" +
+	"\x06status\x18\x01 \x01(\v2%.boomerangz.control.v1.StatusSnapshotR\x06status\"1\n" +
+	"\x12WatchStatusRequestJ\x04\b\x01\x10\x02R\x15interval_milliseconds\"\x98\x01\n" +
 	"\x13WatchStatusResponse\x12=\n" +
-	"\x06status\x18\x01 \x01(\v2%.boomerangz.control.v1.StatusSnapshotR\x06status\"p\n" +
+	"\x06status\x18\x01 \x01(\v2%.boomerangz.control.v1.StatusSnapshotR\x06status\x12B\n" +
+	"\vtransitions\x18\x02 \x03(\v2 .boomerangz.control.v1.JobStatusR\vtransitions\"p\n" +
 	"\vQueueStatus\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\rR\bcapacity\x12\x18\n" +
 	"\apending\x18\x03 \x01(\rR\apending\x12\x17\n" +
-	"\ajob_ids\x18\x04 \x03(\tR\x06jobIds\"\xa9\x03\n" +
+	"\ajob_ids\x18\x04 \x03(\tR\x06jobIds\"\xb2\x05\n" +
 	"\tJobStatus\x12\x12\n" +
 	"\x04pool\x18\x01 \x01(\tR\x04pool\x12\x10\n" +
 	"\x03job\x18\x02 \x01(\tR\x03job\x12\x18\n" +
@@ -1239,7 +1334,16 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"\x10bytes_per_second\x18\f \x01(\x01R\x0ebytesPerSecond\x12'\n" +
 	"\x0feta_nanoseconds\x18\r \x01(\x03R\x0eetaNanoseconds\x12\x1f\n" +
 	"\vtotal_known\x18\x0e \x01(\bR\n" +
-	"totalKnown\"\x90\x01\n" +
+	"totalKnown\x12\x15\n" +
+	"\x06run_id\x18\x0f \x01(\x04R\x05runId\x12\x1a\n" +
+	"\bsnapshot\x18\x10 \x01(\tR\bsnapshot\x12\x12\n" +
+	"\x04base\x18\x11 \x01(\tR\x04base\x12\x12\n" +
+	"\x04mode\x18\x12 \x01(\tR\x04mode\x12 \n" +
+	"\vdestination\x18\x13 \x01(\tR\vdestination\x12\x16\n" +
+	"\x06marker\x18\x14 \x01(\tR\x06marker\x12\x1c\n" +
+	"\tdestroyed\x18\x15 \x03(\tR\tdestroyed\x12'\n" +
+	"\x0fdestroyed_count\x18\x16 \x01(\rR\x0edestroyedCount\x12+\n" +
+	"\x11config_generation\x18\x17 \x01(\x04R\x10configGeneration\"\x90\x01\n" +
 	"\rDatasetStatus\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x12\x1c\n" +
@@ -1345,31 +1449,32 @@ var file_boomerangz_control_v1_control_proto_goTypes = []any{
 var file_boomerangz_control_v1_control_proto_depIdxs = []int32{
 	7,  // 0: boomerangz.control.v1.GetStatusResponse.status:type_name -> boomerangz.control.v1.StatusSnapshot
 	7,  // 1: boomerangz.control.v1.WatchStatusResponse.status:type_name -> boomerangz.control.v1.StatusSnapshot
-	6,  // 2: boomerangz.control.v1.StatusSnapshot.datasets:type_name -> boomerangz.control.v1.DatasetStatus
-	4,  // 3: boomerangz.control.v1.StatusSnapshot.queues:type_name -> boomerangz.control.v1.QueueStatus
-	5,  // 4: boomerangz.control.v1.StatusSnapshot.jobs:type_name -> boomerangz.control.v1.JobStatus
-	6,  // 5: boomerangz.control.v1.ListDatasetsResponse.datasets:type_name -> boomerangz.control.v1.DatasetStatus
-	17, // 6: boomerangz.control.v1.CleanPlan.actions:type_name -> boomerangz.control.v1.CleanAction
-	18, // 7: boomerangz.control.v1.CleanResponse.plans:type_name -> boomerangz.control.v1.CleanPlan
-	0,  // 8: boomerangz.control.v1.StatusService.GetStatus:input_type -> boomerangz.control.v1.GetStatusRequest
-	2,  // 9: boomerangz.control.v1.StatusService.WatchStatus:input_type -> boomerangz.control.v1.WatchStatusRequest
-	8,  // 10: boomerangz.control.v1.StatusService.ListDatasets:input_type -> boomerangz.control.v1.ListDatasetsRequest
-	10, // 11: boomerangz.control.v1.ControlService.Trigger:input_type -> boomerangz.control.v1.TriggerRequest
-	11, // 12: boomerangz.control.v1.ControlService.Reconcile:input_type -> boomerangz.control.v1.ReconcileRequest
-	14, // 13: boomerangz.control.v1.ControlService.Reload:input_type -> boomerangz.control.v1.ReloadRequest
-	16, // 14: boomerangz.control.v1.ControlService.Clean:input_type -> boomerangz.control.v1.CleanRequest
-	1,  // 15: boomerangz.control.v1.StatusService.GetStatus:output_type -> boomerangz.control.v1.GetStatusResponse
-	3,  // 16: boomerangz.control.v1.StatusService.WatchStatus:output_type -> boomerangz.control.v1.WatchStatusResponse
-	9,  // 17: boomerangz.control.v1.StatusService.ListDatasets:output_type -> boomerangz.control.v1.ListDatasetsResponse
-	12, // 18: boomerangz.control.v1.ControlService.Trigger:output_type -> boomerangz.control.v1.TriggerResponse
-	13, // 19: boomerangz.control.v1.ControlService.Reconcile:output_type -> boomerangz.control.v1.ReconcileResponse
-	15, // 20: boomerangz.control.v1.ControlService.Reload:output_type -> boomerangz.control.v1.ReloadResponse
-	19, // 21: boomerangz.control.v1.ControlService.Clean:output_type -> boomerangz.control.v1.CleanResponse
-	15, // [15:22] is the sub-list for method output_type
-	8,  // [8:15] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	5,  // 2: boomerangz.control.v1.WatchStatusResponse.transitions:type_name -> boomerangz.control.v1.JobStatus
+	6,  // 3: boomerangz.control.v1.StatusSnapshot.datasets:type_name -> boomerangz.control.v1.DatasetStatus
+	4,  // 4: boomerangz.control.v1.StatusSnapshot.queues:type_name -> boomerangz.control.v1.QueueStatus
+	5,  // 5: boomerangz.control.v1.StatusSnapshot.jobs:type_name -> boomerangz.control.v1.JobStatus
+	6,  // 6: boomerangz.control.v1.ListDatasetsResponse.datasets:type_name -> boomerangz.control.v1.DatasetStatus
+	17, // 7: boomerangz.control.v1.CleanPlan.actions:type_name -> boomerangz.control.v1.CleanAction
+	18, // 8: boomerangz.control.v1.CleanResponse.plans:type_name -> boomerangz.control.v1.CleanPlan
+	0,  // 9: boomerangz.control.v1.StatusService.GetStatus:input_type -> boomerangz.control.v1.GetStatusRequest
+	2,  // 10: boomerangz.control.v1.StatusService.WatchStatus:input_type -> boomerangz.control.v1.WatchStatusRequest
+	8,  // 11: boomerangz.control.v1.StatusService.ListDatasets:input_type -> boomerangz.control.v1.ListDatasetsRequest
+	10, // 12: boomerangz.control.v1.ControlService.Trigger:input_type -> boomerangz.control.v1.TriggerRequest
+	11, // 13: boomerangz.control.v1.ControlService.Reconcile:input_type -> boomerangz.control.v1.ReconcileRequest
+	14, // 14: boomerangz.control.v1.ControlService.Reload:input_type -> boomerangz.control.v1.ReloadRequest
+	16, // 15: boomerangz.control.v1.ControlService.Clean:input_type -> boomerangz.control.v1.CleanRequest
+	1,  // 16: boomerangz.control.v1.StatusService.GetStatus:output_type -> boomerangz.control.v1.GetStatusResponse
+	3,  // 17: boomerangz.control.v1.StatusService.WatchStatus:output_type -> boomerangz.control.v1.WatchStatusResponse
+	9,  // 18: boomerangz.control.v1.StatusService.ListDatasets:output_type -> boomerangz.control.v1.ListDatasetsResponse
+	12, // 19: boomerangz.control.v1.ControlService.Trigger:output_type -> boomerangz.control.v1.TriggerResponse
+	13, // 20: boomerangz.control.v1.ControlService.Reconcile:output_type -> boomerangz.control.v1.ReconcileResponse
+	15, // 21: boomerangz.control.v1.ControlService.Reload:output_type -> boomerangz.control.v1.ReloadResponse
+	19, // 22: boomerangz.control.v1.ControlService.Clean:output_type -> boomerangz.control.v1.CleanResponse
+	16, // [16:23] is the sub-list for method output_type
+	9,  // [9:16] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_boomerangz_control_v1_control_proto_init() }

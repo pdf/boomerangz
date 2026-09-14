@@ -23,12 +23,20 @@ message GetStatusResponse {
   StatusSnapshot status = 1;
 }
 
+// A watch sends a message whenever the daemon's status changes, and at no other
+// time. Its first message is the status at registration.
 message WatchStatusRequest {
-  uint32 interval_milliseconds = 1;
+  // The watch interval was retired: every change is delivered as it happens.
+  reserved 1;
+  reserved "interval_milliseconds";
 }
 
 message WatchStatusResponse {
   StatusSnapshot status = 1;
+  // Every job-state transition since the previous message, in the order the
+  // daemon recorded them. The first message carries none. Progress fields are
+  // unset: a transition is a change of state, not a sample.
+  repeated JobStatus transitions = 2;
 }
 
 message QueueStatus {
@@ -53,6 +61,33 @@ message JobStatus {
   double bytes_per_second = 12;
   int64 eta_nanoseconds = 13;
   bool total_known = 14;
+  // run_id is shared by every transition of one run of a job, and is unique
+  // within one daemon process.
+  uint64 run_id = 15;
+  // The identity fields are each set only on the transitions they describe.
+  // snapshot: a snapshot job's created snapshot (succeeded) or the owned
+  // snapshot that set its deadline (scheduled); a transfer's source snapshot
+  // (sending), the snapshot now on the destination (succeeded), or the
+  // pending snapshot a run carried (waiting-retry, blocked, cancelled; not
+  // cancelled while still queued).
+  string snapshot = 16;
+  // base: the snapshot or bookmark an incremental transfer is based on
+  // (sending).
+  string base = 17;
+  // mode: full, incremental-latest, incremental-all, or resume (sending).
+  string mode = 18;
+  // destination: the destination dataset of a transfer (succeeded).
+  string destination = 19;
+  // marker: set, cleared, or none, for an inactive reconciliation
+  // (succeeded).
+  string marker = 20;
+  // destroyed: at most 64 snapshots a prune or retirement destroyed
+  // (succeeded); destroyed_count is the total.
+  repeated string destroyed = 21;
+  uint32 destroyed_count = 22;
+  // config_generation: the generation a configuration reload published
+  // (succeeded).
+  uint64 config_generation = 23;
 }
 
 message DatasetStatus {

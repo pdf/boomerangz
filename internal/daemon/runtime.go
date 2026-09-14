@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pdf/boomerangz/internal/config"
@@ -38,7 +39,7 @@ type remoteApplier struct {
 	lifecycle    *lifecycle.Service
 }
 
-func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, report func(zfs.Progress)) (transfer.Result, error) {
+func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, report transfer.Reporter) (transfer.Result, error) {
 	endpoint, err := a.client.Open(ctx)
 	if err != nil {
 		return transfer.Result{}, err
@@ -54,19 +55,6 @@ func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, repo
 type roadState struct {
 	coordinator *transfer.Roadwarrior
 	request     transfer.Request
-}
-
-func reportWorkerState(logger *slog.Logger, status *StatusStore, event Event) {
-	status.Record(event)
-	args := []any{"pool", event.Pool, "job", event.Job, "scope", event.Scope, "target", event.Target, "state", event.State, "reason", event.Reason, "pending", event.Pending}
-	switch event.State {
-	case "failed":
-		logger.Error("worker state", args...)
-	case "blocked", "waiting-retry":
-		logger.Warn("worker state", args...)
-	default:
-		logger.Info("worker state", args...)
-	}
 }
 
 func blockedOrCancelled(err error) Outcome {
@@ -93,7 +81,8 @@ type Runtime struct {
 	remotes      map[string]remoteClient
 	safety       *Safety
 	locks        *keyLocks
-	status       *StatusStore
+	status       *Status
+	sends        atomic.Uint64 // numbers each sending transition; see transferReporter
 	logger       *slog.Logger
 	lifecycle    *lifecycle.Service
 	now          func() time.Time
@@ -159,19 +148,19 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 	if err != nil {
 		return nil, err
 	}
-	status := &StatusStore{}
-	report := func(event Event) {
-		reportWorkerState(logger, status, event)
-	}
-	management, err := NewPool("management", cfg.Daemon.EffectiveManagementWorkers(), defaultQueueCapacity, report)
+	// The log subscribes before any producer exists, so it holds every
+	// transition from here on.
+	status := NewStatus(time.Now)
+	status.subscribeLog(logger)
+	management, err := newStatusPool("management", "management", cfg.Daemon.EffectiveManagementWorkers(), defaultQueueCapacity, status)
 	if err != nil {
 		return nil, err
 	}
-	local, err := NewPool("transfer", cfg.Daemon.LocalTransferWorkers, defaultQueueCapacity, report)
+	local, err := newStatusPool("transfer", "local_transfer", cfg.Daemon.LocalTransferWorkers, defaultQueueCapacity, status)
 	if err != nil {
 		return nil, err
 	}
-	remote, err := NewPool("transfer", cfg.Daemon.RemoteTransferWorkers, defaultQueueCapacity, report)
+	remote, err := newStatusPool("transfer", "remote_transfer", cfg.Daemon.RemoteTransferWorkers, defaultQueueCapacity, status)
 	if err != nil {
 		return nil, err
 	}
@@ -179,15 +168,25 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 	management.locks, local.locks, remote.locks = sharedLocks, sharedLocks, sharedLocks
 	gate := &lifecycle.Gate{}
 	liveConfig := cfg.Clone()
+	scheduler := NewScheduler()
+	scheduler.status = status
 	runtime := &Runtime{
 		config: liveConfig, backend: source, installation: installation,
-		gate: gate, scanner: scanner, scheduler: NewScheduler(), management: management,
+		gate: gate, scanner: scanner, scheduler: scheduler, management: management,
 		local: local, remote: remote, localStream: stream, pending: &transfer.PendingSet{},
 		remotes: clients, logger: logger, lifecycle: lifecycleService, status: status, locks: sharedLocks, now: time.Now, known: make(map[string]bool), active: make(map[string]bool),
 		recursive: make(map[string]bool), policies: make(map[string]policy.Effective),
 		roads: make(map[string]roadState), retireFailures: make(map[string]int), delayed: make(map[string]time.Time), dirty: make(map[string]bool), configGeneration: 1,
 	}
 	runtime.safety = newSafety(gate, source, clients, liveConfig.Remotes)
+	for _, pool := range []*Pool{management, local, remote} {
+		pool.queue.mu.Lock()
+		pool.queue.observeLocked(queueChange{})
+		pool.queue.mu.Unlock()
+	}
+	runtime.mu.Lock()
+	runtime.publishRuntimeLocked()
+	runtime.mu.Unlock()
 	return runtime, nil
 }
 
@@ -266,13 +265,16 @@ func (r *Runtime) prepareConfig(next config.Config) (*preparedConfig, error) {
 		remoteNames = append(remoteNames, name)
 	}
 	slices.Sort(remoteNames)
+	r.mu.Lock()
+	unchanged := sameRemoteClients(r.remotes, clients)
+	r.mu.Unlock()
 	return &preparedConfig{
 		effective:      effective,
 		clients:        clients,
 		remotes:        remoteNames,
 		applied:        applied,
 		restart:        restart,
-		refreshRemotes: !reflect.DeepEqual(previous.Remotes, effective.Remotes) || previous.Paths.CredentialsDir != effective.Paths.CredentialsDir,
+		refreshRemotes: !unchanged,
 	}, nil
 }
 
@@ -283,7 +285,14 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	_ = r.local.Resize(effective.Daemon.LocalTransferWorkers)
 	_ = r.remote.Resize(effective.Daemon.RemoteTransferWorkers)
 	_ = r.scanner.Reconfigure(effective.Daemon.ReconcileInterval.Duration, prepared.remotes)
-	r.remote.DiscardPending()
+	// Queued remote work, and each remote's recovery coordinator with its
+	// retry state, is bound to the client it was built with. A reload that
+	// leaves every remote as it was keeps both; one that changes a remote
+	// discards them and requeues every active dataset's remote work against
+	// the new clients below.
+	if prepared.refreshRemotes {
+		r.remote.DiscardPending("remote configuration changed")
+	}
 	type remoteReconcile struct {
 		dataset string
 		remote  string
@@ -292,9 +301,9 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	var reconciles []remoteReconcile
 	r.mu.Lock()
 	r.config = effective.Clone()
-	r.remotes = prepared.clients
-	r.roads = make(map[string]roadState)
 	if prepared.refreshRemotes {
+		r.remotes = prepared.clients
+		r.roads = make(map[string]roadState)
 		for key := range r.delayed {
 			if strings.HasPrefix(key, "remote:") {
 				delete(r.delayed, key)
@@ -315,9 +324,10 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 			}
 		}
 	}
-	r.safety.setTargets(&TargetChecker{local: r.backend, remotes: prepared.clients, settings: effective.Remotes})
+	r.safety.setTargets(&TargetChecker{local: r.backend, remotes: r.remotes, settings: effective.Remotes})
 	r.configGeneration++
 	generation := r.configGeneration
+	r.publishRuntimeLocked()
 	r.mu.Unlock()
 	for _, reconcile := range reconciles {
 		jobID := "remote:" + reconcile.dataset + ":" + reconcile.remote
@@ -327,7 +337,7 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 		}
 	}
 	r.scanner.Request()
-	r.status.Record(Event{Pool: "configuration", Job: "config:reload", State: "succeeded", At: r.now().UTC()})
+	r.status.record(Event{Kind: EventTransition, RunID: nextRunID(), Pool: "configuration", Job: "config:reload", State: "succeeded", At: r.now().UTC(), Identity: daemonstate.Identity{ConfigGeneration: generation}})
 	return daemonstate.ReloadResult{Generation: generation, Applied: slices.Clone(prepared.applied), RestartRequired: slices.Clone(prepared.restart)}
 }
 
@@ -495,6 +505,7 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 		r.recursive[name] = entry.Policy.Send.Replicate
 		r.policies[name] = entry.Policy.Clone()
 	}
+	r.publishRuntimeLocked()
 	r.mu.Unlock()
 	for _, name := range active {
 		if changed[name] {
@@ -502,7 +513,7 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 		}
 		if changed[name] {
 			entry, _ := generation.Inspect(name)
-			deadline, deadlineErr := r.nextOwnedSnapshot(name, entry.Policy.Grid.Cadence())
+			deadline, _, deadlineErr := r.nextOwnedSnapshot(name, entry.Policy.Grid.Cadence())
 			if deadlineErr != nil {
 				r.logger.Error("inspect existing transfer work", "dataset", name, "error", deadlineErr)
 			} else if !deadline.IsZero() {
@@ -527,14 +538,14 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 
 func (r *Runtime) deactivate(dataset string) {
 	_ = r.gate.SetEnabled(dataset, false)
-	r.management.RemoveScope(dataset)
-	r.local.RemoveScope(dataset)
-	r.remote.RemoveScope(dataset)
+	r.management.RemoveScope(dataset, "dataset deactivated")
+	r.local.RemoveScope(dataset, "dataset deactivated")
+	r.remote.RemoveScope(dataset, "dataset deactivated")
 }
 
 func (r *Runtime) enqueueInactive(dataset string, active bool) {
 	id := fmt.Sprintf("inactive:%s:%t", dataset, active)
-	_, err := r.management.Submit(Job{ID: id, Group: dataset, Scope: dataset, LockKey: dataset, StartState: "reconciling", Run: func(ctx context.Context) Outcome {
+	_, err := r.management.Submit(Job{RunID: nextRunID(), ID: id, Group: dataset, Scope: dataset, LockKey: dataset, StartState: "reconciling", Run: func(ctx context.Context) Outcome {
 		if !active {
 			if waitErr := r.gate.WaitScopeQuiescent(ctx, dataset); waitErr != nil {
 				return Outcome{State: "blocked", Reason: waitErr.Error()}
@@ -544,7 +555,20 @@ func (r *Runtime) enqueueInactive(dataset string, active bool) {
 		if serviceErr != nil {
 			return Outcome{State: "failed", Reason: serviceErr.Error()}
 		}
-		plan, reconcileErr := service.ReconcileInactive(ctx, dataset, active, r.now(), r.daemonConfig().InactiveGracePeriod.Duration, true)
+		// The marker's time starts the grace period, so a concurrent change
+		// is re-planned around at once rather than after a delay. A source
+		// that keeps changing is retried later: a refusal on a state change
+		// wrote nothing, and nothing else would run the job again.
+		plan, reconcileErr := replan(func() (lifecycle.InactivePlan, error) {
+			return service.ReconcileInactive(ctx, dataset, active, r.now(), r.daemonConfig().InactiveGracePeriod.Duration, true)
+		})
+		var changed *lifecycle.StateChangedError
+		if errors.As(reconcileErr, &changed) {
+			if delay, delayErr := transfer.DefaultRetryPolicy().Delay(1, rand.Float64()); delayErr == nil {
+				r.schedule(id, r.now().Add(delay), func() { r.retryInactive(dataset, active) })
+			}
+			return Outcome{State: "waiting-retry", Reason: reconcileErr.Error()}
+		}
 		if reconcileErr != nil {
 			return Outcome{State: "blocked", Reason: reconcileErr.Error()}
 		}
@@ -555,11 +579,48 @@ func (r *Runtime) enqueueInactive(dataset string, active bool) {
 				r.schedule("retire:"+dataset, *plan.Deadline, func() { r.enqueueRetirement(dataset) })
 			}
 		}
-		return Outcome{State: "succeeded"}
+		return Outcome{State: "succeeded", Identity: daemonstate.Identity{Marker: markerAction(plan)}}
 	}})
 	if err != nil {
 		r.logger.Error("queue inactive reconciliation", "dataset", dataset, "error", err)
 	}
+}
+
+// retryInactive runs an inactive reconciliation again, unless the dataset's
+// activation has changed since: that change queued its own reconciliation,
+// which a retry of the old one must not undo.
+func (r *Runtime) retryInactive(dataset string, active bool) {
+	r.mu.Lock()
+	current := r.active[dataset]
+	r.mu.Unlock()
+	if current == active {
+		r.enqueueInactive(dataset, active)
+	}
+}
+
+// markerAction names what an inactive reconciliation did to the marker.
+func markerAction(plan lifecycle.InactivePlan) string {
+	switch {
+	case !plan.Applied:
+		return "none"
+	case plan.Action == "set-inactive-marker":
+		return "set"
+	case plan.Action == "clear-inactive-marker":
+		return "cleared"
+	default:
+		return plan.Action
+	}
+}
+
+// destroyedSnapshots names the snapshots a clean plan destroyed.
+func destroyedSnapshots(plan lifecycle.CleanPlan) daemonstate.Identity {
+	var names []string
+	for _, action := range plan.Actions {
+		if action.Operation == "destroy-snapshot" {
+			names = append(names, action.Object)
+		}
+	}
+	return daemonstate.DestroyedIdentity(names)
 }
 
 func (r *Runtime) enqueueRetirement(dataset string) {
@@ -567,7 +628,7 @@ func (r *Runtime) enqueueRetirement(dataset string) {
 	recursive := r.recursive[dataset]
 	effective := r.policies[dataset].Clone()
 	r.mu.Unlock()
-	_, err := r.management.Submit(Job{ID: "retire:" + dataset, Group: dataset, Scope: dataset, LockKey: dataset, StartState: "retiring", Run: func(ctx context.Context) Outcome {
+	_, err := r.management.Submit(Job{RunID: nextRunID(), ID: "retire:" + dataset, Group: dataset, Scope: dataset, LockKey: dataset, StartState: "retiring", Run: func(ctx context.Context) Outcome {
 		service, serviceErr := r.service()
 		if serviceErr != nil {
 			return Outcome{State: "failed", Reason: serviceErr.Error()}
@@ -587,9 +648,10 @@ func (r *Runtime) enqueueRetirement(dataset string) {
 			delete(r.known, dataset)
 			delete(r.recursive, dataset)
 			delete(r.policies, dataset)
+			r.publishRuntimeLocked()
 			r.mu.Unlock()
 			r.scanner.Request()
-			return Outcome{State: "succeeded"}
+			return Outcome{State: "succeeded", Identity: destroyedSnapshots(plan.Clean)}
 		}
 		if retireErr == nil && !plan.Eligible {
 			return Outcome{State: "scheduled", Reason: "retirement is not due"}
@@ -627,20 +689,20 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 			r.scheduler.Retry(schedule.Dataset, r.now().Add(time.Second))
 		}
 	}
-	job := Job{ID: "snapshot:" + schedule.Dataset, Group: schedule.Dataset, Scope: schedule.Dataset, LockKey: schedule.Dataset, StartState: "snapshotting", Drop: dropped}
+	job := Job{RunID: nextRunID(), ID: "snapshot:" + schedule.Dataset, Group: schedule.Dataset, Scope: schedule.Dataset, LockKey: schedule.Dataset, StartState: "snapshotting", Drop: dropped}
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		if startErr := ticket.Start(); startErr != nil {
 			return blockedOrCancelled(startErr)
 		}
-		deadline, deadlineErr := r.nextOwnedSnapshot(schedule.Dataset, schedule.Policy.Grid.Cadence())
+		deadline, latest, deadlineErr := r.nextOwnedSnapshot(schedule.Dataset, schedule.Policy.Grid.Cadence())
 		if deadlineErr != nil {
 			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
 			return Outcome{State: "failed", Reason: deadlineErr.Error()}
 		}
 		if !schedule.Force && !deadline.IsZero() && r.now().Before(deadline) {
 			r.scheduler.Retry(schedule.Dataset, deadline)
-			return Outcome{State: "scheduled", Reason: "existing owned snapshot sets the next deadline"}
+			return Outcome{State: "scheduled", Reason: "existing owned snapshot sets the next deadline", Identity: daemonstate.Identity{Snapshot: latest}}
 		}
 		service, serviceErr := r.service()
 		if serviceErr != nil {
@@ -653,11 +715,12 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 		}
 		completed := r.now()
 		r.scheduler.Complete(schedule.Dataset, completed)
-		if !r.enqueueTransfers(schedule.Dataset, schedule.Policy, schedule.Dataset+"@"+metadata.Name()) {
-			return Outcome{State: "failed", Reason: "new snapshot could not be protected for every transfer target"}
+		created := daemonstate.Identity{Snapshot: schedule.Dataset + "@" + metadata.Name()}
+		if !r.enqueueTransfers(schedule.Dataset, schedule.Policy, created.Snapshot) {
+			return Outcome{State: "failed", Reason: "new snapshot could not be protected for every transfer target", Identity: created}
 		}
 		r.enqueuePrune(schedule.Dataset, schedule.Policy)
-		return Outcome{State: "succeeded"}
+		return Outcome{State: "succeeded", Identity: created}
 	}
 	if added, submitErr := r.management.Submit(job); submitErr != nil || !added {
 		dropped()
@@ -669,27 +732,32 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 	return true
 }
 
-func (r *Runtime) nextOwnedSnapshot(dataset string, cadence time.Duration) (time.Time, error) {
+// nextOwnedSnapshot returns when the newest owned snapshot makes the next one
+// due, and that snapshot's name; both are zero when there is none.
+func (r *Runtime) nextOwnedSnapshot(dataset string, cadence time.Duration) (time.Time, string, error) {
 	state, err := r.backend.InspectState(context.Background(), dataset, false)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, "", err
 	}
 	lineage, authoritative := rootLineage(state, dataset, r.installation)
 	if !authoritative {
 		// A fresh root has no authority until its first successful snapshot.
-		return time.Time{}, nil
+		return time.Time{}, "", nil
 	}
-	var latest time.Time
+	var (
+		latest time.Time
+		name   string
+	)
 	for _, snapshot := range lifecycle.Snapshots(state, dataset) {
 		metadata, ownershipErr := lifecycle.Ownership(snapshot, lineage)
 		if ownershipErr == nil && metadata.Created.After(latest) {
-			latest = metadata.Created
+			latest, name = metadata.Created, snapshot.Name
 		}
 	}
 	if latest.IsZero() {
-		return time.Time{}, nil
+		return time.Time{}, "", nil
 	}
-	return latest.Add(cadence), nil
+	return latest.Add(cadence), name, nil
 }
 
 func rootLineage(state zfs.State, dataset, installation string) (string, bool) {
@@ -702,7 +770,7 @@ func (r *Runtime) enqueuePrune(dataset string, effective policy.Effective) {
 	if err != nil {
 		return
 	}
-	job := Job{ID: "prune:" + dataset, Group: dataset, Scope: dataset, LockKey: dataset, StartState: "pruning", Drop: ticket.Finish}
+	job := Job{RunID: nextRunID(), ID: "prune:" + dataset, Group: dataset, Scope: dataset, LockKey: dataset, StartState: "pruning", Drop: ticket.Finish}
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		if startErr := ticket.Start(); startErr != nil {
@@ -712,11 +780,17 @@ func (r *Runtime) enqueuePrune(dataset string, effective policy.Effective) {
 		if serviceErr != nil {
 			return Outcome{State: "failed", Reason: serviceErr.Error()}
 		}
-		_, pruneErr := service.Prune(ticket.Context(), dataset, effective, true)
+		decisions, pruneErr := service.Prune(ticket.Context(), dataset, effective, true)
 		if pruneErr != nil {
 			return Outcome{State: "failed", Reason: pruneErr.Error()}
 		}
-		return Outcome{State: "succeeded"}
+		var destroyed []string
+		for _, decision := range decisions {
+			if decision.Destroy {
+				destroyed = append(destroyed, decision.Snapshot)
+			}
+		}
+		return Outcome{State: "succeeded", Identity: daemonstate.DestroyedIdentity(destroyed)}
 	}
 	if added, submitErr := r.management.Submit(job); submitErr != nil || !added {
 		ticket.Finish()
@@ -761,7 +835,7 @@ func (r *Runtime) protectAndCoalesce(dataset, snapshot, target string, recursive
 			}
 		}
 	}
-	if _, err := service.ProtectSet(context.Background(), dataset, snapshots, target); err != nil {
+	if err := protectSet(service, dataset, snapshots, target); err != nil {
 		return err
 	}
 	coalesced, err := r.pending.Coalesce(dataset, target, pending)
@@ -774,6 +848,40 @@ func (r *Runtime) protectAndCoalesce(dataset, snapshot, target string, recursive
 		}
 	}
 	return nil
+}
+
+// replanAttempts bounds how many times a lifecycle operation re-plans around
+// concurrent changes to its source. The daemon's own transfers write their
+// source without the lifecycle lock - a first transfer records its target
+// binding - so an operation can find the source changed between its read and
+// its write, which refuses with a StateChangedError. Each attempt re-reads the
+// source, and none waits.
+const replanAttempts = 5
+
+// replan runs operation until it does anything but refuse on a state change,
+// at most replanAttempts times, and returns its last result.
+func replan[T any](operation func() (T, error)) (T, error) {
+	var (
+		result T
+		err    error
+	)
+	for range replanAttempts {
+		var changed *lifecycle.StateChangedError
+		if result, err = operation(); !errors.As(err, &changed) {
+			return result, err
+		}
+	}
+	return result, err
+}
+
+// protectSet places a reference and holds on snapshots for target, re-planning
+// around concurrent changes. Nothing reschedules a new snapshot's protection,
+// so leaving it to a later attempt would leave the snapshot unprotected.
+func protectSet(service *lifecycle.Service, dataset string, snapshots []string, target string) error {
+	_, err := replan(func() (lifecycle.Reference, error) {
+		return service.ProtectSet(context.Background(), dataset, snapshots, target)
+	})
+	return err
 }
 
 func (r *Runtime) releaseSupersededPending(dataset, target, snapshot string) error {
@@ -886,52 +994,11 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 	if err != nil {
 		return snapshot == ""
 	}
-	job := Job{ID: jobID, Group: dataset, Scope: dataset, LockKey: canonical, LockScope: lockScope, StartState: "sending", Drop: ticket.Finish}
+	job := Job{RunID: nextRunID(), ID: jobID, Group: dataset, Scope: dataset, LockKey: canonical, LockScope: lockScope, StartState: "planning", Drop: ticket.Finish}
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		r.clearDirty(jobID)
-		if startErr := ticket.Start(); startErr != nil {
-			return blockedOrCancelled(startErr)
-		}
-		missingAncestor, ancestorErr := r.missingLocalDestinationAncestor(ticket.Context(), dataset, target, mapped)
-		if ancestorErr != nil {
-			return Outcome{State: "waiting-retry", Reason: "inspect destination hierarchy: " + ancestorErr.Error()}
-		}
-		if missingAncestor != "" {
-			return Outcome{State: "waiting-retry", Reason: "waiting for destination ancestor " + missingAncestor}
-		}
-		engine, engineErr := transfer.NewLocalWithService(r.backend, r.localStream, r.installation, r.lifecycle)
-		if engineErr != nil {
-			return Outcome{State: "failed", Reason: engineErr.Error()}
-		}
-		requestSnapshot := ""
-		pending, hasPending := r.pending.Begin(dataset, canonical)
-		completed := false
-		if hasPending {
-			defer func() { r.pending.End(dataset, canonical, pending, completed) }()
-		}
-		if hasPending {
-			requestSnapshot = pending.Name
-		}
-		result, applyErr := engine.Apply(ticket.Context(), transfer.Request{Source: dataset, DestinationRoot: target, Snapshot: requestSnapshot, Policy: effective}, func(progress zfs.Progress) {
-			r.recordProgress("transfer", jobID, dataset, canonical, progress)
-		})
-		if applyErr != nil {
-			if errors.Is(applyErr, context.Canceled) {
-				return blockedOrCancelled(applyErr)
-			}
-			var temporary interface{ Temporary() bool }
-			if errors.As(applyErr, &temporary) && temporary.Temporary() {
-				return Outcome{State: "waiting-retry", Reason: applyErr.Error()}
-			}
-			return Outcome{State: "blocked", Reason: applyErr.Error()}
-		}
-		if !result.Verified {
-			return Outcome{State: "failed", Reason: "transfer was not verified"}
-		}
-		completed = hasPending && result.Plan.Snapshot == pending.Name
-		r.enqueueDestinationPrune(dataset, effective, canonical, result.Plan.Destination)
-		return Outcome{State: "succeeded"}
+		return r.withPending(dataset, canonical, r.runLocal(ticket, dataset, target, canonical, mapped, effective, job))
 	}
 	job.After = func(outcome Outcome) {
 		if r.isDirty(jobID) {
@@ -948,6 +1015,67 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 		ticket.Finish()
 	}
 	return true
+}
+
+// runLocal runs one local transfer. An outcome that follows a transfer names
+// the snapshot it carried; withPending names the pending one for any other.
+func (r *Runtime) runLocal(ticket *lifecycle.Ticket, dataset, target, canonical, mapped string, effective policy.Effective, job Job) Outcome {
+	if startErr := ticket.Start(); startErr != nil {
+		return blockedOrCancelled(startErr)
+	}
+	missingAncestor, ancestorErr := r.missingLocalDestinationAncestor(ticket.Context(), dataset, target, mapped)
+	if ancestorErr != nil {
+		return Outcome{State: "waiting-retry", Reason: "inspect destination hierarchy: " + ancestorErr.Error()}
+	}
+	if missingAncestor != "" {
+		return Outcome{State: "waiting-retry", Reason: "waiting for destination ancestor " + missingAncestor}
+	}
+	engine, engineErr := transfer.NewLocalWithService(r.backend, r.localStream, r.installation, r.lifecycle)
+	if engineErr != nil {
+		return Outcome{State: "failed", Reason: engineErr.Error()}
+	}
+	requestSnapshot := ""
+	pending, hasPending := r.pending.Begin(dataset, canonical)
+	completed := false
+	if hasPending {
+		defer func() { r.pending.End(dataset, canonical, pending, completed) }()
+	}
+	if hasPending {
+		requestSnapshot = pending.Name
+	}
+	carried := daemonstate.Identity{Snapshot: requestSnapshot}
+	result, applyErr := engine.Apply(ticket.Context(), transfer.Request{Source: dataset, DestinationRoot: target, Snapshot: requestSnapshot, Policy: effective}, r.transferReporter(r.local, job))
+	if applyErr != nil {
+		if errors.Is(applyErr, context.Canceled) {
+			outcome := blockedOrCancelled(applyErr)
+			outcome.Identity = carried
+			return outcome
+		}
+		var temporary interface{ Temporary() bool }
+		if errors.As(applyErr, &temporary) && temporary.Temporary() {
+			return Outcome{State: "waiting-retry", Reason: applyErr.Error(), Identity: carried}
+		}
+		return Outcome{State: "blocked", Reason: applyErr.Error(), Identity: carried}
+	}
+	if !result.Verified {
+		return Outcome{State: "failed", Reason: "transfer was not verified", Identity: carried}
+	}
+	completed = hasPending && result.Plan.Snapshot == pending.Name
+	r.enqueueDestinationPrune(dataset, effective, canonical, result.Plan.Destination)
+	return Outcome{State: "succeeded", Identity: daemonstate.Identity{Snapshot: result.Plan.Snapshot, Destination: result.Plan.Destination}}
+}
+
+// withPending names, on a waiting-retry, blocked, or cancelled outcome that
+// carries no snapshot, the snapshot pending for the target when the run ended.
+// It runs on the worker after the run, holding no pool lock. A job removed
+// from its queue before running names none; see the design's chunk J.
+func (r *Runtime) withPending(dataset, canonical string, outcome Outcome) Outcome {
+	if (outcome.State == "waiting-retry" || outcome.State == "blocked" || outcome.State == "cancelled") && outcome.Identity.Snapshot == "" {
+		if pending, found := r.pending.Peek(dataset, canonical); found {
+			outcome.Identity.Snapshot = pending.Name
+		}
+	}
+	return outcome
 }
 
 func roadKey(dataset, remote string) string { return dataset + "\x00" + remote }
@@ -1003,34 +1131,37 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 		return snapshot == ""
 	}
 	jobID := "remote:" + dataset + ":" + remote
-	job := Job{ID: jobID, Group: dataset, Scope: dataset, LockKey: road.request.CanonicalTarget, StartState: "probing", Drop: ticket.Finish}
+	job := Job{RunID: nextRunID(), ID: jobID, Group: dataset, Scope: dataset, LockKey: road.request.CanonicalTarget, StartState: "probing", Drop: ticket.Finish}
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		r.clearDirty(jobID)
 		if startErr := ticket.Start(); startErr != nil {
-			return blockedOrCancelled(startErr)
+			return r.withPending(dataset, road.request.CanonicalTarget, blockedOrCancelled(startErr))
 		}
-		outcome, reconcileErr := road.coordinator.Reconcile(ticket.Context(), func(progress zfs.Progress) {
-			r.recordProgress("transfer", jobID, dataset, road.request.CanonicalTarget, progress)
-		})
+		outcome, reconcileErr := road.coordinator.Reconcile(ticket.Context(), r.transferReporter(r.remote, job))
 		if outcome.Status == "waiting-retry" && !outcome.NotBefore.IsZero() {
 			r.schedule(jobID, outcome.NotBefore, func() { r.enqueueRemote(dataset, remote, effective, "") })
 		}
+		carried := daemonstate.Identity{Snapshot: outcome.Pending}
 		if reconcileErr != nil {
 			if errors.Is(reconcileErr, context.Canceled) {
-				return blockedOrCancelled(reconcileErr)
+				cancelled := blockedOrCancelled(reconcileErr)
+				cancelled.Identity = carried
+				return r.withPending(dataset, road.request.CanonicalTarget, cancelled)
 			}
-			return Outcome{State: outcome.Status, Reason: reconcileErr.Error()}
+			return r.withPending(dataset, road.request.CanonicalTarget, Outcome{State: outcome.Status, Reason: reconcileErr.Error(), Identity: carried})
 		}
 		if outcome.Status == "succeeded" {
 			r.enqueueDestinationPrune(dataset, effective, road.request.CanonicalTarget, "")
+			last := outcome.Results[len(outcome.Results)-1].Plan
+			return Outcome{State: outcome.Status, Reason: outcome.Reason, Identity: daemonstate.Identity{Snapshot: last.Snapshot, Destination: last.Destination}}
 		}
 		if outcome.Status == "waiting-retry" {
 			// The backoff deadline has not passed, so nothing was attempted.
 			// The state the last real attempt reported still stands.
-			return Outcome{State: outcome.Status, Reason: outcome.Reason, Silent: true}
+			return Outcome{State: outcome.Status, Reason: outcome.Reason, Silent: true, Identity: carried}
 		}
-		return Outcome{State: outcome.Status, Reason: outcome.Reason}
+		return r.withPending(dataset, road.request.CanonicalTarget, Outcome{State: outcome.Status, Reason: outcome.Reason, Identity: carried})
 	}
 	job.After = func(Outcome) {
 		if r.isDirty(jobID) {
@@ -1061,12 +1192,59 @@ func (r *Runtime) isDirty(key string) bool {
 	return r.dirty[key]
 }
 
-func (r *Runtime) recordProgress(pool, job, dataset, target string, progress zfs.Progress) {
-	event := Event{Pool: pool, Job: job, Scope: dataset, Target: target, State: "sending", At: r.now().UTC(), Bytes: progress.Bytes, TotalBytes: progress.Estimate.Bytes, BytesPerSecond: progress.BytesPerSecond, TotalKnown: progress.Estimate.Known}
+// transferReporter turns one running job's transfer reports into status. A
+// phase change is a transition the pool emits for the job, as it emits the
+// job's start state and outcome; a progress sample updates the job's progress.
+//
+// Each sending transition takes a new number, carried by the samples that
+// follow it, so the status owner can tell a late sample from an earlier stream
+// - a resume's first pass - from one belonging to the current stream.
+func (r *Runtime) transferReporter(pool *Pool, job Job) transfer.Reporter {
+	var send uint64
+	return func(report transfer.Report) {
+		switch {
+		case report.Phase != "":
+			event := pool.event(job, string(report.Phase), "")
+			if report.Phase == transfer.PhaseSending {
+				send = r.sends.Add(1)
+				event.Send = send
+				if report.Plan != nil {
+					event.Identity = daemonstate.Identity{Snapshot: report.Plan.Snapshot, Base: report.Plan.Base, Mode: report.Plan.Mode}
+				}
+			}
+			if pool.report != nil {
+				pool.report(event)
+			}
+		case report.Progress != nil:
+			r.recordProgress(pool.name, job, send, *report.Progress)
+		}
+	}
+}
+
+// recordProgress offers a progress sample. It never changes the job's state:
+// the status owner keeps it only while the job's latest transition is the
+// sending transition numbered send.
+func (r *Runtime) recordProgress(pool string, job Job, send uint64, progress zfs.Progress) {
+	event := Event{Kind: EventProgress, Send: send, Pool: pool, Job: job.ID, Scope: job.Scope, Target: job.LockKey, At: r.now().UTC(), Bytes: progress.Bytes, TotalBytes: progress.Estimate.Bytes, BytesPerSecond: progress.BytesPerSecond, TotalKnown: progress.Estimate.Known}
 	if progress.ETA != nil {
 		event.ETA = *progress.ETA
 	}
-	r.status.Record(event)
+	r.status.record(event)
+}
+
+// publishRuntimeLocked sends the runtime's dataset view to the status owner.
+// Callers hold r.mu, which orders the views.
+func (r *Runtime) publishRuntimeLocked() {
+	names := mapsKeys(r.known)
+	slices.Sort(names)
+	view := runtimeView{configGeneration: r.configGeneration, datasets: make([]DatasetStatus, 0, len(names))}
+	if r.generation != nil {
+		view.generation, view.entries = r.generation.ID(), len(r.generation.Entries())
+	}
+	for _, name := range names {
+		view.datasets = append(view.datasets, DatasetStatus{Name: name, Active: r.active[name], Recursive: r.recursive[name]})
+	}
+	r.status.publishRuntime(view)
 }
 
 func (r *Runtime) schedule(key string, at time.Time, run func()) {
@@ -1137,7 +1315,6 @@ func (r *Runtime) Run(ctx context.Context) error {
 				}
 				return
 			}
-			r.logger.Info("discovery complete", "generation", generation.ID(), "datasets", len(generation.Entries()))
 			r.applyGeneration(generation)
 		})
 	}()
@@ -1162,9 +1339,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 	for _, dataset := range known {
 		_ = r.gate.SetEnabled(dataset, false)
 	}
-	r.management.DiscardPending()
-	r.local.DiscardPending()
-	r.remote.DiscardPending()
+	r.management.DiscardPending("daemon shutting down")
+	r.local.DiscardPending("daemon shutting down")
+	r.remote.DiscardPending("daemon shutting down")
 	transferCancel()
 	r.management.Close()
 	r.local.Close()
@@ -1173,7 +1350,12 @@ func (r *Runtime) Run(ctx context.Context) error {
 	r.remote.Wait()
 	r.management.Wait()
 	r.delayWait.Wait()
-	r.logger.Info("daemon stopped")
+	// Transitions reach the log on its own goroutine; let the shutdown's
+	// transitions land before the line that says the daemon stopped.
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	r.status.flush(flushCtx)
+	flushCancel()
+	r.logger.Info("daemon stopped", "status_backlog_peak", r.status.BacklogPeak())
 	return nil
 }
 
@@ -1223,27 +1405,16 @@ type DatasetStatus = daemonstate.DatasetStatus
 // ControlSnapshot is an immutable daemon status generation.
 type ControlSnapshot = daemonstate.ControlSnapshot
 
-// ControlStatus builds a cheap in-memory status snapshot.
-func (r *Runtime) ControlStatus() ControlSnapshot {
-	revision, jobs := r.status.SnapshotRevision()
-	deadlines := r.scheduler.Entries()
-	r.mu.Lock()
-	names := mapsKeys(r.known)
-	slices.Sort(names)
-	result := ControlSnapshot{Revision: revision, Observed: r.now().UTC(), Queues: r.QueueStatus(), Jobs: jobs, ConfigGeneration: r.configGeneration}
-	if r.generation != nil {
-		result.Generation = r.generation.ID()
-	}
-	for _, name := range names {
-		result.Datasets = append(result.Datasets, DatasetStatus{Name: name, Active: r.active[name], Recursive: r.recursive[name], NextSnapshot: deadlines[name]})
-	}
-	r.mu.Unlock()
-	return result
-}
+// ControlStatus returns the status owner's current state.
+func (r *Runtime) ControlStatus() ControlSnapshot { return r.status.Snapshot() }
 
-// WaitStatus waits for a worker transition after revision.
-func (r *Runtime) WaitStatus(ctx context.Context, revision uint64) error {
-	return r.status.Wait(ctx, revision)
+// SubscribeStatus subscribes to the daemon's status; see Status.Subscribe.
+func (r *Runtime) SubscribeStatus(ctx context.Context) (daemonstate.Subscription, error) {
+	subscription, err := r.status.Subscribe(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return subscription, nil
 }
 
 // Clean runs explicit preview-first decommissioning inside the daemon's live
@@ -1354,13 +1525,9 @@ func (r *Runtime) Clean(ctx context.Context, names []string, recursive, all, des
 	return plans, nil
 }
 
-// QueueStatus exposes detached worker-pool pressure.
-func (r *Runtime) QueueStatus() map[string]QueueSnapshot {
-	return map[string]QueueSnapshot{"management": r.management.Snapshot(), "local_transfer": r.local.Snapshot(), "remote_transfer": r.remote.Snapshot()}
-}
-
-// Status returns the latest stable job transitions for control-plane consumers.
-func (r *Runtime) Status() []Event { return r.status.Snapshot() }
+// Status returns the latest transition for each job, with the newest progress
+// of every running transfer.
+func (r *Runtime) Status() []Event { return r.status.Snapshot().Jobs }
 
 // Ensure compile-time safety conformance.
 var _ lifecycle.CleanSafety = (*Safety)(nil)

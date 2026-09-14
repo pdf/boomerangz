@@ -20,11 +20,13 @@ retirement in the foreground.
 .B status
 Show daemon status. Use
 .B --watch
-to follow changes,
-.B --interval
-to bound refresh time, and
+to follow changes as they happen, and
 .B --json
-for structured output.
+for structured output. A watch also shows every job state change since its
+previous update, in the order the daemon recorded them, and one that falls too
+far behind the daemon ends with an error rather than continuing with changes
+missing. Each job state change names its run and what that run acted on, such
+as the snapshot a transfer sent or the snapshots a prune destroyed.
 .TP
 .B trigger
 Queue an immediate snapshot for selected active roots, or all active roots when
@@ -81,7 +83,9 @@ Print the effective configuration with secrets redacted.
 Validate and atomically apply the running daemon configuration. Use
 .B --socket
 to select a non-default current control socket. The JSON result identifies
-fields applied live and fields requiring restart.
+fields applied live and fields requiring restart. Unchanged listeners are
+left in place. A listener the reload moves, replaces or removes stops accepting
+and lets running calls finish, but a watch connected to it ends with an error.
 .TP
 .B pairing create
 Create a one-time pairing bundle for a configured TCP listener. Scopes are

@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -39,6 +38,7 @@ type Scheduler struct {
 	mu      sync.Mutex
 	entries map[string]deadline
 	wake    chan struct{}
+	status  *Status
 }
 
 // NewScheduler creates an empty deadline set.
@@ -46,9 +46,12 @@ func NewScheduler() *Scheduler {
 	return &Scheduler{entries: make(map[string]deadline), wake: make(chan struct{})}
 }
 
+// signal wakes Next and publishes the changed deadlines. Callers hold the lock,
+// which orders the published views.
 func (s *Scheduler) signal() {
 	close(s.wake)
 	s.wake = make(chan struct{})
+	s.status.publishDeadlines(s.entriesLocked())
 }
 
 func isSchedulable(entry discovery.Entry) bool {
@@ -178,9 +181,13 @@ func (s *Scheduler) Next(ctx context.Context) (Schedule, bool) {
 func (s *Scheduler) Entries() map[string]time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.entriesLocked()
+}
+
+func (s *Scheduler) entriesLocked() map[string]time.Time {
 	result := make(map[string]time.Time, len(s.entries))
 	for name, item := range s.entries {
 		result[name] = item.next
 	}
-	return maps.Clone(result)
+	return result
 }

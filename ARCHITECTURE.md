@@ -94,7 +94,9 @@ Roughly bottom-up, in dependency order:
   worker pools - management/local-transfer/remote-transfer), `safety.go`
   (pre-flight quiescence/target checks), `retirement.go` (wires
   `lifecycle`'s inactive/retirement logic into the runtime), `status.go`
-  (`StatusStore`, a revisioned in-memory event log backing `WatchStatus`).
+  (`Status`, the one goroutine that owns job states, progress, and views, and
+  delivers every transition to its subscribers: `WatchStatus` and the daemon
+  log).
 - **daemonstate** - plain shared data types (`Event`, `ControlSnapshot`,
   `ReloadResult`, ...) with no behavior, used so `daemon` and `control` don't
   depend on each other's internals.
@@ -102,7 +104,9 @@ Roughly bottom-up, in dependency order:
   `server.go` (`Server`, listener/TLS setup, live `Reload`), `service.go`
   (`StatusService`/`ControlService` implementation), `token.go`/`pairing.go`/
   `pki.go` (token and mTLS-pairing issuance/storage), `client.go`
-  (`PairingBundle`, `Client.DialLocal`/`DialBundle` used by the CLI).
+  (`PairingBundle`, `Client.DialLocal`/`DialBundle` used by the CLI),
+  `keepalive.go` (the transport keepalive shared by TCP listeners and every
+  pairing-bundle client, native replication included).
   `control/rpc/` holds the generated stubs for
   `proto/boomerangz/control/v1/control.proto`.
 - **statusui** - renders a `StatusSnapshot` for `boomerangz status`, both as
