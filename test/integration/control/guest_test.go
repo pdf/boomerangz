@@ -17,6 +17,7 @@ import (
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/testutil/zfstest"
 	"github.com/pdf/boomerangz/internal/zfs"
+	"github.com/pdf/boomerangz/test/integration/internal/statuswait"
 )
 
 // This test is opt-in and must run in the disposable guest, never on the host.
@@ -59,45 +60,41 @@ func TestGuestDaemonControl(t *testing.T) {
 	zfstest.RegisterCleanup(t, source)
 	command("zfs", "set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x5m", source)
 
-	var daemonLog bytes.Buffer
-	daemon := exec.CommandContext(t.Context(), binary, "daemon", "--config", configPath)
-	daemon.Stdout = &daemonLog
-	daemon.Stderr = &daemonLog
-	daemon.WaitDelay = 5 * time.Second
-	if err := daemon.Start(); err != nil {
-		t.Fatal(err)
-	}
-	stopped := false
-	t.Cleanup(func() {
-		if !stopped && daemon.Process != nil {
-			_ = daemon.Process.Kill()
-			_ = daemon.Wait()
-		}
-	})
-
+	daemon := runGuestDaemon(t, binary, "", "daemon", "--config", configPath)
 	socket := os.Getenv("BOOMERANGZ_CONTROL_GUEST_SOCKET")
 	if socket == "" {
 		t.Fatal("guest control socket path is required")
 	}
-	waitFor := func(description string, check func() bool) {
+	status := func(t *testing.T) []byte {
 		t.Helper()
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			if check() {
-				return
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		t.Fatalf("timed out waiting for %s; daemon log: %s", description, daemonLog.String())
-	}
-	waitFor("control socket", func() bool {
-		info, statErr := os.Lstat(socket)
-		return statErr == nil && info.Mode()&os.ModeSocket != 0 && info.Mode().Perm() == 0o660
-	})
-	waitFor("dataset in control status", func() bool {
 		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
-		return statusErr == nil && bytes.Contains(output, []byte(source))
-	})
+		if statusErr != nil {
+			t.Fatalf("guest status: %v: %s", statusErr, output)
+		}
+		return output
+	}
+	ownedSnapshot := func(t *testing.T, name string) {
+		t.Helper()
+		state, inspectErr := direct.InspectState(t.Context(), source, false)
+		if inspectErr != nil {
+			t.Fatal(inspectErr)
+		}
+		if !slices.ContainsFunc(lifecycle.Snapshots(state, source), func(snapshot lifecycle.Snapshot) bool { return snapshot.Name == name }) {
+			t.Fatalf("the snapshot job reported creating %s, which the pool does not hold: %+v", name, state.Objects)
+		}
+	}
+
+	daemon.waitStarted(t, 30*time.Second)
+	if info, statErr := os.Lstat(socket); statErr != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o660 {
+		t.Fatalf("the started daemon's control socket is not a 0660 socket: %v %v", info, statErr)
+	}
+	// The dataset exists before the daemon starts, so the first discovery
+	// generation holds it, and the generation's line follows status
+	// reflecting it.
+	daemon.log.Next(t, "the first discovery generation", 30*time.Second, 0, statuswait.Discovered)
+	if output := status(t); !bytes.Contains(output, []byte(source)) {
+		t.Fatalf("status after the first discovery generation does not list %s: %s", source, output)
+	}
 	configFile, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +106,7 @@ func TestGuestDaemonControl(t *testing.T) {
 	if err := configFile.Close(); err != nil {
 		t.Fatal(err)
 	}
+	reloadMark := daemon.log.Mark()
 	reloadOutput := command(binary, "config", "reload", "--socket", socket)
 	var reload struct {
 		Generation      uint64   `json:"generation"`
@@ -121,60 +119,44 @@ func TestGuestDaemonControl(t *testing.T) {
 	if reload.Generation != 2 || !slices.Contains(reload.Applied, "daemon.local_transfer_workers") || len(reload.RestartRequired) != 0 {
 		t.Fatalf("unexpected reload result: %#v", reload)
 	}
-	waitFor("reloaded configuration generation", func() bool {
-		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
-		if statusErr != nil {
-			return false
-		}
-		var status struct {
-			ConfigGeneration uint64 `json:"config_generation"`
-		}
-		return json.Unmarshal(output, &status) == nil && status.ConfigGeneration == 2
-	})
-	initialSnapshots := 0
-	waitFor("initial owned snapshot", func() bool {
-		state, inspectErr := direct.InspectState(t.Context(), source, false)
-		if inspectErr != nil {
-			return false
-		}
-		initialSnapshots = len(lifecycle.Snapshots(state, source))
-		return initialSnapshots > 0
-	})
-	waitFor("completed initial snapshot job", func() bool {
-		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
-		if statusErr != nil {
-			return false
-		}
-		type jobStatus struct {
-			Job   string `json:"job"`
-			State string `json:"state"`
-		}
-		var status struct {
-			Jobs []jobStatus `json:"jobs"`
-		}
-		if json.Unmarshal(output, &status) != nil {
-			return false
-		}
-		return slices.ContainsFunc(status.Jobs, func(job jobStatus) bool {
-			return job.Job == "snapshot:"+source && job.State == "succeeded"
-		})
-	})
+	// The reload publishes the generation and records itself before it
+	// replies, so one read sees it without waiting.
+	var reloaded struct {
+		ConfigGeneration uint64 `json:"config_generation"`
+	}
+	if output := status(t); json.Unmarshal(output, &reloaded) != nil || reloaded.ConfigGeneration != 2 {
+		t.Fatalf("status after the reload replied does not carry configuration generation 2: %s", output)
+	}
+	// The log writer can lag the reply, so the reload's own line is waited
+	// for.
+	reloadEvent, _ := daemon.log.Outcome(t, 30*time.Second, reloadMark, "config:reload", "succeeded")
+	if reloadEvent.ConfigGeneration != 2 {
+		t.Fatalf("the reload's log line names configuration generation %d, want 2: %+v", reloadEvent.ConfigGeneration, reloadEvent)
+	}
+
+	snapshotJob := "snapshot:" + source
+	initial, afterInitial := daemon.log.Outcome(t, 30*time.Second, 0, snapshotJob, "succeeded")
+	ownedSnapshot(t, initial.Snapshot)
 	trigger := command(binary, "trigger", "--config", configPath, source)
 	if !strings.Contains(trigger, source) {
 		t.Fatalf("trigger response did not accept %s: %s", source, trigger)
 	}
-	waitFor("triggered owned snapshot", func() bool {
-		state, inspectErr := direct.InspectState(t.Context(), source, false)
-		return inspectErr == nil && len(lifecycle.Snapshots(state, source)) > initialSnapshots
-	})
+	// Counted from the first success rather than from the trigger's reply,
+	// which the log writer can lag. A forced run skips the deadline check, so
+	// the next success is the triggered snapshot; a scheduled run between them
+	// found the first snapshot's deadline and changed nothing.
+	triggered, _ := daemon.log.Outcome(t, 30*time.Second, afterInitial, snapshotJob, "succeeded", "scheduled")
+	if triggered.Snapshot == initial.Snapshot {
+		t.Fatalf("the triggered run reported the initial snapshot %s again", initial.Snapshot)
+	}
+	ownedSnapshot(t, triggered.Snapshot)
 
-	if err := daemon.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := daemon.command.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	if err := daemon.Wait(); err != nil {
-		t.Fatalf("daemon did not stop cleanly: %v: %s", err, daemonLog.String())
+	if err := <-daemon.exited; err != nil {
+		t.Fatalf("daemon did not stop cleanly: %v: %s", err, daemon.log.String())
 	}
-	stopped = true
 	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
 		t.Fatalf("daemon left its control socket behind: %v", err)
 	}

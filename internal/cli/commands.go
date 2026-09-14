@@ -160,6 +160,8 @@ func (c *daemonCommand) Run(env *commandEnvironment) error {
 		case <-finished:
 		}
 	}()
+	// The control server is serving before Run writes "daemon started", which
+	// the operations guide and the control integration suite rely on.
 	runErr := runtime.Run(env.Context)
 	close(finished)
 	return errors.Join(runErr, server.Close())
