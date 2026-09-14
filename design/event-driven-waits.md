@@ -1,6 +1,6 @@
 # Design: event-driven waits
 
-Status: chunks A, B, C, D, E, F, G, I, and J have landed; H has not.
+Status: every chunk, A through J, has landed.
 
 The daemon's status contract is a map of the latest event per job. Everything
 that wants to know what the daemon did - a test, an operator, a log pipeline -
@@ -1293,6 +1293,14 @@ instead.
 sleep remains in `test/integration/control/`, and a restart that created a
 duplicate snapshot fails on the job ending `succeeded` rather than on a count
 taken after a guessed delay.
+
+As built, the restarted daemon's first outcome for the snapshot job must also
+name the first daemon's snapshot, since `scheduled` carries the owned snapshot
+whose age set the deadline (J), so the test shows which snapshot was adopted
+and not only that nothing was created. The snapshot count is taken once after
+that outcome. The same anchor replaced power-loss snapshot-commit's readiness
+wait, as 4.2 planned. Its replacement must end `scheduled` naming the snapshot
+that survived the kill before the lineage is checked.
 
 **Chunk J - events carry identity.** 3.4's identity: the run ID and `Identity`
 on `Event`, additive `JobStatus` fields, the log keys, the interactive tail, and

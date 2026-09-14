@@ -203,82 +203,59 @@ func TestGuestDaemonAbruptRestart(t *testing.T) {
 	zfstest.RegisterCleanup(t, source)
 	command("zfs", "set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x5m", source)
 
-	var firstLog bytes.Buffer
-	first := exec.CommandContext(t.Context(), binary, "daemon", "--config", configPath)
-	first.Stdout, first.Stderr = &firstLog, &firstLog
-	if err := first.Start(); err != nil {
-		t.Fatal(err)
-	}
-	firstStopped := false
-	t.Cleanup(func() {
-		if !firstStopped && first.Process != nil {
-			_ = first.Process.Kill()
-			_ = first.Wait()
-		}
-	})
-	waitFor := func(description string, log *bytes.Buffer, check func() bool) {
-		t.Helper()
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			if check() {
-				return
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		t.Fatalf("timed out waiting for %s; daemon log: %s", description, log.String())
-	}
-	firstSnapshots := 0
-	waitFor("initial snapshot before abrupt stop", &firstLog, func() bool {
-		state, inspectErr := direct.InspectState(t.Context(), source, false)
-		if inspectErr != nil {
-			return false
-		}
-		firstSnapshots = len(lifecycle.Snapshots(state, source))
-		return firstSnapshots > 0
-	})
-	if err := first.Process.Kill(); err != nil {
-		t.Fatal(err)
-	}
-	if err := first.Wait(); err == nil {
-		t.Fatal("abruptly stopped daemon exited successfully")
-	}
-	firstStopped = true
-	if info, err := os.Lstat(socket); err != nil || info.Mode()&os.ModeSocket == 0 {
-		t.Fatalf("abrupt stop did not leave the expected stale socket: %v", err)
-	}
-
-	var secondLog bytes.Buffer
-	second := exec.CommandContext(t.Context(), binary, "daemon", "--config", configPath)
-	second.Stdout, second.Stderr = &secondLog, &secondLog
-	if err := second.Start(); err != nil {
-		t.Fatal(err)
-	}
-	secondStopped := false
-	t.Cleanup(func() {
-		if !secondStopped && second.Process != nil {
-			_ = second.Process.Kill()
-			_ = second.Wait()
-		}
-	})
-	waitFor("control socket after restart", &secondLog, func() bool {
-		output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput()
-		return statusErr == nil && bytes.Contains(output, []byte(source))
-	})
-	time.Sleep(500 * time.Millisecond)
+	snapshotJob := "snapshot:" + source
+	first := runGuestDaemon(t, binary, "", "daemon", "--config", configPath)
+	initial, _ := first.log.Outcome(t, 30*time.Second, 0, snapshotJob, "succeeded")
 	state, err := direct.InspectState(t.Context(), source, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count := len(lifecycle.Snapshots(state, source)); count != firstSnapshots {
-		t.Fatalf("restart created a duplicate snapshot: before=%d after=%d", firstSnapshots, count)
+	firstSnapshots := lifecycle.Snapshots(state, source)
+	if !slices.ContainsFunc(firstSnapshots, func(snapshot lifecycle.Snapshot) bool { return snapshot.Name == initial.Snapshot }) {
+		t.Fatalf("the snapshot job reported creating %s, which the pool does not hold: %+v", initial.Snapshot, state.Objects)
 	}
-	if err := second.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := first.command.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	if err := second.Wait(); err != nil {
-		t.Fatalf("restarted daemon did not stop cleanly: %v: %s", err, secondLog.String())
+	if err := <-first.exited; err == nil {
+		t.Fatal("abruptly stopped daemon exited successfully")
 	}
-	secondStopped = true
+	if info, err := os.Lstat(socket); err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("abrupt stop did not leave the expected stale socket: %v", err)
+	}
+
+	// The restarted daemon's first scan makes the root due at once, so its
+	// snapshot job always runs. With the first daemon's snapshot adopted, that
+	// snapshot sets a later deadline and the job ends scheduled naming it; a
+	// restart that lost track of it would create a duplicate and end
+	// succeeded. The job's first outcome is the answer, rather than a count
+	// taken after a guessed delay.
+	second := runGuestDaemon(t, binary, "", "daemon", "--config", configPath)
+	restarted, _ := second.log.Ended(t, 30*time.Second, 0, snapshotJob)
+	if restarted.State == "succeeded" {
+		t.Fatalf("restart created a duplicate snapshot %s beside %s\n%s", restarted.Snapshot, initial.Snapshot, second.log.Describe())
+	}
+	if restarted.State != "scheduled" || restarted.Reason != "existing owned snapshot sets the next deadline" || restarted.Snapshot != initial.Snapshot {
+		t.Fatalf("the restarted daemon did not take its deadline from %s: %+v\n%s", initial.Snapshot, restarted, second.log.Describe())
+	}
+	state, err = direct.InspectState(t.Context(), source, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := len(lifecycle.Snapshots(state, source)); count != len(firstSnapshots) {
+		t.Fatalf("restart created a duplicate snapshot: before=%d after=%d", len(firstSnapshots), count)
+	}
+	// The job ran, so the restarted daemon had started and replaced the stale
+	// socket; one read shows it serving the root it scheduled.
+	if output, statusErr := exec.CommandContext(t.Context(), binary, "status", "--config", configPath).CombinedOutput(); statusErr != nil || !bytes.Contains(output, []byte(source)) {
+		t.Fatalf("the restarted daemon does not serve status listing %s: %v: %s", source, statusErr, output)
+	}
+	if err := second.command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second.exited; err != nil {
+		t.Fatalf("restarted daemon did not stop cleanly: %v: %s", err, second.log.String())
+	}
 	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
 		t.Fatalf("restarted daemon left its control socket behind: %v", err)
 	}
