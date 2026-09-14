@@ -107,7 +107,7 @@ failure attributable to the transport instead of to the test.
 | Behaviour | Owned by |
 | --- | --- |
 | Daemon control socket lifecycle | `TestGuestDaemonControl` |
-| Recovery after an abrupt restart | `TestGuestDaemonAbruptRestart` |
+| Recovery after an abrupt restart: the restarted snapshot job ends `scheduled` on the adopted snapshot rather than duplicating it | `TestGuestDaemonAbruptRestart` |
 | Packaged systemd unit start/reload/stop, not enabled by default | `targets/cachyos/run.sh` |
 | `pairing create` / `import` / `list` / `revoke` against a real listener | `TestGuestPairingLifecycle` |
 | A revoked credential refused by the listener, and refused finally rather than as an outage | `TestGuestPairingLifecycle/revoke` |
