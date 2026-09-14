@@ -1,6 +1,6 @@
 # Design: event-driven waits
 
-Status: chunks A, B, C, D, E, F, I, and J have landed; G and H have not.
+Status: chunks A, B, C, D, E, F, G, I, and J have landed; H has not.
 
 The daemon's status contract is a map of the latest event per job. Everything
 that wants to know what the daemon did - a test, an operator, a log pipeline -
@@ -844,8 +844,9 @@ condition is one the test process owns (1). A wait takes a predicate over the
 lines and a bound, and can name an occurrence ("the second `succeeded` for this
 job") because the sequence is complete. It fails at once on a "status log
 dropped transitions" line, and on expiry prints every line it decoded. Socket
-appearance stays a poll - a missing file has no notifier short of inotify, and
-the bound is short.
+appearance was planned to stay a poll, since a missing file has no notifier
+short of inotify; as built it waits on the daemon's start line instead (chunk
+G).
 
 Waits on what the daemon did read the log; assertions about the control plane
 itself stay on the socket, as one read after the log shows the behaviour. That
@@ -885,8 +886,8 @@ after a kill or a reseed wait on their own logs:
 - The reseeded daemon's convergence (`:330-342`) becomes the first `succeeded`
   for the same job, then one read for the bookmark and the destination.
 
-The contention tests' waits (`:421`, `:463`, `:496`, `:530`, `:556`) have not been
-mapped here.
+The contention tests' waits (`:421`, `:463`, `:496`, `:530`, `:556`) were not
+mapped here; chunk G's as-built notes map them.
 
 A test that subscribes to `WatchStatus` remains the control plane's own
 coverage, in chunk C; the suite's waits do not depend on it.
@@ -1244,6 +1245,49 @@ tests' waits
 first. Done when no test in `test/integration/control/` re-runs `boomerangz
 status` in a loop or polls the pool while waiting for the daemon, and a forced
 failure prints the log lines the waiter decoded.
+
+As built, the waiter is `statuswait.Log`, and it shares its wait loop, `Outcome`
+rule, and transition formatting with chunk F's `Waiter` through one generic
+sequence, so the two cannot drift apart on what an outcome is. It records every
+line of output, decodes the three contract lines from the daemon's JSON log,
+and treats any other line as itself. A contract line it cannot decode fails
+every wait, as a gap line does: a renamed key would otherwise read as a line no
+wait is looking for, and the wait would time out instead of naming the break.
+Both checks cover the whole log rather than what follows the cursor, because an
+occurrence counted past a gap is not the occurrence it claims to be. The
+control suite's `runGuestDaemon` attaches the log before starting the process
+and ends it when `Wait` returns, which is after the output is copied, so a wait
+on a daemon that exited fails at once with every line it wrote. `Ended`, beside
+`Outcome`, returns a job's first outcome not named as a retry, for the tests
+that say why the outcome was the wrong one.
+
+The socket poll went too. `daemon started` is written by `Runtime.Run`, which
+the command calls only after `StartServerWithReplication` has bound the socket,
+set its mode, and started serving it, so that line is the point a poll was
+approximating. The operations guide now says so, which makes the line part of
+what the suite relies on.
+
+4.2 left the contention tests unmapped. Their waits map as follows. The two
+"serving" waits in `TestGuestDaemonSocketContention` become `daemon started`,
+then one status read. In `TestGuestDatasetContention`, the owner's claim becomes
+its first `succeeded` for the dataset's snapshot job, then one read for the
+lineage and the snapshot that job names. The intruder's readiness wait was a
+trigger retried until accepted. It becomes the intruder's first `discovery
+complete` line and then one trigger of the uncontended root, which must be
+accepted. Both datasets exist before that daemon starts, and `applyGeneration`
+updates the scheduler, which `Trigger` consults, before it publishes the view
+the line follows. The receive-commit phase waits for `Ended` with
+`waiting-retry` as its retry and then asserts `blocked` with a reseed reason.
+The reseeded daemon's success must name the destination root, and one read then
+requires both the source's bookmark and the destination. The poll it replaced
+accepted either.
+
+Two things built alongside. `TestGuestDaemonControl` also waits for the
+`config:reload` line and checks the generation it names. The reload was the
+line 3.9 added and nothing end to end read it. And `jobStatus` used to report a
+failed status read as an absent job. As a poll that only meant another try, but
+its one remaining caller asserts the job is absent, so it now fails the test
+instead.
 
 **Chunk H - the restart anchor.** 4.3, on chunk G's waiter. Done when no bare
 sleep remains in `test/integration/control/`, and a restart that created a

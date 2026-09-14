@@ -13,6 +13,10 @@ journalctl -u boomerangz.service
 
 The daemon logs to the system journal when run by systemd.
 
+The daemon writes an info-level `daemon started` line once its control socket
+is accepting connections and its worker pools are running, and a
+`daemon stopped` line as it exits.
+
 ### Job state lines
 
 Every job state change is written as one `worker state` line, in the order

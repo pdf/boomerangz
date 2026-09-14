@@ -199,3 +199,19 @@ one that had not started has none. Assert only what that implies. Never rely on
 a cadence, a grace period, or elapsed time to keep a read ahead of the daemon's
 next action. A failed wait lists every transition it received, which is the
 first thing to read when one times out.
+
+A test that runs the daemon as a subprocess cannot subscribe before it starts
+working, so it waits on the daemon's log instead: `runGuestDaemon` attaches a
+`statuswait.Log` as the process's output before starting it, and the log
+carries every transition from process start. Wait for readiness on the
+`daemon started` line, which follows the control socket being bound, and for
+discovery on the first `discovery complete` line. Wait for a job with
+`Outcome`, or with `Ended` where the test asserts which outcome it reached, and
+name the second occurrence of a transition by the cursor the first wait
+returned. Then make each control-plane or pool assertion as one read. A wait
+fails at once when the daemon exits, and when the log holds a `status log
+dropped transitions` line anywhere, since nothing counted past a gap can be
+trusted; a failed wait lists every line the log decoded. Never poll `boomerangz
+status` or the pool, and never sleep to let the daemon get ahead or fall
+quiet: "nothing else happened" is the outcome of the job that would have done
+it.

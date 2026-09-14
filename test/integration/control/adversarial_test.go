@@ -3,15 +3,14 @@
 package control_test
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -20,32 +19,15 @@ import (
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/testutil/zfstest"
 	"github.com/pdf/boomerangz/internal/zfs"
+	"github.com/pdf/boomerangz/test/integration/internal/statuswait"
 )
-
-// lockedBuffer collects a subprocess's output for reporting while the test
-// reads it concurrently.
-type lockedBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.String()
-}
 
 // daemonProcess is one boomerangz daemon subprocess under test.
 type daemonProcess struct {
 	command *exec.Cmd
-	log     *lockedBuffer
-	exited  chan error
+	log     *statuswait.Log
+	exited  chan error    // receives the process's exit once
+	done    chan struct{} // closed once the process has exited
 }
 
 // startGuestDaemon runs the packaged daemon against one configuration,
@@ -54,8 +36,17 @@ type daemonProcess struct {
 // that owns the process.
 func startGuestDaemon(t *testing.T, binary, configPath, dropInDir, pathPrefix string) *daemonProcess {
 	t.Helper()
-	log := &lockedBuffer{}
-	command := exec.CommandContext(t.Context(), binary, "daemon", "--config", configPath, "--config-dir", dropInDir)
+	return runGuestDaemon(t, binary, pathPrefix, "daemon", "--config", configPath, "--config-dir", dropInDir)
+}
+
+// runGuestDaemon runs binary with args, its output decoded by a log waiter
+// attached before it starts, so the log holds every transition the daemon
+// records. The log ends when the process exits, so a wait on a daemon that
+// died fails at once rather than on its bound.
+func runGuestDaemon(t *testing.T, binary, pathPrefix string, args ...string) *daemonProcess {
+	t.Helper()
+	log := statuswait.NewLog()
+	command := exec.CommandContext(t.Context(), binary, args...)
 	command.Stdout = log
 	command.Stderr = log
 	command.WaitDelay = 5 * time.Second
@@ -65,32 +56,33 @@ func startGuestDaemon(t *testing.T, binary, configPath, dropInDir, pathPrefix st
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	process := &daemonProcess{command: command, log: log, exited: make(chan error, 1)}
-	go func() { process.exited <- command.Wait() }()
+	process := &daemonProcess{command: command, log: log, exited: make(chan error, 1), done: make(chan struct{})}
+	go func() {
+		// Wait returns once the output is copied, so the log is complete when
+		// it ends.
+		err := command.Wait()
+		log.End(err)
+		process.exited <- err
+		close(process.done)
+	}()
 	t.Cleanup(func() {
 		if command.Process != nil {
 			_ = command.Process.Kill()
 		}
 		select {
-		case <-process.exited:
+		case <-process.done:
 		case <-time.After(10 * time.Second):
 		}
 	})
 	return process
 }
 
-// waitForCondition polls until check passes, reporting the daemon log on
-// timeout so a failure says what the daemon was doing.
-func waitForCondition(t *testing.T, description string, log *lockedBuffer, timeout time.Duration, check func() bool) {
+// waitStarted waits for the daemon's start line, which it writes once its
+// control socket is serving: the command binds the socket before it runs the
+// daemon.
+func (p *daemonProcess) waitStarted(t *testing.T, bound time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if check() {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s; daemon log: %s", description, log.String())
+	p.log.Next(t, "the daemon to start", bound, 0, statuswait.Message(statuswait.MessageStarted))
 }
 
 // killingZFS writes a zfs stand-in that runs the real binary and then kills
@@ -208,12 +200,17 @@ func TestGuestDaemonPowerLoss(t *testing.T) {
 			t.Fatalf("the killed daemon left a snapshot without local root authority: %+v", state.Properties)
 		}
 
-		// A restarted daemon must adopt what it finds rather than fork.
+		// A restarted daemon must adopt what it finds rather than fork. Its
+		// first scan makes the root due at once, so its snapshot job always
+		// runs; the survivor, adopted as owned, sets the next deadline, and the
+		// job ends scheduled naming it. That outcome is the point at which the
+		// replacement has looked at the dataset, so the checks follow it.
 		survivorName := survivor.Name
 		replacement := startGuestDaemon(t, binary, configPath, dropInDir, "")
-		waitForCondition(t, "the replacement daemon to serve", replacement.log, 60*time.Second, func() bool {
-			return exec.CommandContext(t.Context(), binary, "status", "--config", configPath, "--config-dir", dropInDir).Run() == nil
-		})
+		adopted, _ := replacement.log.Ended(t, 60*time.Second, 0, "snapshot:"+dataset)
+		if adopted.State != "scheduled" || adopted.Reason != "existing owned snapshot sets the next deadline" || adopted.Snapshot != survivorName {
+			t.Fatalf("the restarted daemon did not adopt the survivor %s as its deadline: %+v\n%s", survivorName, adopted, replacement.log.Describe())
+		}
 		after, err := direct.InspectState(t.Context(), dataset, false)
 		if err != nil {
 			t.Fatal(err)
@@ -299,15 +296,16 @@ func TestGuestDaemonPowerLoss(t *testing.T) {
 		// invert this phase - see chunk F in design/integration-coverage.md.
 		replacement := startGuestDaemon(t, binary, configPath, dropInDir, "")
 		job := "local:" + dataset + ":" + destinationRoot
-		waitForCondition(t, "the crashed target to report its state", replacement.log, 180*time.Second, func() bool {
-			reported, found := jobStatus(t, binary, configPath, dropInDir, job)
-			return found && (reported.State == "blocked" || reported.State == "succeeded")
-		})
-		reported, _ := jobStatus(t, binary, configPath, dropInDir, job)
-		if reported.State == "succeeded" {
+		// A transfer refused by a concurrent change to its source retries as
+		// waiting-retry, so only the outcome after any of those says how the
+		// crashed target was judged.
+		reported, _ := replacement.log.Ended(t, 180*time.Second, 0, job, "waiting-retry")
+		switch {
+		case reported.State == "succeeded":
 			t.Fatal("the daemon recovered unattended; this phase is stale and should be inverted")
-		}
-		if !strings.Contains(reported.Reason, "reseed") {
+		case reported.State != "blocked":
+			t.Fatalf("the crashed target ended %s rather than blocking: %+v\n%s", reported.State, reported, replacement.log.Describe())
+		case !strings.Contains(reported.Reason, "reseed"):
 			t.Fatalf("the block does not tell an operator how to recover: %+v", reported)
 		}
 		if _, err := direct.InspectDatasetIdentity(t.Context(), destinationRoot); err != nil {
@@ -328,18 +326,20 @@ func TestGuestDaemonPowerLoss(t *testing.T) {
 			t.Fatalf("the reseed the block asked for failed: %v: %s", err, output)
 		}
 		recovered := startGuestDaemon(t, binary, configPath, dropInDir, "")
-		waitForCondition(t, "the reseeded target to converge", recovered.log, 180*time.Second, func() bool {
-			state, inspectErr := direct.InspectState(t.Context(), dataset, false)
-			if inspectErr == nil {
-				for _, object := range state.Objects {
-					if object.Type == "bookmark" {
-						return true
-					}
-				}
-			}
-			convergent, found := jobStatus(t, binary, configPath, dropInDir, job)
-			return found && convergent.State == "succeeded"
-		})
+		converged, _ := recovered.log.Outcome(t, 180*time.Second, 0, job, "succeeded", "waiting-retry")
+		if converged.Destination != destinationRoot || converged.Snapshot == "" {
+			t.Fatalf("the reseeded target's success does not name what it replicated to %s: %+v", destinationRoot, converged)
+		}
+		// A transfer reports success only after its checkpoint, so the source
+		// holds the bookmark that records it and the destination exists.
+		state, err := direct.InspectState(t.Context(), dataset, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bookmarked := slices.ContainsFunc(state.Objects, func(object zfs.Object) bool { return object.Type == "bookmark" })
+		if !bookmarked {
+			t.Fatalf("the reseeded target reported success without a bookmark on the source: %+v", state.Objects)
+		}
 		if _, err := direct.InspectDatasetIdentity(t.Context(), destinationRoot); err != nil {
 			t.Fatalf("the reseeded target reported success without a destination: %v", err)
 		}
@@ -418,7 +418,10 @@ func TestGuestDaemonSocketContention(t *testing.T) {
 	})
 
 	first := startGuestDaemon(t, binary, configPath, dropInDir, "")
-	waitForCondition(t, "the first daemon to serve", first.log, 60*time.Second, func() bool { return serving(t) })
+	first.waitStarted(t, 60*time.Second)
+	if !serving(t) {
+		t.Fatalf("the first daemon started without serving its control socket: %s", first.log.String())
+	}
 
 	chainOK := true
 	chain := func(name string, fn func(*testing.T)) {
@@ -460,7 +463,10 @@ func TestGuestDaemonSocketContention(t *testing.T) {
 			t.Fatalf("killed daemon left no socket to reclaim: %v", err)
 		}
 		replacement := startGuestDaemon(t, binary, configPath, dropInDir, "")
-		waitForCondition(t, "the replacement daemon to serve", replacement.log, 60*time.Second, func() bool { return serving(t) })
+		replacement.waitStarted(t, 60*time.Second)
+		if !serving(t) {
+			t.Fatalf("the replacement daemon started without reclaiming the socket: %s", replacement.log.String())
+		}
 		if err := replacement.command.Process.Signal(syscall.SIGTERM); err != nil {
 			t.Fatal(err)
 		}
@@ -492,16 +498,19 @@ func TestGuestDatasetContention(t *testing.T) {
 
 	ownerConfig, ownerDropIns, _ := scratchConfig(t)
 	owner := startGuestDaemon(t, binary, ownerConfig, ownerDropIns, "")
-	var lineage string
-	waitForCondition(t, "the first daemon to claim the dataset", owner.log, 60*time.Second, func() bool {
-		state, inspectErr := direct.InspectState(t.Context(), contended, false)
-		if inspectErr != nil || len(lifecycle.Snapshots(state, contended)) == 0 {
-			return false
-		}
-		lineage = localProperty(t, state, contended, lifecycle.LineageProperty)
-		return lineage != ""
-	})
-	claimed := len(snapshotNames(t, direct, contended))
+	// A root's first snapshot is what claims it: the lineage is written with
+	// that snapshot, and the job reports success once both are committed.
+	claim, _ := owner.log.Outcome(t, 60*time.Second, 0, "snapshot:"+contended, "succeeded")
+	claimedState, err := direct.InspectState(t.Context(), contended, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineage := localProperty(t, claimedState, contended, lifecycle.LineageProperty)
+	claimedSnapshots := lifecycle.Snapshots(claimedState, contended)
+	if lineage == "" || !slices.ContainsFunc(claimedSnapshots, func(snapshot lifecycle.Snapshot) bool { return snapshot.Name == claim.Snapshot }) {
+		t.Fatalf("the first daemon reported claiming %s without its lineage or snapshot %s: %+v", contended, claim.Snapshot, claimedState.Objects)
+	}
+	claimed := len(claimedSnapshots)
 
 	// The contention is mediated by the markers on the dataset, not by two
 	// live processes, so the owner's work is done once it has claimed one.
@@ -527,9 +536,6 @@ func TestGuestDatasetContention(t *testing.T) {
 	// neither the lock nor the socket stops it.
 	intruderConfig, intruderDropIns, _ := scratchConfig(t)
 	intruder := startGuestDaemon(t, binary, intruderConfig, intruderDropIns, "")
-	waitForCondition(t, "the second daemon to serve", intruder.log, 60*time.Second, func() bool {
-		return exec.CommandContext(t.Context(), binary, "status", "--config", intruderConfig, "--config-dir", intruderDropIns).Run() == nil
-	})
 
 	// The refusal lands at the scheduling layer, earlier and quieter than the
 	// ownership guard in CreateSnapshot: actionableRoot admits a root only
@@ -551,12 +557,16 @@ func TestGuestDatasetContention(t *testing.T) {
 			"--config", intruderConfig, "--config-dir", intruderDropIns, target).CombinedOutput()
 		return string(output), runErr
 	}
-	// Waiting on the control arm is also how this waits for discovery, so the
-	// contended trigger below is asked of a daemon that is demonstrably ready.
-	waitForCondition(t, "the second daemon to accept an uncontended root", intruder.log, 90*time.Second, func() bool {
-		_, runErr := trigger(t, uncontended)
-		return runErr == nil
-	})
+	//
+	// Both datasets exist before the second daemon starts, so its first
+	// discovery generation classifies both. The generation's line is written
+	// once the scheduler has taken its roots and status reflects them, so
+	// both triggers are asked of a daemon that has made up its mind, and each
+	// is asked once.
+	intruder.log.Next(t, "the second daemon's first discovery generation", 90*time.Second, 0, statuswait.Discovered)
+	if output, runErr := trigger(t, uncontended); runErr != nil {
+		t.Fatalf("the second installation refused an uncontended root it discovered: %v: %s", runErr, output)
+	}
 
 	output, triggerErr := trigger(t, contended)
 	if triggerErr == nil {
@@ -609,36 +619,25 @@ func localProperty(t *testing.T, state zfs.State, dataset, name string) string {
 	return ""
 }
 
-func snapshotNames(t *testing.T, direct *zfs.Direct, dataset string) []string {
-	t.Helper()
-	state, err := direct.InspectState(t.Context(), dataset, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, snapshot := range lifecycle.Snapshots(state, dataset) {
-		names = append(names, snapshot.Name)
-	}
-	return names
-}
-
 type reportedJob struct {
 	Job    string `json:"job"`
 	State  string `json:"state"`
 	Reason string `json:"reason"`
 }
 
+// jobStatus reads the daemon's status once and returns job's row. A read
+// that fails fails the test, so an absent row means the daemon has none.
 func jobStatus(t *testing.T, binary, configPath, dropInDir, job string) (reportedJob, bool) {
 	t.Helper()
 	output, err := exec.CommandContext(t.Context(), binary, "status", "--config", configPath, "--config-dir", dropInDir).Output()
 	if err != nil {
-		return reportedJob{}, false
+		t.Fatalf("read daemon status: %v", err)
 	}
 	var status struct {
 		Jobs []reportedJob `json:"jobs"`
 	}
-	if json.Unmarshal(output, &status) != nil {
-		return reportedJob{}, false
+	if err := json.Unmarshal(output, &status); err != nil {
+		t.Fatalf("decode daemon status: %v: %s", err, output)
 	}
 	for _, candidate := range status.Jobs {
 		if candidate.Job == job {

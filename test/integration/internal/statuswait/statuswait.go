@@ -1,10 +1,15 @@
-// Package statuswait waits on a daemon's status subscription rather than
-// sampling its status.
+// Package statuswait waits on what a daemon reports rather than sampling its
+// status.
 //
-// A Waiter subscribes when it is created, so it observes every transition
-// recorded from then on: create it before starting the work it observes.
-// Transitions a subscription missed before it existed are gone, and a wait for
-// one fails on its bound as though the daemon never did the work.
+// A Waiter waits on an in-process daemon's status subscription. It subscribes
+// when it is created, so it observes every transition recorded from then on:
+// create it before starting the work it observes. Transitions a subscription
+// missed before it existed are gone, and a wait for one fails on its bound as
+// though the daemon never did the work.
+//
+// A Log waits on a daemon subprocess's log, which carries every transition
+// from process start, so it can be attached before the process starts and
+// needs no subscription.
 package statuswait
 
 import (
@@ -12,7 +17,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -25,21 +29,20 @@ type Source interface {
 	ControlStatus() daemonstate.ControlSnapshot
 }
 
-// Cursor is a position in the sequence of transitions a Waiter has received:
-// the number received before it.
+// Cursor is a position in a recorded sequence: the number of entries before
+// it. A Waiter's sequence is the transitions it received; a Log's is the
+// lines it decoded.
 type Cursor int
 
 // Waiter records every transition its subscription delivers, in order, and
 // wakes waiters on each delivery.
 type Waiter struct {
-	source      Source
-	mu          sync.Mutex
-	transitions []daemonstate.Event
-	revision    uint64 // of the newest state received
-	ended       bool
-	err         error
-	changed     chan struct{} // closed and replaced on every change
+	source   Source
+	seq      *sequence[daemonstate.Event]
+	revision uint64 // of the newest state received; guarded by seq.mu
 }
+
+const subscriptionSource = "status subscription"
 
 // New subscribes to source for the life of the test.
 func New(t testing.TB, source Source) *Waiter {
@@ -50,7 +53,7 @@ func New(t testing.TB, source Source) *Waiter {
 		cancel()
 		t.Fatalf("subscribe to daemon status: %v", err)
 	}
-	w := &Waiter{source: source, changed: make(chan struct{})}
+	w := &Waiter{source: source, seq: newSequence[daemonstate.Event]()}
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -67,31 +70,18 @@ func New(t testing.TB, source Source) *Waiter {
 // behind the daemon between waits.
 func (w *Waiter) drain(subscription daemonstate.Subscription) {
 	for update := range subscription.Updates() {
-		w.mu.Lock()
-		w.transitions = append(w.transitions, update.Transitions...)
-		w.revision = max(w.revision, update.State.Revision)
-		w.broadcastLocked()
-		w.mu.Unlock()
+		w.seq.update(func() {
+			w.seq.items = append(w.seq.items, update.Transitions...)
+			w.revision = max(w.revision, update.State.Revision)
+		})
 	}
-	w.mu.Lock()
-	w.ended, w.err = true, subscription.Err()
-	w.broadcastLocked()
-	w.mu.Unlock()
-}
-
-func (w *Waiter) broadcastLocked() {
-	close(w.changed)
-	w.changed = make(chan struct{})
+	w.seq.update(func() { w.seq.ended, w.seq.err = true, subscription.Err() })
 }
 
 // Mark returns the position after every transition received so far. A
 // transition recorded before Mark was called can still arrive after it; use
 // Settle where that matters.
-func (w *Waiter) Mark() Cursor {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return Cursor(len(w.transitions))
-}
+func (w *Waiter) Mark() Cursor { return w.seq.mark() }
 
 // Settle returns a cursor past every transition the daemon recorded before
 // Settle was called, so every transition after it was recorded later. A test
@@ -106,10 +96,10 @@ func (w *Waiter) Settle(t testing.TB, bound time.Duration) Cursor {
 	t.Helper()
 	revision := w.source.ControlStatus().Revision
 	var at Cursor
-	w.wait(t, fmt.Sprintf("status revision %d to be delivered", revision), bound, 0, func(transitions []daemonstate.Event, received uint64) (bool, error) {
+	w.seq.wait(t, fmt.Sprintf("status revision %d to be delivered", revision), bound, 0, subscriptionSource, func(transitions []daemonstate.Event) (bool, error) {
 		at = Cursor(len(transitions))
-		return received >= revision, nil
-	})
+		return w.revision >= revision, nil
+	}, describeTransitions)
 	return at
 }
 
@@ -117,18 +107,10 @@ func (w *Waiter) Settle(t testing.TB, bound time.Duration) Cursor {
 // subscription ends, for a test waiting on the waiter and something else at
 // once. Take it before reading what it guards, so a delivery in between is
 // not missed.
-func (w *Waiter) Changed() <-chan struct{} {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.changed
-}
+func (w *Waiter) Changed() <-chan struct{} { return w.seq.next() }
 
 // Transitions returns a copy of every transition received so far.
-func (w *Waiter) Transitions() []daemonstate.Event {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return slices.Clone(w.transitions)
-}
+func (w *Waiter) Transitions() []daemonstate.Event { return w.seq.clone() }
 
 // Condition inspects the transitions received from a wait's cursor. It
 // reports whether the wait is satisfied, or an error that fails it at once.
@@ -140,35 +122,7 @@ type Condition func(transitions []daemonstate.Event) (bool, error)
 // failure lists the transitions received from from.
 func (w *Waiter) Until(t testing.TB, description string, bound time.Duration, from Cursor, condition Condition) {
 	t.Helper()
-	w.wait(t, description, bound, from, func(transitions []daemonstate.Event, _ uint64) (bool, error) {
-		return condition(transitions)
-	})
-}
-
-func (w *Waiter) wait(t testing.TB, description string, bound time.Duration, from Cursor, condition func([]daemonstate.Event, uint64) (bool, error)) {
-	t.Helper()
-	timer := time.NewTimer(bound)
-	defer timer.Stop()
-	for {
-		w.mu.Lock()
-		received := w.transitions[min(int(from), len(w.transitions)):]
-		done, err := condition(received, w.revision)
-		ended, endErr, changed := w.ended, w.err, w.changed
-		w.mu.Unlock()
-		switch {
-		case err != nil:
-			t.Fatalf("waiting for %s: %v\n%s", description, err, describe(received))
-		case done:
-			return
-		case ended:
-			t.Fatalf("waiting for %s: status subscription ended: %v\n%s", description, endErr, describe(received))
-		}
-		select {
-		case <-changed:
-		case <-timer.C:
-			t.Fatalf("timed out after %s waiting for %s\n%s", bound, description, w.describeFrom(from))
-		}
-	}
+	w.seq.wait(t, description, bound, from, subscriptionSource, condition, describeTransitions)
 }
 
 // Next waits up to bound for the first transition after from that match
@@ -204,20 +158,15 @@ func (w *Waiter) Outcome(t testing.TB, bound time.Duration, from Cursor, job, wa
 		found daemonstate.Event
 		at    Cursor
 	)
-	description := job + " to report " + want
-	if len(retried) > 0 {
-		description += " after any of " + strings.Join(retried, ", ")
-	}
-	w.Until(t, description, bound, from, func(transitions []daemonstate.Event) (bool, error) {
+	w.Until(t, outcomeDescription(job, want, retried), bound, from, func(transitions []daemonstate.Event) (bool, error) {
 		for index, event := range transitions {
-			switch {
-			case event.Job != job:
-			case event.State == want:
+			matched, err := outcomeOf(event, job, want, retried)
+			if err != nil {
+				return false, err
+			}
+			if matched {
 				found, at = event, from+Cursor(index)+1
 				return true, nil
-			case Running(event) || slices.Contains(retried, event.State):
-			default:
-				return false, fmt.Errorf("%s ended %s: %s", job, event.State, event.Reason)
 			}
 		}
 		return false, nil
@@ -331,10 +280,8 @@ func Count(transitions []daemonstate.Event, match func(daemonstate.Event) bool) 
 	return count
 }
 
-func (w *Waiter) describeFrom(from Cursor) string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return describe(w.transitions[min(int(from), len(w.transitions)):])
+func describeTransitions(transitions []daemonstate.Event, from Cursor) string {
+	return describe(transitions[min(int(from), len(transitions)):])
 }
 
 func describe(transitions []daemonstate.Event) string {
@@ -344,13 +291,8 @@ func describe(transitions []daemonstate.Event) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d transitions received:", len(transitions))
 	for _, event := range transitions {
-		fmt.Fprintf(&b, "\n  %s %s pool=%s state=%s", event.At.Format(time.RFC3339Nano), event.Job, event.Pool, event.State)
-		if event.Target != "" {
-			fmt.Fprintf(&b, " target=%s", event.Target)
-		}
-		if event.Reason != "" {
-			fmt.Fprintf(&b, " reason=%q", event.Reason)
-		}
+		b.WriteString("\n  ")
+		describeEvent(&b, event)
 	}
 	return b.String()
 }
