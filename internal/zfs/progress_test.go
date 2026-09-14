@@ -124,8 +124,15 @@ func TestProgressReportsNothingAfterFinish(t *testing.T) {
 	}
 	last := meter.Finish(false)
 	finished.Store(true)
-	// Absence can only be checked over a span: several intervals.
-	time.Sleep(3 * ProgressInterval)
+	// The clock goroutine is the only reporter besides Finish's caller, and
+	// Finish returns only once it has exited, so nothing can report later.
+	// That is checked directly rather than by waiting for a sample that
+	// should not come.
+	select {
+	case <-meter.done:
+	default:
+		t.Fatal("Finish returned while the meter's clock was still running")
+	}
 	if late.Load() != 0 || last.Completed {
 		t.Fatalf("%d samples after Finish, last=%+v", late.Load(), last)
 	}
