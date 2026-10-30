@@ -81,7 +81,7 @@ func TestRunReconfigureWakesImmediatelyAndUsesNewInterval(t *testing.T) {
 			completed = append(completed, time.Since(started))
 			switch len(completed) {
 			case 1:
-				if err := scanner.Reconfigure(time.Second, []string{"archive"}); err != nil {
+				if err := scanner.Reconfigure(time.Second, []string{"archive"}, nil); err != nil {
 					t.Fatal(err)
 				}
 			case 3:

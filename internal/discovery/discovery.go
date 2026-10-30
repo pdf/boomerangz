@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/url"
 	"reflect"
 	"slices"
 	"strings"
@@ -120,18 +121,48 @@ type Options struct {
 	BatchSize        int
 	MaxArgumentBytes int
 	Remotes          []string
+	// Destinations says where each configured remote receives. A remote
+	// missing from it is still a valid name, but its replicas cannot be
+	// checked for overlap with others.
+	Destinations map[string]RemoteDestination
+}
+
+// RemoteDestination is where a configured remote receives: the namespace of
+// datasets it writes into - one host's pools, named by transport and address -
+// and its configured root there. Remotes that share a namespace write into one
+// dataset tree, so their replicas can overlap.
+type RemoteDestination struct {
+	Namespace string
+	Root      string
+}
+
+// RemoteDestinationOf derives a remote's destination from its canonical
+// target: a URL whose path is the configured root. The user it connects as
+// does not change which datasets it reaches, so it is not part of the
+// namespace.
+func RemoteDestinationOf(canonical string) (RemoteDestination, error) {
+	parsed, err := url.Parse(canonical)
+	if err != nil {
+		return RemoteDestination{}, err
+	}
+	root := strings.TrimPrefix(parsed.Path, "/")
+	if parsed.Scheme == "" || parsed.Host == "" || zfs.ValidateDataset(root) != nil {
+		return RemoteDestination{}, fmt.Errorf("canonical target %q does not name a transport, address and root", canonical)
+	}
+	return RemoteDestination{Namespace: parsed.Scheme + "://" + strings.ToLower(parsed.Host), Root: root}, nil
 }
 
 // Scanner serializes discovery and exposes the last complete generation to readers.
 type Scanner struct {
-	reader   Reader
-	options  Options
-	remotes  map[string]struct{}
-	interval time.Duration
-	mu       sync.Mutex
-	current  atomic.Pointer[Generation]
-	requests chan struct{}
-	changed  chan struct{}
+	reader       Reader
+	options      Options
+	remotes      map[string]struct{}
+	destinations map[string]RemoteDestination
+	interval     time.Duration
+	mu           sync.Mutex
+	current      atomic.Pointer[Generation]
+	requests     chan struct{}
+	changed      chan struct{}
 }
 
 // New creates a scanner with bounded defaults. Reader must not be nil.
@@ -152,13 +183,14 @@ func New(reader Reader, options Options) (*Scanner, error) {
 	for _, remote := range options.Remotes {
 		s.remotes[remote] = struct{}{}
 	}
+	s.destinations = maps.Clone(options.Destinations)
 	return s, nil
 }
 
-// Reconfigure atomically updates the periodic interval and known remote names.
-// It wakes Run so the new configuration is reflected without waiting for the
-// previous interval to expire.
-func (s *Scanner) Reconfigure(interval time.Duration, remotes []string) error {
+// Reconfigure atomically updates the periodic interval, the known remote names
+// and where they receive. It wakes Run so the new configuration is reflected
+// without waiting for the previous interval to expire.
+func (s *Scanner) Reconfigure(interval time.Duration, remotes []string, destinations map[string]RemoteDestination) error {
 	if interval <= 0 {
 		return fmt.Errorf("reconciliation interval must be positive")
 	}
@@ -169,6 +201,7 @@ func (s *Scanner) Reconfigure(interval time.Duration, remotes []string) error {
 	s.mu.Lock()
 	s.interval = interval
 	s.remotes = next
+	s.destinations = maps.Clone(destinations)
 	s.mu.Unlock()
 	select {
 	case s.changed <- struct{}{}:
@@ -308,6 +341,7 @@ func (s *Scanner) Scan(ctx context.Context, retained []string) (*Generation, err
 		}
 	}
 	markRoots(names, entries)
+	markCollisions(names, entries, s.destinations)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -555,5 +589,92 @@ func markRoots(names []string, entries map[string]Entry) {
 		root.Policy = root.Policy.ForReplicationScope(root.Dataset.EncryptionRoot != "" && root.Dataset.EncryptionRoot != "-", name)
 		entries[entry.CoveredBy] = root
 		checked[entry.CoveredBy] = true
+	}
+}
+
+// replica is where one actor root's replica for one target lands.
+type replica struct {
+	root      string
+	target    string
+	namespace string
+	mapped    string
+}
+
+func overlaps(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
+// markCollisions invalidates every actor root whose replica on some target
+// would overlap another replica in the same destination namespace, or would
+// land inside an actor root on this host.
+//
+// A root owns its replica's whole subtree: its members are received beneath
+// it, and a reseed destroys it recursively. Two replicas where one contains
+// the other - two roots, or one root's two targets - are therefore never
+// safe: the first sign would be a lineage or GUID failure after a stream had
+// already run, and a reseed of one would destroy the other. A local replica
+// inside a root's source is no safer: it would inherit that root's activation
+// and be snapshotted as one of its members. Every side of a collision is
+// invalid, because neither is safe while the other exists.
+func markCollisions(names []string, entries map[string]Entry, remotes map[string]RemoteDestination) {
+	var replicas []replica
+	var roots []string
+	for _, name := range names {
+		root := entries[name]
+		if root.CoveredBy != "" || !root.Policy.Enabled {
+			continue
+		}
+		roots = append(roots, name)
+		local, remote := slices.Clone(root.Policy.Local), slices.Clone(root.Policy.Remote)
+		if !root.Policy.Send.Replicate {
+			for _, member := range root.Members {
+				if member == name {
+					continue
+				}
+				local = append(local, entries[member].Policy.Local...)
+				remote = append(remote, entries[member].Policy.Remote...)
+			}
+		}
+		discard := zfs.ReceiveDiscard(root.Policy.Discard)
+		slices.Sort(local)
+		for _, target := range slices.Compact(local) {
+			if mapped, err := zfs.MapReceiveDataset(name, target, discard); err == nil {
+				replicas = append(replicas, replica{root: name, target: "local destination " + target, namespace: "local", mapped: mapped})
+			}
+		}
+		slices.Sort(remote)
+		for _, target := range slices.Compact(remote) {
+			destination, known := remotes[target]
+			if !known {
+				continue
+			}
+			if mapped, err := zfs.MapReceiveDataset(name, destination.Root, discard); err == nil {
+				replicas = append(replicas, replica{root: name, target: "remote " + target, namespace: destination.Namespace, mapped: mapped})
+			}
+		}
+	}
+	conflict := func(root, reason string) {
+		entry := entries[root]
+		if !slices.Contains(entry.Policy.Errors, reason) {
+			entry.Policy.Errors = append(entry.Policy.Errors, reason)
+		}
+		entries[root] = entry
+	}
+	for i, a := range replicas {
+		for _, b := range replicas[i+1:] {
+			if a.namespace != b.namespace || !overlaps(a.mapped, b.mapped) {
+				continue
+			}
+			conflict(a.root, fmt.Sprintf("%s places this root's replica at %s, which overlaps %s's replica %s from %s", a.target, a.mapped, b.root, b.mapped, b.target))
+			conflict(b.root, fmt.Sprintf("%s places this root's replica at %s, which overlaps %s's replica %s from %s", b.target, b.mapped, a.root, a.mapped, a.target))
+		}
+		if a.namespace != "local" {
+			continue
+		}
+		for _, root := range roots {
+			if overlaps(a.mapped, root) {
+				conflict(a.root, fmt.Sprintf("%s places this root's replica at %s, which overlaps actor root %s on this host", a.target, a.mapped, root))
+			}
+		}
 	}
 }

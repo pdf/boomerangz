@@ -422,3 +422,23 @@ func TestSameRemoteClientsComparesWhatEachClientWasBuiltFrom(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteDestinationsFollowEachRemotesBinding(t *testing.T) {
+	t.Parallel()
+	settings := map[string]config.RemoteConfig{
+		"home":   {Transport: "ssh", Host: "Backup.Example.net", User: "replicator", Root: "pool/backup"},
+		"office": {Transport: "ssh", Host: "backup.example.net", Port: 22, User: "other", Root: "pool/backup"},
+		// An unreadable credential leaves this remote out rather than failing
+		// the whole set.
+		"paired": {Transport: "native", Credential: "missing", Root: "pool/backup"},
+	}
+	destinations := RemoteDestinations(settings, t.TempDir())
+	want := discovery.RemoteDestination{Namespace: "ssh://backup.example.net:22", Root: "pool/backup"}
+	// Different users on one host reach one dataset tree.
+	if destinations["home"] != want || destinations["office"] != want {
+		t.Fatalf("destinations = %+v", destinations)
+	}
+	if _, found := destinations["paired"]; found {
+		t.Fatalf("a remote without a readable credential was given a destination: %+v", destinations["paired"])
+	}
+}

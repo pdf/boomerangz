@@ -144,7 +144,7 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 		remoteNames = append(remoteNames, name)
 	}
 	slices.Sort(remoteNames)
-	scanner, err := discovery.New(source, discovery.Options{Remotes: remoteNames})
+	scanner, err := discovery.New(source, discovery.Options{Remotes: remoteNames, Destinations: remoteDestinations(clients)})
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +284,7 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	_ = r.management.Resize(effective.Daemon.EffectiveManagementWorkers())
 	_ = r.local.Resize(effective.Daemon.LocalTransferWorkers)
 	_ = r.remote.Resize(effective.Daemon.RemoteTransferWorkers)
-	_ = r.scanner.Reconfigure(effective.Daemon.ReconcileInterval.Duration, prepared.remotes)
+	_ = r.scanner.Reconfigure(effective.Daemon.ReconcileInterval.Duration, prepared.remotes, remoteDestinations(prepared.clients))
 	// Queued remote work, and each remote's recovery coordinator with its
 	// retry state, is bound to the client it was built with. A reload that
 	// leaves every remote as it was keeps both; one that changes a remote

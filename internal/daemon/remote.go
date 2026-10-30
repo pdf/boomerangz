@@ -8,6 +8,7 @@ import (
 
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/control"
+	"github.com/pdf/boomerangz/internal/discovery"
 	replicationnative "github.com/pdf/boomerangz/internal/replication/native"
 	replicationssh "github.com/pdf/boomerangz/internal/replication/ssh"
 	"github.com/pdf/boomerangz/internal/zfs"
@@ -88,6 +89,34 @@ func sameRemoteClients(a, b map[string]remoteClient) bool {
 		}
 	}
 	return true
+}
+
+// remoteDestinations reports where each remote client receives, for
+// discovery's replica overlap checks.
+func remoteDestinations(clients map[string]remoteClient) map[string]discovery.RemoteDestination {
+	destinations := make(map[string]discovery.RemoteDestination, len(clients))
+	for name, client := range clients {
+		if destination, err := discovery.RemoteDestinationOf(client.CanonicalTarget()); err == nil {
+			destinations[name] = destination
+		}
+	}
+	return destinations
+}
+
+// RemoteDestinations reports where each configured remote receives, for
+// commands that scan without a running daemon. Nothing connects: an SSH
+// remote's destination comes from its configuration and a native one's from
+// its credential. A remote whose credential cannot be read is left out, and
+// its replicas go unchecked in that scan rather than failing it.
+func RemoteDestinations(settings map[string]config.RemoteConfig, credentialsDir string) map[string]discovery.RemoteDestination {
+	clients := make(map[string]remoteClient, len(settings))
+	for name, setting := range settings {
+		built, err := buildRemoteClients(map[string]config.RemoteConfig{name: setting}, credentialsDir)
+		if err == nil {
+			clients[name] = built[name]
+		}
+	}
+	return remoteDestinations(clients)
 }
 
 func buildRemoteClients(settings map[string]config.RemoteConfig, credentialsDir string) (map[string]remoteClient, error) {

@@ -107,7 +107,7 @@ func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 	for name := range cfg.Remotes {
 		remoteNames = append(remoteNames, name)
 	}
-	scanner, err := discovery.New(executor, discovery.Options{Remotes: remoteNames})
+	scanner, err := discovery.New(executor, discovery.Options{Remotes: remoteNames, Destinations: daemon.RemoteDestinations(cfg.Remotes, cfg.Paths.CredentialsDir)})
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,6 @@
 # Design: colliding destination mappings
 
-Status: not implemented. Recorded while designing
+Status: implemented in discovery (`markCollisions`). Recorded while designing
 [root-actor-scope.md](root-actor-scope.md), which widens it.
 
 ## 1. The gap
@@ -52,6 +52,31 @@ natural split is:
   silently racing.
 - remote targets validated where configuration is resolved, since two roots
   can only collide on a remote through the same configured remote name.
+
+### 3.1 As implemented
+
+Discovery checks every actor root's replica on every target its root or any
+member sends to, and invalidates every root on each side of an overlap with a
+policy error naming the other side, so neither is scheduled. Three cases share
+one containment rule:
+
+- two roots whose replicas in one destination namespace contain one another;
+- one root whose replicas on two of its own targets do, since a reseed of the
+  outer one destroys the inner;
+- a local replica that overlaps any actor root on this host, which would
+  inherit that root's activation and be snapshotted as its members.
+
+A destination namespace is `local` for local targets, and for a remote the
+transport and address its canonical target names, without the user: two
+remotes reaching one host's pools share one dataset tree whatever account
+they connect as. The daemon derives namespaces from the clients it builds; the
+CLI derives the same without connecting. A remote whose credential cannot be
+read has no known destination and goes unchecked in that scan.
+
+Not detected: a local target and a remote that reach the same pool, such as an
+SSH remote pointed at this host, since nothing ties a remote's address to the
+local host. Identity recovery scans without destinations on purpose: marking a
+root invalid there would hide its owner markers from the recovery.
 
 ## 4. Out of scope
 

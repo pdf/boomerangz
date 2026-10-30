@@ -145,6 +145,14 @@ Multiple names are comma-separated. Empty entries and unknown remote names make
 the affected policy invalid. Configure and secure the destination before
 selecting it.
 
+Each root's replica on a destination must be its own. If two roots' replicas
+would overlap - `tank/a/data` and `tank/b/data` both under `discard=all`, say,
+or one root's two destinations nested inside each other - every root involved
+becomes `invalid`, and `dataset inspect` names what it collides with. A local
+destination inside an active root is refused the same way, because the
+received replicas would become that root's members. Two remotes collide when
+they reach the same host's pools, whatever account they connect as.
+
 ## Recursive replication
 
 ```sh

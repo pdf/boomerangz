@@ -331,13 +331,8 @@ Retained:
 
 ### 9.1 Colliding destination mappings
 
-Two disjoint sources can map to one destination: `zroot/a/data` and
-`zroot/b/data` both map to `backup/data` under `discard=all`, and nothing
-rejects it. This predates the model and is a property of name mapping, not of
-ownership, but the model widens the blast radius: each side is now a root that
-owns a whole subtree, so two colliding roots overlay their entire subtrees,
-and a reseed of one destroys the other's replicas. Recorded in
-[destination-collisions.md](destination-collisions.md).
+Fixed after this document was first written: discovery now invalidates roots
+whose replicas overlap. See [destination-collisions.md](destination-collisions.md).
 
 ### 9.2 A placeholder blocks its dataset's own later replica
 
