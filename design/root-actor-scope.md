@@ -1,6 +1,7 @@
 # Design: root actor scope
 
-Status: proposed. Re-derived against `main` at `bbc266c`.
+Status: implemented on this branch. Re-derived against `main` at `bbc266c`;
+sections 3.4, 6 and 6.1 record decisions the implementation forced.
 
 This replaces the model in which every descendant inheriting
 `org.boomerangz:enabled=on` becomes a peer actor with one in which a single
@@ -164,11 +165,20 @@ edges at all, so no dependency graph is needed.
 
 ### 3.4 Partial member failure
 
-The snapshot is atomic; the N streams under `replicate=off` are not. The
-reference stays unadvanced until every member verifies, so a run that
-transfers three of five members leaves the reference at the previous instant
-and a retry resumes that instant rather than selecting a newer one. Per-member
-endpoint verification already exists in `verifyGUIDs` over `plan.Endpoints`.
+The snapshot is atomic; the N streams under `replicate=off` are not, and with
+per-member cadence (section 5) members are routinely at different snapshot
+instants anyway. A destination of a sparse root is never one point in time,
+so there is no set-wide invariant to protect by holding verified members back.
+
+Each member's stream therefore advances its own proof (section 6) when it
+verifies, independently of the others. A stream that fails leaves every
+stream beneath it unattempted: a deeper member would be received into a
+placeholder at the failed member's mapped name, which would then block that
+member's own later full receive. Unrelated streams still run. A retry resumes
+or re-plans only what did not verify.
+
+Under `replicate=on` there is one stream and one proof, so the whole subtree
+advances together, as before.
 
 ## 4. Authority
 
@@ -221,24 +231,64 @@ each successful snapshot, so it sends 288 times too. Hence per-member.
 ## 6. State
 
 `state:lineage`, `state:owner`, `state:target:*` and `state:reference:*` exist
-only on roots; members carry none. `Reference` already carries per-member
-`Sources` under a single root property keyed by target and shared snapshot
-UUID, and `plan.Endpoints` is already per-member with per-member GUID
-verification - both populated today only under `replicate=on`.
+only on roots; members carry none.
 
-`Reference.Sources` becomes unconditional and canonical rather than "the `-R`
-case". Writing the root into the singular `Dataset`/`GUID` fields and setting
-`Sources` only above one member makes a one-member and a multi-member root
-serialize differently and stores member 0 twice with nothing checking the
-copies agree. Multi-member is the normal case here, so the conditional encodes
-nothing. The back-fill of `r.Dataset` for pre-authority records is deleted
-outright under this document's no-users stance.
+A reference is the proof for one stream's endpoint on one target. It is keyed
+by target, stream and snapshot instant -
+`state:reference:<target id>:<stream id>:<instant>` - where the stream is the
+member it sends from, or the root for a replication root. Keying by instant
+alone, as before, assumed every member shares every instant; per-member
+cadence makes that the exception, and one member's proof must never retire
+another's base.
+
+`Sources` is unconditional and canonical: the stream's own snapshot first,
+then, for a `-R` stream only, its descendants' snapshots at the same instant,
+sorted. The singular `GUID` field is removed rather than kept as a copy of
+`Sources[0]` that nothing checks; `GUID()` reads the stream's own source. The
+back-fill of `Dataset` for pre-authority records is deleted under this
+document's no-users stance.
+
+### 6.1 Transfer
+
+A transfer of one root to one target is a sequence of streams, parents first:
+each member that sends to the target, or the root alone. A member stream is
+the existing single-dataset stream with everything that defines ownership
+taken from the root: authority, lineage, suspension, the target binding, and
+the receive mapping. Its own policy supplies only send options, incremental
+mode and receive overrides. A member may send to targets the root does not;
+the binding and proofs for such a target still live on the root.
+
+Every stream, the root's included, receives into exactly the destination the
+planner computed: the root's mapped dataset plus the stream's path relative to
+the root. Receive no longer derives a destination from the stream's own name
+with `-d` or `-e`. That was a second mapping rule that had to agree with the
+first, and for a member under `discard=all` it does not: the member would land
+beside the root's replica rather than beneath it.
+
+The binding proves the root's mapped destination whichever stream is being
+planned, and the first stream to bring that destination into existence -
+including by creating it as a placeholder for a member - promotes a bootstrap
+anchor to it.
+
+Pending work is per stream, keyed by the stream's dataset. A job reserves each
+stream's pending endpoint and completes each stream that verified the exact
+endpoint it carried, whether or not its siblings did.
+
+Resume is per stream. A non-recursive stream owns only the resume token on its
+own destination; a token on a descendant belongs to that member's stream. A
+token is validated against that stream's proofs alone, and after resuming the
+stream plans again, so it ends at its newest endpoint in the same attempt.
+This settles the earlier draft's open question about resume within a member
+set: members that never streamed are no longer checked against a token they
+had nothing to do with.
 
 ## 7. Removed
 
 - `missingMappedAncestor` and `missingLocalDestinationAncestor`: intra-root
   ordering is internal to one actor's transfer, not reconstructed across jobs.
 - The `waiting-retry` "waiting for destination ancestor" outcome.
+- Receive mapping by `zfs receive -d`/`-e`: every stream receives into its
+  planned destination exactly (section 6.1).
 - `recursive bool` on the snapshot seam and every `-r` snapshot path.
 - Reseed's cascade: destroy scope and cleanup scope are the same member set by
   construction.
@@ -266,7 +316,20 @@ Retained:
   does not touch. The binding contract is therefore unchanged and that test is
   not inverted.
 
-## 8. Known gap, out of scope
+## 8. Bugs on `main` fixed here
+
+- Under `replicate=on`, a newly created snapshot's pending protection
+  inspected the root non-recursively and then searched that state for its
+  children's snapshots, so only the root's snapshot was held. The transfer's
+  own proof for the same instant covered the subtree under the same key and
+  conflicted with it. `TestReplicationRootPendingProtectionHoldsTheSubtree`.
+- Under `replicate=on`, pruning planned only the root's own snapshots. The -R
+  snapshot lands on every descendant and nothing else pruned those, so they
+  accumulated without bound. `TestReplicationRootPrunesEveryDescendant`.
+
+## 9. Known gaps, not fixed here
+
+### 9.1 Colliding destination mappings
 
 Two disjoint sources can map to one destination: `zroot/a/data` and
 `zroot/b/data` both map to `backup/data` under `discard=all`, and nothing
@@ -275,3 +338,44 @@ ownership, but the model widens the blast radius: each side is now a root that
 owns a whole subtree, so two colliding roots overlay their entire subtrees,
 and a reseed of one destroys the other's replicas. Recorded in
 [destination-collisions.md](destination-collisions.md).
+
+### 9.2 A placeholder blocks its dataset's own later replica
+
+A hole's mapped name is created as an empty placeholder so a deeper member can
+be received. If the hole's dataset later becomes a member, or a target the
+root did not send to before starts receiving the root, its full receive finds
+a dataset already there with no common base and blocks, asking for a reseed -
+which destroys the root's whole replica on that target. It fails closed, but
+the recovery is far wider than the cause. The same happens on `main` for any
+intermediate placeholder a peer created and another peer later claimed.
+
+A fix receives the dataset under a temporary sibling name, moves the
+placeholder's children beneath it, and replaces the placeholder, which is not
+attempted here because it needs its own crash analysis.
+
+### 9.3 Bootstrap crash window, now also through placeholders
+
+`TestGuestDaemonPowerLoss/receive-commit` pins a crash between a bootstrap
+receive committing and the binding being promoted: the next pass finds the
+mapped destination present under an ancestor-only binding and blocks for a
+reseed. The binding contract is unchanged (section 7), so that still holds.
+A member-only target adds a second route into the same window: the member's
+first stream creates the root's replica as a placeholder before the root's
+binding has been promoted to it.
+
+### 9.4 A failed resume is sticky
+
+`Apply` takes the resume path whenever a stream's destination holds a token,
+and a `BuildResume` failure is returned with no fallback, so the error repeats
+for as long as the token exists. Giving it a recovery means aborting the
+token, which contradicts `Apply`'s contract that failures retain references
+and any receive token with no implicit reseed or abort. That is a policy
+decision, not a cleanup. Its reach is now one member's stream rather than the
+root's whole transfer.
+
+### 9.5 Member-only targets on a root replicated to the configured root
+
+Under `discard=off` the root's replica is the configured destination root
+itself. If only a member sends to a remote target, nothing creates that root,
+and SSH and native destinations refuse to create their configured root. The
+transfer fails with that refusal; the remote root has to be created by hand.
