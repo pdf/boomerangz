@@ -105,7 +105,7 @@ func datasetStatuses(t *testing.T, output string) map[string]string {
 // The rendering of both `list` and `inspect` is unit-tested over a fake
 // reader. What only a pool can establish is that ZFS's own value/source
 // columns drive it - a locally activated root reads as active, its replicated
-// descendant as covered, and a received activation as provenance rather than
+// descendant as a member, and a received activation as provenance rather than
 // as activation.
 func TestGuestDatasetCLI(t *testing.T) {
 	binary, sourcePool, destinationPool := guestCLI(t)
@@ -160,9 +160,10 @@ func TestGuestDatasetCLI(t *testing.T) {
 	}
 	zfstest.RegisterCleanup(t, destinationRoot)
 	zfsSet(t, "create", "-u", child)
-	// replicate makes the child covered rather than a root of its own; props
-	// is what sends the activation property, so the received replica can be
-	// distinguished from a locally configured one.
+	// The child inherits activation, so it is a member of the root rather than
+	// a root of its own. props is what sends the activation property, so the
+	// received replica can be distinguished from a locally configured one, and
+	// a property stream needs the root's single -R stream.
 	zfsSet(t, "set", policy.Namespace+"enabled=on", policy.Namespace+"replicate=on",
 		policy.Namespace+"props=on", policy.Namespace+"policy=1x1h",
 		policy.Namespace+"local="+destinationRoot, active)
@@ -173,7 +174,7 @@ func TestGuestDatasetCLI(t *testing.T) {
 		statuses := datasetStatuses(t, cli(t, "dataset", "list"))
 		for dataset, want := range map[string]string{
 			active:   "active",
-			child:    "covered",
+			child:    "member",
 			invalid:  "invalid",
 			inactive: "inactive",
 		} {
@@ -200,7 +201,7 @@ func TestGuestDatasetCLI(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("dataset list --json did not report %s as covered by %s", child, active)
+			t.Errorf("dataset list --json did not report %s as a member of %s", child, active)
 		}
 	})
 
@@ -218,9 +219,9 @@ func TestGuestDatasetCLI(t *testing.T) {
 				t.Errorf("dataset inspect is missing %q:\n%s", want, output)
 			}
 		}
-		covered := cli(t, "dataset", "inspect", child)
-		if !strings.Contains(covered, "Covered by: "+active) {
-			t.Errorf("dataset inspect did not report %s as covered:\n%s", child, covered)
+		member := cli(t, "dataset", "inspect", child)
+		if !strings.Contains(member, "Actor root: member of "+active) {
+			t.Errorf("dataset inspect did not report %s as a member of %s:\n%s", child, active, member)
 		}
 	})
 

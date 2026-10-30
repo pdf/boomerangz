@@ -525,7 +525,9 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			recovered, err := restarted.Apply(t.Context(), request, nil)
-			if err != nil || !recovered.Verified || recovered.Plan.Mode != "resume" {
+			// A resumed stream plans again afterwards, so it ends at its newest
+			// endpoint; that it resumed is reported on its own.
+			if err != nil || !recovered.Verified || !recovered.Resumed {
 				t.Fatalf("recovered result=%+v err=%v", recovered, err)
 			}
 			destinationState, err := direct.InspectState(t.Context(), destination, false)

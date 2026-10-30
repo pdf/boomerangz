@@ -247,7 +247,7 @@ func TestOutcomeSkipsRunningStatesAndNamedRetries(t *testing.T) {
 	source.send(t, w,
 		transition("local:a:b", "pending-transfer", ""),
 		transition("local:a:b", "planning", ""),
-		transition("local:a:b", "waiting-retry", "waiting for destination ancestor b"),
+		transition("local:a:b", "waiting-retry", "transfer state changed during preparation; recovery holds retained"),
 		transition("local:c:b", "blocked", "another job's outcome"),
 		transition("local:a:b", "sending", ""),
 		transition("local:a:b", "verifying", ""),
@@ -261,7 +261,7 @@ func TestOutcomeSkipsRunningStatesAndNamedRetries(t *testing.T) {
 	message := failure(t, func(tb testing.TB) {
 		w.Outcome(tb, time.Hour, 0, "local:a:b", "succeeded")
 	})
-	if !strings.Contains(message, `local:a:b ended waiting-retry: waiting for destination ancestor b`) {
+	if !strings.Contains(message, `local:a:b ended waiting-retry: transfer state changed during preparation; recovery holds retained`) {
 		t.Fatalf("failure = %q, want the unlisted retry to end the wait", message)
 	}
 }

@@ -123,13 +123,13 @@ func TestGuestInterruptedLineageInitialization(t *testing.T) {
 	t.Run("inherited-markers-are-not-authority", func(t *testing.T) {
 		parent := root + "/inheriting"
 		lineage := interrupted(t, parent, installation)
-		// The child sees the parent's markers through inheritance. ZFS reports
-		// them with the parent as their source, and boomerangz only recognises
-		// local markers as authority, so the child must claim a lineage of its
-		// own rather than silently joining its parent's.
+		// The child inherits activation, so it is a member of the parent's
+		// root rather than a root of its own, and it sees the parent's markers
+		// through inheritance. ZFS reports them with the parent as their
+		// source. A member carries no authority: its snapshots are proven
+		// against the root's lineage, and nothing is ever recorded on it.
 		child := parent + "/child"
 		command(t, "create", "-u", child)
-		command(t, "set", policy.Namespace+"enabled=on", child)
 		inheritedLineage, inheritErr := exec.CommandContext(t.Context(), "zfs", "get", "-H", "-o", "value",
 			lifecycle.LineageProperty, child).CombinedOutput()
 		if inheritErr != nil {
@@ -138,31 +138,28 @@ func TestGuestInterruptedLineageInitialization(t *testing.T) {
 		if strings.TrimSpace(string(inheritedLineage)) != lineage {
 			t.Fatalf("the child did not inherit the parent's lineage marker: %q", inheritedLineage)
 		}
-		metadata, createErr := service.CreateSnapshot(t.Context(), child, []string{child}, now, activePolicy(child))
+		metadata, createErr := service.CreateSnapshot(t.Context(), parent, []string{parent, child}, now, activePolicy(parent))
 		if createErr != nil {
-			t.Fatalf("a child under a claimed parent refused its first snapshot: %v", createErr)
+			t.Fatalf("the root refused a snapshot covering its member: %v", createErr)
 		}
-		if metadata.Lineage == lineage {
-			t.Fatalf("the child adopted its parent's lineage through inheritance: %s", lineage)
+		if metadata.Lineage != lineage {
+			t.Fatalf("the root's snapshot forked its claimed lineage: %s, want %s", metadata.Lineage, lineage)
 		}
 		state, inspectErr := direct.InspectState(t.Context(), child, false)
 		if inspectErr != nil {
 			t.Fatal(inspectErr)
 		}
-		local := 0
 		for _, property := range state.Properties {
-			if property.Dataset != child || property.Source != zfs.SourceLocal {
-				continue
-			}
-			if property.Name == lifecycle.LineageProperty && property.Value == metadata.Lineage {
-				local++
-			}
-			if property.Name == lifecycle.OwnerProperty && property.Value == installation {
-				local++
+			if property.Dataset == child && property.Source == zfs.SourceLocal && strings.HasPrefix(property.Name, policy.StateNamespace) {
+				t.Fatalf("a member gained state of its own: %+v", property)
 			}
 		}
-		if local != 2 {
-			t.Fatalf("the child did not record local authority of its own: %+v", state.Properties)
+		snapshots := lifecycle.Snapshots(state, child)
+		if len(snapshots) != 1 {
+			t.Fatalf("the member holds %d snapshots, want the root's one", len(snapshots))
+		}
+		if owned, ownershipErr := lifecycle.Ownership(snapshots[0], lineage); ownershipErr != nil || owned != metadata {
+			t.Fatalf("the member's snapshot is not proven by the root's lineage: %v", ownershipErr)
 		}
 	})
 }

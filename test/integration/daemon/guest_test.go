@@ -206,41 +206,73 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 	// Each wait is for the outcome the behaviour is about, which names what it
 	// acted on. The pool is then read once and checked against those names,
 	// as far as the runs recorded before the read decide them.
+	// The root owns its subtree: one snapshot job takes the root and the
+	// member atomically, at one instant, and the member has no job of its own.
 	sourceSnapshot, _ := createdSnapshot(t, waiter, 30*time.Second, 0, source)
-	childSnapshot, _ := createdSnapshot(t, waiter, 30*time.Second, 0, child)
+	_, instant, _ := strings.Cut(sourceSnapshot, "@")
+	childSnapshot := child + "@" + instant
 	requireSnapshotAgreesWithEvents(t, direct, waiter, source, sourceSnapshot)
-	requireSnapshotAgreesWithEvents(t, direct, waiter, child, childSnapshot)
+	requireSnapshotAgreesWithEvents(t, direct, waiter, source, childSnapshot)
+	if slices.ContainsFunc(waiter.Transitions(), func(event daemon.Event) bool { return event.Job == "snapshot:"+child }) {
+		t.Fatalf("the member was scheduled as an actor of its own")
+	}
 
-	// Disabling a dataset reconciles it inactive, which reports setting the
+	// Excluding the member stops it being snapshotted, and nothing else: it
+	// carries no state of its own to mark inactive, and what it already holds
+	// stays under its own grid until the root retires. The exclusion takes
+	// effect from the first discovery generation that started after it; the
+	// generation in progress when it was set may not have seen it.
+	command("set", policy.Namespace+"enabled=off", child)
+	seen := runtime.ControlStatus().Generation
+	runtime.Reconcile()
+	deadline := time.After(30 * time.Second)
+	for runtime.ControlStatus().Generation < seen+2 {
+		select {
+		case <-waiter.Changed():
+		case <-deadline:
+			t.Fatalf("no discovery generation followed the exclusion of %s", child)
+		}
+	}
+	from := waiter.Settle(t, 30*time.Second)
+	if _, err := runtime.Trigger([]string{source}); err != nil {
+		t.Fatal(err)
+	}
+	excluded, _ := createdSnapshot(t, waiter, 30*time.Second, from, source)
+	_, excludedInstant, _ := strings.Cut(excluded, "@")
+	childState, err := direct.InspectState(t.Context(), child, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, snapshot := range lifecycle.Snapshots(childState, child) {
+		if snapshot.Name == child+"@"+excludedInstant {
+			t.Fatalf("the excluded member was snapshotted: %s", snapshot.Name)
+		}
+	}
+	if slices.ContainsFunc(waiter.Transitions(), func(event daemon.Event) bool { return event.Job == "inactive:"+child+":false" }) {
+		t.Fatalf("an excluded member was reconciled inactive as if it were a root")
+	}
+	requireSnapshotAgreesWithEvents(t, direct, waiter, source, childSnapshot)
+
+	// Disabling the root reconciles it inactive, which reports setting the
 	// marker once it has verified it. Retirement clears the marker, and is
 	// eligible only while the marker is present, so a read that misses the
 	// marker is a failure unless retirement had started by then, and
 	// retirement must then succeed.
-	requireInactiveMarker := func(t *testing.T, dataset string) {
-		t.Helper()
-		command("set", policy.Namespace+"enabled=off", dataset)
-		reconciled, _ := waiter.Outcome(t, 30*time.Second, 0, "inactive:"+dataset+":false", "succeeded")
-		if reconciled.Marker != "set" {
-			t.Fatalf("inactive reconciliation of %s reported marker action %q, want set", dataset, reconciled.Marker)
-		}
-		state, inspectErr := direct.InspectState(t.Context(), dataset, false)
-		if inspectErr != nil {
-			t.Fatal(inspectErr)
-		}
-		settled := waiter.Settle(t, 30*time.Second)
-		if slices.ContainsFunc(state.Properties, func(property zfs.Property) bool {
-			return property.Dataset == dataset && property.Name == lifecycle.InactiveProperty && property.Source == zfs.SourceLocal
-		}) {
-			return
-		}
-		retire := "retire:" + dataset
-		if !slices.ContainsFunc(statuswait.Runs(waiter.Transitions()[:settled], retire), statuswait.Run.Started) {
-			t.Fatalf("inactive reconciliation of %s set its marker, but the marker was absent before retirement started; transitions: %+v", dataset, waiter.Transitions()[:settled])
-		}
-		waiter.Outcome(t, 30*time.Second, 0, retire, "succeeded", "waiting-retry")
+	command("set", policy.Namespace+"enabled=off", source)
+	reconciled, _ := waiter.Outcome(t, 30*time.Second, 0, "inactive:"+source+":false", "succeeded")
+	if reconciled.Marker != "set" {
+		t.Fatalf("inactive reconciliation of %s reported marker action %q, want set", source, reconciled.Marker)
 	}
-	requireInactiveMarker(t, child)
-	requireInactiveMarker(t, source)
+	state, err := direct.InspectState(t.Context(), source, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := waiter.Settle(t, 30*time.Second)
+	if !slices.ContainsFunc(state.Properties, func(property zfs.Property) bool {
+		return property.Dataset == source && property.Name == lifecycle.InactiveProperty && property.Source == zfs.SourceLocal
+	}) && !slices.ContainsFunc(statuswait.Runs(waiter.Transitions()[:settled], "retire:"+source), statuswait.Run.Started) {
+		t.Fatalf("inactive reconciliation of %s set its marker, but the marker was absent before retirement started; transitions: %+v", source, waiter.Transitions()[:settled])
+	}
 
 	// Retirement destroys every owned snapshot of the source, so it names
 	// each one the source's snapshot jobs created and its prunes did not
@@ -265,6 +297,18 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 			t.Fatalf("source retirement reported destroying %s, which remains", snapshot.Name)
 		}
 	}
+	// Retiring the root covers its subtree, including what the member took
+	// before it was excluded.
+	if !slices.Contains(retired.Destroyed, childSnapshot) && destructionOf(before, childSnapshot, "prune:"+source) == notDestroyed {
+		t.Fatalf("source retirement did not destroy the member's %s: %v", childSnapshot, retired.Destroyed)
+	}
+	childState, err = direct.InspectState(t.Context(), child, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining := lifecycle.Snapshots(childState, child); len(remaining) != 0 {
+		t.Fatalf("the member kept snapshots after its root retired: %v", remaining)
+	}
 	cancel()
 	select {
 	case runErr := <-done:
@@ -274,7 +318,7 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("daemon did not shut down after guest test")
 	}
-	t.Logf("verified daemon scheduling, descendant deactivation, and retirement on %s", source)
+	t.Logf("verified root scheduling, member exclusion, and subtree retirement on %s", source)
 }
 
 func TestGuestLocalTransferConcurrency(t *testing.T) {
@@ -301,17 +345,22 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 			t.Fatalf("guest zfs %s: %v: %s", args[0], commandErr, output)
 		}
 	}
+	// Two independent actor roots side by side, sending to one target, and a
+	// member under one of them. The container holding them is not enabled, so
+	// each root owns only its own subtree.
 	suffix := time.Now().UTC().Format("150405000")
 	root := sourcePool + "/data/concurrency-" + suffix
 	left, right := root+"/left", root+"/right"
+	child := left + "/child"
 	target := destinationPool + "/data/concurrency-" + suffix
-	command("create", "-u", root)
-	command("create", "-u", left)
-	command("create", "-u", right)
-	command("create", "-u", target)
+	for _, dataset := range []string{root, left, child, right, target} {
+		command("create", "-u", dataset)
+	}
 	zfstest.RegisterCleanup(t, root)
 	zfstest.RegisterCleanup(t, target)
-	command("set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x1h", policy.Namespace+"local="+target, policy.Namespace+"discard=first", root)
+	for _, dataset := range []string{left, right} {
+		command("set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x1h", policy.Namespace+"local="+target, policy.Namespace+"discard=first", dataset)
+	}
 
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
@@ -323,7 +372,7 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	}
 	// Keep each acquired transfer lock observable without relying on fixture
 	// data volume, while delegating every stream to the real local ZFS pipeline.
-	observed := newObservedLocalStream(localStream, 2*time.Second, map[string]bool{root: true, left: true, right: true})
+	observed := newObservedLocalStream(localStream, 2*time.Second, map[string]bool{left: true, child: true, right: true})
 	cfg := config.Defaults()
 	cfg.Daemon.ReconcileInterval.Duration = 100 * time.Millisecond
 	cfg.Daemon.ManagementWorkers = 3
@@ -343,54 +392,66 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 
 	// Each phase names the snapshots it transfers: the ones its snapshot jobs
 	// report creating. Its sends and transfer outcomes are those that carry
-	// them, whatever else ran around them.
-	phase := func(t *testing.T, from statuswait.Cursor, datasets []string, retried ...string) map[string]sendInterval {
+	// them, whatever else ran around them. Nothing waits for another job's
+	// destination any more, so no outcome but success is tolerated.
+	phase := func(t *testing.T, from statuswait.Cursor, roots []string) (map[string]sendInterval, map[string]string) {
 		t.Helper()
-		created := make(map[string]statuswait.Cursor, len(datasets))
-		for _, dataset := range datasets {
+		created := make(map[string]statuswait.Cursor, len(roots))
+		snapshots := make(map[string]string, len(roots))
+		for _, dataset := range roots {
 			_, started := waiter.Next(t, "a snapshot job for "+dataset, 45*time.Second, from, statuswait.Job("snapshot:"+dataset, "snapshotting"))
 			// A scheduled run found the deadline not yet due and is followed
 			// by the forced one.
-			_, after := createdSnapshot(t, waiter, 45*time.Second, started, dataset, "scheduled")
-			created[dataset] = after - 1
+			snapshot, after := createdSnapshot(t, waiter, 45*time.Second, started, dataset, "scheduled")
+			created[dataset], snapshots[dataset] = after-1, snapshot
 		}
 		intervals := waitForSends(t, observed, waiter, created)
-		for _, dataset := range datasets {
-			waitForTransferred(t, waiter, job(dataset), dataset, created[dataset], retried...)
+		for _, dataset := range roots {
+			waitForTransferred(t, waiter, job(dataset), dataset, created[dataset])
 		}
-		return intervals
+		return intervals, snapshots
+	}
+	// memberSend finds the send of the member's snapshot at the instant its
+	// root's snapshot job took. The member has no job of its own: the root's
+	// job sends it, after the root, as a stream of its own.
+	memberSend := func(t *testing.T, rootSnapshot string) sendInterval {
+		t.Helper()
+		_, instant, _ := strings.Cut(rootSnapshot, "@")
+		sends, _ := observed.recorded()
+		index := slices.IndexFunc(sends, func(send observedSend) bool { return send.snapshot == child+"@"+instant })
+		if index < 0 {
+			t.Fatalf("the member's snapshot at %s was never sent: %+v", instant, sends)
+		}
+		return sends[index].sendInterval
 	}
 
-	// All mapped destinations are initially absent, so the root must establish
-	// the shared hierarchy before either descendant starts. Once it has, the
-	// sibling setup streams no longer conflict with one another. A descendant
-	// that runs first reports waiting-retry for the missing ancestor and is
-	// retried; once the destinations exist, nothing should wait.
-	initial := phase(t, 0, []string{root, left, right}, "waiting-retry")
-	if initial[root].end > initial[left].start || initial[root].end > initial[right].start {
-		t.Fatalf("initial destination setup overlapped hierarchy-conflicting sends: %+v", initial)
+	// The roots' replicas are initially absent and share their nearest
+	// existing destination ancestor, so their setup sends are serialized: each
+	// may create receive ancestors the other would race.
+	initial, created := phase(t, 0, []string{left, right})
+	if sendIntervalsOverlap(initial[left], initial[right]) {
+		t.Fatalf("initial setup of roots sharing a destination ancestor overlapped: %+v", initial)
+	}
+	if member := memberSend(t, created[left]); member.start < initial[left].end {
+		t.Fatalf("the member was sent before its root's own stream finished: root %+v member %+v", initial[left], member)
+	}
+	if slices.ContainsFunc(waiter.Transitions(), func(event daemon.Event) bool { return event.Job == job(child) || event.Job == "snapshot:"+child }) {
+		t.Fatal("the member was scheduled or transferred as an actor of its own")
 	}
 
-	// A triggered snapshot job starts after the trigger, so settling first
-	// finds the snapshot job the trigger ran rather than an earlier one.
+	// Once each root's replica exists, the roots no longer share a lock scope
+	// and send concurrently.
 	from := waiter.Settle(t, 30*time.Second)
 	accepted, err := runtime.Trigger([]string{left, right})
 	if err != nil || len(accepted) != 2 {
-		t.Fatalf("trigger siblings=%v err=%v", accepted, err)
+		t.Fatalf("trigger roots=%v err=%v", accepted, err)
 	}
-	siblings := phase(t, from, []string{left, right})
+	siblings, _ := phase(t, from, []string{left, right})
 	if !sendIntervalsOverlap(siblings[left], siblings[right]) {
-		t.Fatalf("existing sibling destinations did not send concurrently: %+v", siblings)
+		t.Fatalf("established sibling roots did not send concurrently: %+v", siblings)
 	}
-
-	from = waiter.Settle(t, 30*time.Second)
-	accepted, err = runtime.Trigger([]string{root, left})
-	if err != nil || len(accepted) != 2 {
-		t.Fatalf("trigger ancestor pair=%v err=%v", accepted, err)
-	}
-	ancestorPair := phase(t, from, []string{root, left})
-	if sendIntervalsOverlap(ancestorPair[root], ancestorPair[left]) {
-		t.Fatalf("ancestor and descendant destinations sent concurrently: %+v", ancestorPair)
+	if _, err := runtime.Trigger([]string{child}); err == nil || !strings.Contains(err.Error(), "member of actor root "+left) {
+		t.Fatalf("triggering a member did not name its root: %v", err)
 	}
 
 	cancel()
@@ -402,7 +463,7 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("daemon did not shut down after concurrency test")
 	}
-	t.Log("verified conservative destination setup, concurrent siblings, and ancestor exclusion")
+	t.Log("verified conservative destination setup, concurrent sibling roots, and members sent within their root's job")
 }
 
 func TestGuestRemoteOutageReconnection(t *testing.T) {
