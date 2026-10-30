@@ -32,11 +32,19 @@ type LifecycleReader interface {
 
 // Entry is a detached dataset inspection. Uninspected policies lack local
 // overrides other than activation; require Inspected before using other fields.
+//
+// A dataset is an actor root when it is enabled and no ancestor is. Every other
+// dataset in a root's subtree names that root in CoveredBy, whether it is a
+// member or excluded, so nothing inside a root ever acts independently. A
+// root's Members lists the datasets it snapshots and sends, root first and
+// parents before children.
 type Entry struct {
 	Dataset   zfs.Dataset      `json:"dataset"`
 	Parent    string           `json:"parent,omitempty"`
 	Inspected bool             `json:"inspected"`
 	CoveredBy string           `json:"covered_by,omitempty"`
+	Member    bool             `json:"member,omitempty"`
+	Members   []string         `json:"members,omitempty"`
 	Policy    policy.Effective `json:"policy"`
 	Stored    []zfs.Property   `json:"stored,omitempty"`
 }
@@ -44,7 +52,20 @@ type Entry struct {
 func (e Entry) clone() Entry {
 	e.Policy = e.Policy.Clone()
 	e.Stored = slices.Clone(e.Stored)
+	e.Members = slices.Clone(e.Members)
 	return e
+}
+
+// ErrCovered reports that a dataset sits inside another actor root's subtree
+// and so cannot be operated on as a root of its own.
+func (e Entry) ErrCovered() error {
+	if e.CoveredBy == "" {
+		return nil
+	}
+	if e.Member {
+		return fmt.Errorf("%s is a member of actor root %s; operate on the root", e.Dataset.Name, e.CoveredBy)
+	}
+	return fmt.Errorf("%s is excluded from actor root %s and cannot act independently", e.Dataset.Name, e.CoveredBy)
 }
 
 // Generation is immutable. All exported inspection methods return detached copies.
@@ -278,12 +299,15 @@ func (s *Scanner) Scan(ctx context.Context, retained []string) (*Generation, err
 				inspect[name] = true
 				covered[name] = true
 			}
-			if entry.Policy.Enabled && entry.Policy.Valid() && entry.Policy.Send.Replicate && fetched[name] {
+			// A root owns its whole subtree, valid or not, so all of it is
+			// inspected: members need their own grids and send options, and
+			// excluded datasets keep pruning against their own grids.
+			if entry.Policy.Enabled {
 				covered[name] = true
 			}
 		}
 	}
-	markReplication(names, entries)
+	markRoots(names, entries)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -439,43 +463,97 @@ func resolve(names []string, inventory map[string]zfs.Dataset, stored map[string
 	return entries
 }
 
-func markReplication(names []string, entries map[string]Entry) {
+// markRoots assigns every dataset inside an actor root's subtree to that root.
+//
+// Activation inherits, so an enabled dataset with an enabled ancestor is a
+// member of the root above it, never a peer; and an intervening enabled=off
+// excludes only the datasets it covers without severing deeper enabled ones
+// from the root. An invalid root still owns its subtree: letting a policy error
+// turn its descendants into roots would fork lineages that fixing the error
+// could not merge back.
+//
+// Under replicate=on the one -R stream carries the whole subtree, so every
+// descendant is a member whatever it sets and its boomerangz properties are
+// ignored. Otherwise members are the enabled, valid descendants, each sending
+// with its own options; the receive path mapping and the wire format belong to
+// the root, because every member's replica is placed relative to the root's.
+func markRoots(names []string, entries map[string]Entry) {
+	within := make(map[string]string, len(names))
+	members := make(map[string][]string)
 	for _, name := range names {
 		entry := entries[name]
-		parent := entries[entry.Parent]
-		root := parent.CoveredBy
-		if root == "" && parent.Inspected && parent.Policy.Enabled && parent.Policy.Valid() && parent.Policy.Send.Replicate {
-			root = entry.Parent
+		root := within[entry.Parent]
+		if root == "" && entry.Policy.Enabled {
+			root = name
 		}
-		if root != "" {
-			entry.CoveredBy = root
-			rootPolicy := entries[root].Policy
+		within[name] = root
+		if root == "" {
+			continue
+		}
+		if root == name {
+			members[root] = append(members[root], name)
+			continue
+		}
+		entry.CoveredBy = root
+		rootEntry := entries[root]
+		switch {
+		case rootEntry.Policy.Send.Replicate:
+			entry.Member = true
+			if !entry.Policy.Enabled {
+				entry.Policy.Warnings = append(entry.Policy.Warnings, "replication root "+root+" sends this dataset although it is disabled here; replicate=on cannot exclude descendants")
+			}
 			keys := make(map[string]bool)
 			for key := range entry.Policy.Values {
 				keys[key] = true
 			}
-			for key := range rootPolicy.Values {
+			for key := range rootEntry.Policy.Values {
 				keys[key] = true
 			}
+			delete(keys, policy.Namespace+"enabled")
 			for _, key := range slices.Sorted(maps.Keys(keys)) {
-				if entry.Policy.Values[key].Value != rootPolicy.Values[key].Value {
+				if entry.Policy.Values[key].Value != rootEntry.Policy.Values[key].Value {
 					entry.Policy.Warnings = append(entry.Policy.Warnings, "replication root "+root+" governs differing "+strings.TrimPrefix(key, policy.Namespace))
 				}
 			}
-			entries[name] = entry
+		case entry.Policy.Enabled && entry.Inspected && entry.Policy.Valid():
+			entry.Member = true
+			if entry.Policy.Send.Replicate {
+				entry.Policy.Send.Replicate = false
+				entry.Policy.Warnings = append(entry.Policy.Warnings, "actor root "+root+" sends members individually; replicate is ignored here")
+			}
+			if entry.Policy.Discard != rootEntry.Policy.Discard {
+				entry.Policy.Discard = rootEntry.Policy.Discard
+				entry.Policy.Warnings = append(entry.Policy.Warnings, "actor root "+root+" sets the receive path mapping; discard is ignored here")
+			}
+		case entry.Policy.Enabled:
+			rootEntry.Policy.Warnings = append(rootEntry.Policy.Warnings, "member "+name+" is excluded while its policy is invalid")
+			entries[root] = rootEntry
 		}
+		if entry.Member {
+			members[root] = append(members[root], name)
+		}
+		entries[name] = entry
 	}
-	// A plaintext replication root may contain encrypted descendants. Validate
-	// the entire covered scope after identifying roots so invalid roots do not
-	// accidentally turn descendants into independent jobs.
+	for root, set := range members {
+		entry := entries[root]
+		entry.Members = set
+		entries[root] = entry
+	}
+	// A plaintext replication root may contain encrypted descendants, and its
+	// one stream must then be raw throughout. Validate the whole covered scope
+	// once roots are known so an invalid root cannot release its descendants.
 	checked := make(map[string]bool)
 	for _, name := range names {
 		entry := entries[name]
-		if entry.CoveredBy != "" && !checked[entry.CoveredBy] && entry.Dataset.EncryptionRoot != "" && entry.Dataset.EncryptionRoot != "-" {
-			root := entries[entry.CoveredBy]
-			root.Policy = root.Policy.ForReplicationScope(root.Dataset.EncryptionRoot != "" && root.Dataset.EncryptionRoot != "-", name)
-			entries[entry.CoveredBy] = root
-			checked[entry.CoveredBy] = true
+		if !entry.Member || checked[entry.CoveredBy] || entry.Dataset.EncryptionRoot == "" || entry.Dataset.EncryptionRoot == "-" {
+			continue
 		}
+		root := entries[entry.CoveredBy]
+		if !root.Policy.Send.Replicate {
+			continue
+		}
+		root.Policy = root.Policy.ForReplicationScope(root.Dataset.EncryptionRoot != "" && root.Dataset.EncryptionRoot != "-", name)
+		entries[entry.CoveredBy] = root
+		checked[entry.CoveredBy] = true
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -333,5 +334,150 @@ func TestEncryptedReplicationDescendant(t *testing.T) {
 				t.Fatal("implied flags not exposed")
 			}
 		})
+	}
+}
+
+func rootFixture(t *testing.T, datasets []string, properties ...zfs.Property) (*fakeReader, *Generation) {
+	t.Helper()
+	f := &fakeReader{}
+	for _, name := range datasets {
+		f.datasets = append(f.datasets, zfs.Dataset{Name: name, Type: zfs.Filesystem, EncryptionRoot: "-"})
+	}
+	f.properties = properties
+	s, err := New(f, Options{BatchSize: 8, Remotes: []string{"offsite"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.Scan(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, g
+}
+
+func local(dataset, key, value string) zfs.Property {
+	return zfs.Property{Dataset: dataset, Name: policy.Namespace + key, Value: value, Source: zfs.SourceLocal}
+}
+
+func TestRootOwnsSparseSubtree(t *testing.T) {
+	t.Parallel()
+	_, g := rootFixture(t,
+		[]string{"tank", "tank/root", "tank/root/first", "tank/root/first/second", "tank/root/first/other", "tank/root/kept"},
+		local("tank/root", "enabled", "on"),
+		local("tank/root", "local", "backup"),
+		local("tank/root/first", "enabled", "off"),
+		local("tank/root/first/second", "enabled", "on"),
+	)
+	root, _ := g.Inspect("tank/root")
+	if root.CoveredBy != "" || root.Member {
+		t.Fatalf("root is covered: %#v", root)
+	}
+	if want := []string{"tank/root", "tank/root/first/second", "tank/root/kept"}; !slices.Equal(root.Members, want) {
+		t.Fatalf("members = %q, want %q", root.Members, want)
+	}
+	for name, member := range map[string]bool{
+		"tank/root/first":        false,
+		"tank/root/first/other":  false,
+		"tank/root/first/second": true,
+		"tank/root/kept":         true,
+	} {
+		entry, _ := g.Inspect(name)
+		// Coverage is ownership: every dataset inside the root names it,
+		// member or not, so none can be scheduled or operated on alone.
+		if entry.CoveredBy != "tank/root" || entry.Member != member || len(entry.Members) != 0 {
+			t.Errorf("%s: covered by %q, member %t, members %q", name, entry.CoveredBy, entry.Member, entry.Members)
+		}
+		if err := entry.ErrCovered(); err == nil {
+			t.Errorf("%s: not refused as an independent root", name)
+		}
+		if !entry.Inspected {
+			t.Errorf("%s: a root's subtree must be inspected", name)
+		}
+	}
+	// A locally enabled dataset beneath an enabled one is a member, not the
+	// independent peer root it would have been when activation alone decided.
+	second, _ := g.Inspect("tank/root/first/second")
+	if second.Policy.Values[policy.Namespace+"enabled"].Dataset != "tank/root/first/second" {
+		t.Fatal("fixture: second should hold its own activation")
+	}
+}
+
+func TestMembersSendWithTheirOwnOptionsUnderTheRootsMapping(t *testing.T) {
+	t.Parallel()
+	_, g := rootFixture(t,
+		[]string{"tank", "tank/root", "tank/root/raw", "tank/root/tree"},
+		local("tank/root", "enabled", "on"),
+		local("tank/root", "local", "backup"),
+		local("tank/root", "discard", "first"),
+		local("tank/root/raw", "raw", "on"),
+		local("tank/root/raw", "remote", "offsite"),
+		local("tank/root/tree", "replicate", "on"),
+		local("tank/root/tree", "discard", "all"),
+	)
+	raw, _ := g.Inspect("tank/root/raw")
+	if !raw.Member || !raw.Policy.Send.Raw || !slices.Contains(raw.Policy.Remote, "offsite") || len(raw.Policy.Warnings) != 0 {
+		t.Fatalf("member options were not honoured: %#v", raw.Policy)
+	}
+	tree, _ := g.Inspect("tank/root/tree")
+	if !tree.Member || tree.Policy.Send.Replicate || !tree.Policy.Requested.Replicate {
+		t.Fatalf("a member's replicate must be ignored, not honoured: %#v", tree.Policy)
+	}
+	if tree.Policy.Discard != policy.DiscardFirst {
+		t.Fatalf("a member's discard must follow the root: %v", tree.Policy.Discard)
+	}
+	if len(tree.Policy.Warnings) != 2 {
+		t.Fatalf("expected replicate and discard warnings, got %q", tree.Policy.Warnings)
+	}
+}
+
+func TestInvalidPoliciesDoNotReleaseOwnership(t *testing.T) {
+	t.Parallel()
+	_, g := rootFixture(t,
+		[]string{"tank", "tank/root", "tank/root/broken", "tank/root/broken/below", "tank/bad", "tank/bad/child"},
+		local("tank/root", "enabled", "on"),
+		local("tank/root", "local", "backup"),
+		local("tank/root/broken", "remote", "missing"),
+		local("tank/bad", "enabled", "on"),
+		local("tank/bad", "remote", "missing"),
+		local("tank/bad/child", "enabled", "on"),
+		local("tank/bad/child", "remote", "offsite"),
+	)
+	root, _ := g.Inspect("tank/root")
+	broken, _ := g.Inspect("tank/root/broken")
+	if broken.Member || broken.CoveredBy != "tank/root" || slices.Contains(root.Members, "tank/root/broken") {
+		t.Fatalf("an invalid member was kept: %#v", broken)
+	}
+	if !slices.ContainsFunc(root.Policy.Warnings, func(w string) bool { return strings.Contains(w, "tank/root/broken") }) {
+		t.Fatalf("the root does not say which member it dropped: %q", root.Policy.Warnings)
+	}
+	// broken inherits its invalid remote into below, so it is excluded too.
+	below, _ := g.Inspect("tank/root/broken/below")
+	if below.Member || below.CoveredBy != "tank/root" {
+		t.Fatalf("below: %#v", below)
+	}
+	// An invalid root keeps its subtree; its valid child does not become a
+	// root that fixing the parent would then have to absorb.
+	child, _ := g.Inspect("tank/bad/child")
+	if child.CoveredBy != "tank/bad" || !child.Member {
+		t.Fatalf("an invalid root released its child: %#v", child)
+	}
+}
+
+func TestReplicationRootCarriesDisabledDescendants(t *testing.T) {
+	t.Parallel()
+	_, g := rootFixture(t,
+		[]string{"tank", "tank/tree", "tank/tree/off", "tank/tree/off/deep"},
+		local("tank/tree", "enabled", "on"),
+		local("tank/tree", "replicate", "on"),
+		local("tank/tree", "local", "backup"),
+		local("tank/tree/off", "enabled", "off"),
+	)
+	root, _ := g.Inspect("tank/tree")
+	if want := []string{"tank/tree", "tank/tree/off", "tank/tree/off/deep"}; !slices.Equal(root.Members, want) {
+		t.Fatalf("members = %q, want %q", root.Members, want)
+	}
+	off, _ := g.Inspect("tank/tree/off")
+	if !off.Member || len(off.Policy.Warnings) != 1 || !strings.Contains(off.Policy.Warnings[0], "although it is disabled here") {
+		t.Fatalf("an excluded descendant under -R needs its own warning, not a governs-differing one: %q", off.Policy.Warnings)
 	}
 }

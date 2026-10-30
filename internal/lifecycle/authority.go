@@ -2,22 +2,31 @@ package lifecycle
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
-// ActiveRoot requires activation to resolve from a local public property on the
-// selected root or one of its ancestors. Application defaults and received
-// values never authorize mutation.
+// ActiveRoot requires activation to be configured locally on root itself. An
+// actor root has no enabled ancestor, and policy resolution inherits only
+// locally configured public values, so a root's activation can only resolve from
+// its own property; activation inherited from an ancestor makes a dataset a
+// member of that ancestor's root. Application defaults and received values never
+// authorize mutation.
+//
+// This is necessary, not sufficient: a descendant may also set enabled=on
+// locally beneath an enabled ancestor. Only discovery sees the tree, and callers
+// must also refuse an entry it reports as covered.
 func ActiveRoot(effective policy.Effective, root string) error {
 	if !effective.Enabled || !effective.Valid() {
 		return fmt.Errorf("source policy must be enabled and valid")
 	}
 	source := effective.Values[policy.Namespace+"enabled"].Dataset
-	if source == "" || (source != root && !strings.HasPrefix(root, source+"/")) {
+	if source == "" {
 		return fmt.Errorf("source activation must come from locally configured policy")
+	}
+	if source != root {
+		return fmt.Errorf("activation is inherited from %s, so %s is a member of that root rather than a root", source, root)
 	}
 	return nil
 }

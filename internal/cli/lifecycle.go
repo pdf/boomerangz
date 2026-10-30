@@ -120,6 +120,9 @@ func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 		return fmt.Errorf("dataset policy inspection is incomplete")
 	}
 	effective := entry.Policy
+	if err := entry.ErrCovered(); err != nil {
+		return err
+	}
 	if err := lifecycle.ActiveRoot(effective, dataset); err != nil {
 		return err
 	}

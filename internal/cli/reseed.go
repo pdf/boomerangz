@@ -54,6 +54,9 @@ func runReseed(ctx context.Context, out io.Writer, cfg config.Config, reader dis
 	if !exists || !entry.Inspected {
 		return fmt.Errorf("dataset policy inspection is incomplete")
 	}
+	if err := entry.ErrCovered(); err != nil {
+		return err
+	}
 	if err := lifecycle.ActiveRoot(entry.Policy, dataset); err != nil {
 		return err
 	}

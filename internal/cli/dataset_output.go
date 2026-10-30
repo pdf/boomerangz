@@ -40,8 +40,11 @@ func datasetStatus(entry discovery.Entry) string {
 	if len(entry.Policy.Errors) > 0 {
 		return "invalid"
 	}
+	if entry.CoveredBy != "" && entry.Member {
+		return "member"
+	}
 	if entry.CoveredBy != "" {
-		return "covered"
+		return "excluded"
 	}
 	if entry.Inspected && entry.Policy.Enabled {
 		return "active"
@@ -57,7 +60,10 @@ func writeDatasetInspection(writer io.Writer, entry discovery.Entry) error {
 	line("Type", string(entry.Dataset.Type))
 	line("Activation", activationStatus(entry))
 	line("Policy", validStatus(entry.Policy))
-	line("Covered by", valueOrNone(entry.CoveredBy))
+	line("Actor root", actorRoot(entry))
+	if len(entry.Members) > 0 {
+		line("Members", strings.Join(entry.Members, ", "))
+	}
 	line("Encryption root", encryptionRoot(entry.Dataset.EncryptionRoot))
 	line("Snapshot policy", entry.Policy.Grid.String())
 	line("Local destinations", listOrNone(entry.Policy.Local))
@@ -105,6 +111,18 @@ func activationStatus(entry discovery.Entry) string {
 	return "inactive"
 }
 
+func actorRoot(entry discovery.Entry) string {
+	switch {
+	case entry.CoveredBy != "" && entry.Member:
+		return "member of " + entry.CoveredBy
+	case entry.CoveredBy != "":
+		return "excluded from " + entry.CoveredBy
+	case len(entry.Members) > 0:
+		return "this dataset"
+	}
+	return "none"
+}
+
 func validStatus(effective policy.Effective) string {
 	if effective.Valid() {
 		return "valid"
@@ -117,13 +135,6 @@ func encryptionRoot(root string) string {
 		return "none"
 	}
 	return root
-}
-
-func valueOrNone(value string) string {
-	if value == "" {
-		return "none"
-	}
-	return value
 }
 
 func listOrNone(values []string) string {
