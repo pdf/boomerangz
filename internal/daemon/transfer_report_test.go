@@ -482,7 +482,7 @@ func TestRemoteJobReportsTransferPhases(t *testing.T) {
 	runtime, log, _, _, effective := remoteReportRuntime(t)
 	job := "remote:" + reportSource + ":" + reportRemote
 
-	if !runtime.enqueueRemote(reportSource, reportRemote, effective, "") {
+	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
 		t.Fatal("remote job was not accepted")
 	}
 	states := log.waitRun(t, job, 0)
@@ -493,7 +493,7 @@ func TestRemoteJobReportsTransferPhases(t *testing.T) {
 	// The target now holds the newest snapshot. The job probes and succeeds
 	// without sending, and says so by never reporting sending.
 	from := log.count(job)
-	if !runtime.enqueueRemote(reportSource, reportRemote, effective, "") {
+	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
 		t.Fatal("second remote job was not accepted")
 	}
 	states = log.waitRun(t, job, from)
@@ -506,7 +506,7 @@ func TestRemoteResumeReportsEachSend(t *testing.T) {
 	t.Parallel()
 	runtime, log, source, destination, effective := remoteReportRuntime(t)
 	job := "remote:" + reportSource + ":" + reportRemote
-	road, err := runtime.road(reportSource, reportRemote, effective)
+	road, err := runtime.road(reportSource, reportRemote, effective, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +532,7 @@ func TestRemoteResumeReportsEachSend(t *testing.T) {
 	// after the resume has something of its own to send.
 	source.addSnapshot(t, 10)
 
-	if !runtime.enqueueRemote(reportSource, reportRemote, effective, "") {
+	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
 		t.Fatal("remote job was not accepted")
 	}
 	states := log.waitRun(t, job, 0)
@@ -548,7 +548,7 @@ func TestLocalJobReportsPlanningBeforeSending(t *testing.T) {
 	effective := policy.Resolve(zfs.Dataset{Name: reportSource, Type: zfs.Filesystem, EncryptionRoot: "-"}, nil, properties, nil)
 	job := "local:" + reportSource + ":" + reportDestination
 
-	if !runtime.enqueueLocal(reportSource, reportDestination, effective, "") {
+	if !runtime.enqueueLocal(reportSource, reportDestination, effective, nil) {
 		t.Fatal("local job was not accepted")
 	}
 	states := log.waitRun(t, job, 0)

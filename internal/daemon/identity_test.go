@@ -107,7 +107,7 @@ func TestLocalTransferNamesWhatItSentAndWhereItLanded(t *testing.T) {
 	job := "local:" + reportSource + ":" + reportDestination
 	newest := snapshotAt(t, source, 4)
 
-	if !runtime.enqueueLocal(reportSource, reportDestination, effective, "") {
+	if !runtime.enqueueLocal(reportSource, reportDestination, effective, nil) {
 		t.Fatal("local job was not accepted")
 	}
 	run := runOf(t, subscription, job)
@@ -123,7 +123,7 @@ func TestLocalTransferNamesWhatItSentAndWhereItLanded(t *testing.T) {
 
 	// A newer snapshot is sent incrementally from the one already received.
 	later := source.addSnapshot(t, 10)
-	if !runtime.enqueueLocal(reportSource, reportDestination, effective, "") {
+	if !runtime.enqueueLocal(reportSource, reportDestination, effective, nil) {
 		t.Fatal("second local job was not accepted")
 	}
 	run = runOf(t, subscription, job)
@@ -153,7 +153,7 @@ func TestTransferRetryNamesThePendingSnapshotItCarried(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !runtime.enqueueLocal(reportSource, reportDestination, effective, "") {
+	if !runtime.enqueueLocal(reportSource, reportDestination, effective, nil) {
 		t.Fatal("local job was not accepted")
 	}
 	run := runOf(t, subscription, job)
@@ -192,7 +192,7 @@ func TestRemoteTransferNamesTheSnapshotItsLastPassLanded(t *testing.T) {
 	runtime, _, source, destination, effective := remoteReportRuntime(t)
 	subscription := subscribe(t, runtime.status)
 	job := "remote:" + reportSource + ":" + reportRemote
-	road, err := runtime.road(reportSource, reportRemote, effective)
+	road, err := runtime.road(reportSource, reportRemote, effective, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestRemoteTransferNamesTheSnapshotItsLastPassLanded(t *testing.T) {
 	destination.mu.Unlock()
 	later := source.addSnapshot(t, 10)
 
-	if !runtime.enqueueRemote(reportSource, reportRemote, effective, "") {
+	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
 		t.Fatal("remote job was not accepted")
 	}
 	run := runOf(t, subscription, job)
@@ -426,7 +426,7 @@ func TestADeactivatedQueuedTransferNamesNoSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !runtime.enqueueLocal(reportSource, reportDestination, effective, "") {
+	if !runtime.enqueueLocal(reportSource, reportDestination, effective, nil) {
 		t.Fatal("local job was not accepted")
 	}
 	runtime.local.RemoveScope(reportSource, "dataset deactivated")

@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -66,12 +67,20 @@ func (r Reporter) progress() func(zfs.Progress) {
 }
 
 // Result distinguishes successful byte transport from verified replication.
+// For a request with members, Streams holds one result per stream attempted,
+// and the top-level fields describe the root's stream when it ran, otherwise
+// the last stream attempted; Verified then means every stream verified.
 type Result struct {
 	Plan           Plan         `json:"plan"`
 	Estimate       zfs.Estimate `json:"estimate"`
 	Progress       zfs.Progress `json:"progress"`
 	Verified       bool         `json:"verified"`
 	ResumeDatasets []string     `json:"resume_datasets,omitempty"`
+	// Resumed is set when the stream completed an interrupted receive before
+	// planning again; ResumedSnapshot names the endpoint that receive was for.
+	Resumed         bool     `json:"resumed,omitempty"`
+	ResumedSnapshot string   `json:"resumed_snapshot,omitempty"`
+	Streams         []Result `json:"streams,omitempty"`
 }
 
 var sourcePermissions = []string{"bookmark", "destroy", "hold", "mount", "release", "send", "snapshot", "userprop"}
@@ -117,6 +126,48 @@ func (e *PreparationChangedError) Error() string { return e.Reason }
 
 // Temporary permits local and remote coordinators to retry ordinary churn.
 func (*PreparationChangedError) Temporary() bool { return true }
+
+// StreamError is one member stream's failure.
+type StreamError struct {
+	Dataset string
+	Err     error
+}
+
+func (e StreamError) Error() string { return e.Dataset + ": " + e.Err.Error() }
+
+// StreamsError reports the member streams that failed in one transfer. Streams
+// beneath a failed one were skipped rather than attempted, and are not listed.
+type StreamsError struct {
+	Failed []StreamError
+}
+
+func (e *StreamsError) Error() string {
+	parts := make([]string, 0, len(e.Failed))
+	for _, failure := range e.Failed {
+		parts = append(parts, failure.Error())
+	}
+	return "member streams failed: " + strings.Join(parts, "; ")
+}
+
+// Temporary holds only when every failure is temporary, so one permanent
+// failure is never retried as churn behind a temporary one.
+func (e *StreamsError) Temporary() bool {
+	for _, failure := range e.Failed {
+		var temporary interface{ Temporary() bool }
+		if !errors.As(failure.Err, &temporary) || !temporary.Temporary() {
+			return false
+		}
+	}
+	return len(e.Failed) > 0
+}
+
+func (e *StreamsError) Unwrap() []error {
+	errs := make([]error, 0, len(e.Failed))
+	for _, failure := range e.Failed {
+		errs = append(errs, failure.Err)
+	}
+	return errs
+}
 
 // Local serializes administrative jobs through this instance. Callers must also
 // coordinate other processes and retain a stable effective policy generation.
@@ -174,12 +225,79 @@ func NewRemoteWithService(source Backend, destination zfs.Executor, stream Strea
 	return &Local{backend: source, target: destination, stream: stream, lifecycle: service, installation: installation}, nil
 }
 
-func (l *Local) load(ctx context.Context, request Request) (View, error) {
-	var view View
+// mergeStates combines inspections of distinct datasets into one state.
+func mergeStates(states ...zfs.State) zfs.State {
+	var merged zfs.State
+	for _, state := range states {
+		merged.Objects = append(merged.Objects, state.Objects...)
+		merged.Properties = append(merged.Properties, state.Properties...)
+		for name, value := range state.Received {
+			if merged.Received == nil {
+				merged.Received = make(map[string]map[string]string)
+			}
+			merged.Received[name] = value
+		}
+		for name, value := range state.ResumeTokens {
+			if merged.ResumeTokens == nil {
+				merged.ResumeTokens = make(map[string]string)
+			}
+			merged.ResumeTokens[name] = value
+		}
+		for name, value := range state.Clones {
+			if merged.Clones == nil {
+				merged.Clones = make(map[string][]string)
+			}
+			merged.Clones[name] = value
+		}
+		for name, value := range state.Holds {
+			if merged.Holds == nil {
+				merged.Holds = make(map[string][]string)
+			}
+			merged.Holds[name] = value
+		}
+	}
+	return merged
+}
+
+// ownTokens keeps only the resume tokens that belong to a stream received at
+// destination. A recursive stream owns every token beneath its destination; any
+// other stream owns only its own, since a token on a descendant belongs to that
+// member's stream and is resumed and verified there.
+func ownTokens(state zfs.State, destination string, recursive bool) zfs.State {
+	if recursive || len(state.ResumeTokens) == 0 {
+		return state
+	}
+	tokens := make(map[string]string)
+	if token, found := state.ResumeTokens[destination]; found {
+		tokens[destination] = token
+	}
+	if len(tokens) == 0 {
+		tokens = nil
+	}
+	state.ResumeTokens = tokens
+	return state
+}
+
+// nearestExisting returns name or its nearest ancestor present in inventory.
+func nearestExisting(name string, inventory []zfs.Dataset) string {
+	nearest := ""
+	for _, dataset := range inventory {
+		if inside(name, dataset.Name) && len(dataset.Name) > len(nearest) {
+			nearest = dataset.Name
+		}
+	}
+	return nearest
+}
+
+// load inventories both ends for one stream. The source view is the root's own
+// state, which carries authority, binding and references, plus the stream's;
+// a replication root's stream inspects the whole subtree it carries.
+func (l *Local) load(ctx context.Context, request Request, stream string) (View, error) {
+	view := View{Stream: stream}
 	if err := zfs.ValidateDataset(request.Source); err != nil {
 		return view, err
 	}
-	target, err := zfs.MapReceiveDataset(request.Source, request.DestinationRoot, zfs.ReceiveDiscard(request.Policy.Discard))
+	mappedRoot, target, err := request.mapped(stream)
 	if err != nil {
 		return view, err
 	}
@@ -199,12 +317,23 @@ func (l *Local) load(ctx context.Context, request Request) (View, error) {
 	if err != nil {
 		return view, err
 	}
+	if stream != request.Source {
+		member, inspectErr := l.backend.InspectState(ctx, stream, false)
+		if inspectErr != nil {
+			return view, inspectErr
+		}
+		view.Source = mergeStates(view.Source, member)
+	}
 	// Inherited public properties may be carried by property streams, and changes
 	// to their local ancestor values must be visible to preflight revalidation.
+	// The root and the stream are already inspected; everything above the
+	// stream besides them is read for its stored values alone.
 	var ancestors []string
-	for name := request.Source; strings.Contains(name, "/"); {
+	for name := stream; strings.Contains(name, "/"); {
 		name = name[:strings.LastIndexByte(name, '/')]
-		ancestors = append(ancestors, name)
+		if name != request.Source {
+			ancestors = append(ancestors, name)
+		}
 	}
 	if len(ancestors) > 0 {
 		rows, err := l.backend.GetStoredProperties(ctx, ancestors)
@@ -223,40 +352,46 @@ func (l *Local) load(ctx context.Context, request Request) (View, error) {
 			return view, err
 		}
 	}
-	for _, dataset := range view.DestinationInventory {
-		if dataset.Name == target {
-			view.DestinationExists = true
-			break
+	identify := func(mapped string) (bool, zfs.DatasetIdentity, error) {
+		nearest := nearestExisting(mapped, view.DestinationInventory)
+		if nearest == "" {
+			if !l.sameHost {
+				return false, zfs.DatasetIdentity{}, &DestinationUnavailableError{Root: request.DestinationRoot}
+			}
+			return false, zfs.DatasetIdentity{}, fmt.Errorf("destination has no existing ancestor")
 		}
+		identity, identityErr := l.target.InspectDatasetIdentity(ctx, nearest)
+		return nearest == mapped, identity, identityErr
+	}
+	view.DestinationExists, view.DestinationIdentity, err = identify(target)
+	if err != nil {
+		return view, err
 	}
 	if view.DestinationExists {
 		view.Destination, err = l.target.InspectState(ctx, target, true)
-		if err == nil {
-			view.DestinationIdentity, err = l.target.InspectDatasetIdentity(ctx, target)
+		if err != nil {
+			return view, err
 		}
-	} else {
-		ancestor := ""
-		for _, dataset := range view.DestinationInventory {
-			if inside(target, dataset.Name) && len(dataset.Name) > len(ancestor) {
-				ancestor = dataset.Name
-			}
-		}
-		if ancestor == "" {
-			if !l.sameHost {
-				return view, &DestinationUnavailableError{Root: request.DestinationRoot}
-			}
-			return view, fmt.Errorf("destination has no existing ancestor")
-		}
-		view.DestinationIdentity, err = l.target.InspectDatasetIdentity(ctx, ancestor)
+		view.Destination = ownTokens(view.Destination, target, request.Policy.Send.Replicate)
 	}
+	if stream == request.Source {
+		view.RootDestinationExists, view.RootDestinationIdentity = view.DestinationExists, view.DestinationIdentity
+		return view, nil
+	}
+	view.RootDestinationExists, view.RootDestinationIdentity, err = identify(mappedRoot)
 	return view, err
 }
 
 // Preview inventories both ends without creating holds or changing properties.
+// A request with members previews its first stream.
 func (l *Local) Preview(ctx context.Context, request Request) (Plan, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	view, err := l.load(ctx, request)
+	streams, err := request.Streams()
+	if err != nil {
+		return Plan{}, err
+	}
+	view, err := l.load(ctx, request, streams[0].Dataset)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -275,7 +410,11 @@ func (l *Local) Preview(ctx context.Context, request Request) (Plan, error) {
 }
 
 func (l *Local) checkPermissions(ctx context.Context, request Request, view View, plan Plan) error {
-	if err := l.backend.CheckPermissions(ctx, request.Source, slices.Clone(sourcePermissions)); err != nil {
+	sent := plan.Source
+	if sent == "" {
+		sent = request.Source
+	}
+	if err := l.backend.CheckPermissions(ctx, sent, slices.Clone(sourcePermissions)); err != nil {
 		return fmt.Errorf("source permission preflight: %w", err)
 	}
 	anchor := request.DestinationRoot
@@ -378,11 +517,24 @@ func missingReceiveParents(root, target string, inventory []zfs.Dataset) ([]stri
 	return missing, nil
 }
 
+// prepareReceiveParents creates the missing datasets between the configured
+// root and a full receive's destination. For a member these may include the
+// root's own replica and holes left by excluded datasets: nothing is sent for
+// them, but a deeper member cannot be received without them. A replica the
+// root's mapping makes the configured root itself is created from its parent.
 func (l *Local) prepareReceiveParents(ctx context.Context, request Request, view View, plan Plan) (View, Plan, error) {
 	if plan.Mode != "full" {
 		return view, plan, nil
 	}
-	parents, err := missingReceiveParents(request.DestinationRoot, plan.Destination, view.DestinationInventory)
+	base := request.DestinationRoot
+	if request.Policy.Discard == policy.DiscardOff {
+		index := strings.LastIndexByte(base, '/')
+		if index < 0 {
+			return view, plan, fmt.Errorf("cannot create a replica in place of a pool root")
+		}
+		base = base[:index]
+	}
+	parents, err := missingReceiveParents(base, plan.Destination, view.DestinationInventory)
 	if err != nil {
 		return view, plan, err
 	}
@@ -394,7 +546,7 @@ func (l *Local) prepareReceiveParents(ctx context.Context, request Request, view
 	if len(parents) == 0 {
 		return view, plan, nil
 	}
-	prepared, err := l.load(ctx, request)
+	prepared, err := l.load(ctx, request, view.Stream)
 	if err != nil {
 		return view, plan, err
 	}
@@ -411,16 +563,81 @@ func (l *Local) prepareReceiveParents(ctx context.Context, request Request, view
 	return prepared, fresh, nil
 }
 
-// Apply rebuilds the plan, pins owned source endpoints and snapshot bases, sends,
-// verifies every expected GUID, and only then advances/relinquishes references.
-// Failures retain references and any receive token; no implicit reseed or abort.
-// Phases are reported only for work that happens: PhaseSending before a stream
-// and PhaseVerifying after it completes, so an up-to-date target reports none.
+// Apply sends each of the request's streams in order, parents first. A stream
+// that fails leaves every stream beneath it unattempted: they would be received
+// into placeholders that block the failed stream's own later full receive.
+// Unrelated streams still run, and each verified stream advances its own proof.
+//
+// Each stream rebuilds its plan, pins owned source endpoints and snapshot bases,
+// sends, verifies every expected GUID, and only then advances/relinquishes its
+// references. Failures retain references and any receive token; no implicit
+// reseed or abort. Phases are reported only for work that happens:
+// PhaseSending before a stream and PhaseVerifying after it completes, so an
+// up-to-date stream reports none.
 func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Result, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	streams, err := request.Streams()
+	if err != nil {
+		return Result{}, err
+	}
+	if len(request.Members) == 0 {
+		return l.applyStream(ctx, request, streams[0].Dataset, report)
+	}
+	var (
+		result Result
+		failed StreamsError
+	)
+	result.Verified = true
+	for _, stream := range streams {
+		if slices.ContainsFunc(failed.Failed, func(failure StreamError) bool { return inside(stream.Dataset, failure.Dataset) }) {
+			result.Verified = false
+			continue
+		}
+		streamResult, streamErr := l.applyStream(ctx, request, stream.Dataset, report)
+		result.Streams = append(result.Streams, streamResult)
+		result.ResumeDatasets = append(result.ResumeDatasets, streamResult.ResumeDatasets...)
+		if stream.Dataset == request.Source || result.Plan.Source != request.Source {
+			result.Plan, result.Estimate, result.Progress = streamResult.Plan, streamResult.Estimate, streamResult.Progress
+		}
+		result.Verified = result.Verified && streamResult.Verified
+		if streamErr != nil {
+			if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
+				return result, streamErr
+			}
+			failed.Failed = append(failed.Failed, StreamError{Dataset: stream.Dataset, Err: streamErr})
+		}
+	}
+	if len(failed.Failed) > 0 {
+		return result, &failed
+	}
+	return result, nil
+}
+
+// applyStream sends one stream. A stream left resumable by an interrupted
+// receive resumes first and then plans again, so it ends at its newest endpoint.
+func (l *Local) applyStream(ctx context.Context, request Request, stream string, report Reporter) (Result, error) {
+	result, err := l.applyOnce(ctx, request, stream, report)
+	if err != nil || result.Plan.Mode != "resume" {
+		return result, err
+	}
+	resumed := result.Plan.Snapshot
+	result, err = l.applyOnce(ctx, request, stream, report)
+	result.Resumed, result.ResumedSnapshot = true, resumed
+	return result, err
+}
+
+func (l *Local) applyOnce(ctx context.Context, request Request, stream string, report Reporter) (Result, error) {
+	member, err := request.stream(stream)
+	if err != nil {
+		return Result{}, err
+	}
+	streamPolicy := member.Policy
+	if stream == request.Source {
+		streamPolicy = request.Policy
+	}
 	var result Result
-	before, err := l.load(ctx, request)
+	before, err := l.load(ctx, request, stream)
 	if err != nil {
 		return result, err
 	}
@@ -461,7 +678,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 		for _, endpoint := range plan.Endpoints {
 			endpointSnapshots = append(endpointSnapshots, endpoint.Source)
 		}
-		ref, err = l.lifecycle.ProtectSet(ctx, request.Source, endpointSnapshots, targetID)
+		ref, err = l.lifecycle.ProtectSet(ctx, request.Source, stream, endpointSnapshots, targetID)
 		if err != nil {
 			return result, err
 		}
@@ -480,11 +697,11 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 					}
 				}
 			}
-			if _, err := l.lifecycle.ProtectSet(ctx, request.Source, baseSnapshots, targetID); err != nil {
+			if _, err := l.lifecycle.ProtectSet(ctx, request.Source, stream, baseSnapshots, targetID); err != nil {
 				return result, err
 			}
 		}
-		prepared, loadErr := l.load(ctx, request)
+		prepared, loadErr := l.load(ctx, request, stream)
 		if loadErr != nil {
 			return result, loadErr
 		}
@@ -502,7 +719,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 		plan = fresh
 		result.Plan = plan
 	} else {
-		prepared, loadErr := l.load(ctx, request)
+		prepared, loadErr := l.load(ctx, request, stream)
 		if loadErr != nil {
 			return result, loadErr
 		}
@@ -530,6 +747,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 			probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
 			if state, probeErr := l.target.InspectState(probeCtx, plan.Destination, true); probeErr == nil {
+				state = ownTokens(state, plan.Destination, plan.Send.Recursive)
 				for name := range state.ResumeTokens {
 					result.ResumeDatasets = append(result.ResumeDatasets, name)
 				}
@@ -543,6 +761,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 	if err != nil {
 		return result, err
 	}
+	destination = ownTokens(destination, plan.Destination, plan.Send.Recursive)
 	if err := verifyGUIDs(plan, destination); err != nil {
 		return result, err
 	}
@@ -561,8 +780,11 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 	if err != nil || !slices.ContainsFunc(preparedRefs, func(candidate lifecycle.Reference) bool { return reflect.DeepEqual(candidate, ref) }) {
 		return result, fmt.Errorf("source recovery proof changed during transfer")
 	}
-	if plan.TargetBinding.Anchor != plan.Destination {
-		resolved, identityErr := l.target.InspectDatasetIdentity(ctx, plan.Destination)
+	// The binding proves the root's replica, which every stream is received
+	// beneath, so the first stream to bring it into existence promotes the
+	// bootstrap anchor to it.
+	if mappedRoot := plan.TargetBinding.MappedDataset; plan.TargetBinding.Anchor != mappedRoot {
+		resolved, identityErr := l.target.InspectDatasetIdentity(ctx, mappedRoot)
 		if identityErr != nil {
 			return result, identityErr
 		}
@@ -571,7 +793,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 		if transport == "local" && canonical == "" {
 			canonical = canonicalLocalTarget(request.DestinationRoot)
 		}
-		promoted, bindingErr := bindingForTarget(request, plan.Destination, resolved, transport, canonical)
+		promoted, bindingErr := bindingForTarget(request, mappedRoot, resolved, transport, canonical)
 		if bindingErr != nil || promoted.PoolGUID != plan.TargetBinding.PoolGUID {
 			return result, fmt.Errorf("received destination identity could not be anchored")
 		}
@@ -593,6 +815,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 	if err != nil {
 		return result, err
 	}
+	verified = ownTokens(verified, plan.Destination, plan.Send.Recursive)
 	if err := verifyGUIDs(plan, verified); err != nil {
 		return result, err
 	}
@@ -617,7 +840,7 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 	// latest verified endpoint protected until a newer transfer succeeds;
 	// ReleaseReference below then retires the previous endpoint. Latest-only
 	// sends can recover from the verified bookmark and do not need this hold.
-	if canResumeFromBookmark(request.Policy) {
+	if canResumeFromBookmark(streamPolicy) {
 		if err := l.lifecycle.ReleaseCompletedHold(ctx, request.Source, ref); err != nil {
 			return result, err
 		}
@@ -630,8 +853,10 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 	if err != nil {
 		return result, err
 	}
+	// Only this stream's older proofs are retired: every other member's base
+	// on this target is its own, at its own instant.
 	for _, prior := range old {
-		if prior.Target == targetID && prior.Metadata.Created.Before(ref.Metadata.Created) {
+		if prior.Target == targetID && prior.Dataset == stream && prior.Metadata.Created.Before(ref.Metadata.Created) {
 			if err := l.lifecycle.ReleaseReference(ctx, request.Source, prior); err != nil {
 				return result, err
 			}

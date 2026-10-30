@@ -14,11 +14,18 @@ import (
 
 // Request selects an explicitly configured local destination and an optional
 // owned snapshot. Empty Snapshot chooses the newest proven owned snapshot.
+//
+// Source is the actor root and Policy its effective policy: they carry the
+// authority, lineage, target binding and receive mapping every stream uses.
 type Request struct {
 	Source          string
 	DestinationRoot string
 	Snapshot        string
 	Policy          policy.Effective
+	// Members are the datasets this target receives as streams of their own,
+	// each with the send options of its own policy. Empty sends the root
+	// alone, which is also how a replication root sends its whole subtree.
+	Members []Member
 	// Transport defaults to local. RemoteName and CanonicalTarget are required
 	// for ssh and are derived from validated global configuration by the caller.
 	Transport       string
@@ -26,16 +33,88 @@ type Request struct {
 	CanonicalTarget string
 }
 
-// View is a complete preflight inventory. Destination includes descendants even
-// for nonrecursive sends, so a descendant resume token is never overlooked.
+// Member is one dataset an actor root sends to a target as its own stream.
+// Policy is the member's own effective policy, whose send options, incremental
+// mode and receive overrides the stream uses. Snapshot pins the endpoint; empty
+// selects the newest snapshot of the root's lineage on the member.
+type Member struct {
+	Dataset  string           `json:"dataset"`
+	Policy   policy.Effective `json:"policy"`
+	Snapshot string           `json:"snapshot,omitempty"`
+}
+
+// Streams lists what the request sends: its members parents first, or the root
+// alone with the request's own snapshot.
+func (r Request) Streams() ([]Member, error) {
+	if len(r.Members) == 0 {
+		return []Member{{Dataset: r.Source, Policy: r.Policy, Snapshot: r.Snapshot}}, nil
+	}
+	if r.Policy.Send.Replicate {
+		return nil, fmt.Errorf("a replication root sends one stream, not one per member")
+	}
+	members := slices.Clone(r.Members)
+	// Lexical order puts every parent before its children.
+	slices.SortFunc(members, func(a, b Member) int { return strings.Compare(a.Dataset, b.Dataset) })
+	for i, member := range members {
+		if err := zfs.ValidateDataset(member.Dataset); err != nil {
+			return nil, err
+		}
+		if !inside(member.Dataset, r.Source) {
+			return nil, fmt.Errorf("member %s is outside root %s", member.Dataset, r.Source)
+		}
+		if i > 0 && members[i-1].Dataset == member.Dataset {
+			return nil, fmt.Errorf("member %s is repeated", member.Dataset)
+		}
+	}
+	return members, nil
+}
+
+// stream returns the member the request names, or the root.
+func (r Request) stream(dataset string) (Member, error) {
+	streams, err := r.Streams()
+	if err != nil {
+		return Member{}, err
+	}
+	for _, member := range streams {
+		if member.Dataset == dataset {
+			return member, nil
+		}
+	}
+	return Member{}, fmt.Errorf("%s is not a stream of this request", dataset)
+}
+
+// mapped returns the root's mapped destination and the stream's, which is the
+// root's plus the stream's path relative to the root: the root's mapping places
+// every member's replica, so discard never re-derives it from the member's name.
+func (r Request) mapped(stream string) (string, string, error) {
+	root, err := zfs.MapReceiveDataset(r.Source, r.DestinationRoot, zfs.ReceiveDiscard(r.Policy.Discard))
+	if err != nil {
+		return "", "", err
+	}
+	if !inside(stream, r.Source) {
+		return "", "", fmt.Errorf("stream %s is outside root %s", stream, r.Source)
+	}
+	return root, root + strings.TrimPrefix(stream, r.Source), nil
+}
+
+// View is a complete preflight inventory for one stream. Destination includes
+// descendants even for nonrecursive sends, so a descendant resume token is never
+// overlooked. Source holds the root's own state and the stream's.
+//
+// Destination describes the stream's mapped dataset; RootDestination describes
+// the root's, which is what the target binding proves. They are the same for
+// the root's own stream.
 type View struct {
-	Inventory            []zfs.Dataset
-	DestinationInventory []zfs.Dataset
-	Source               zfs.State
-	Destination          zfs.State
-	DestinationExists    bool
-	DestinationIdentity  zfs.DatasetIdentity
-	BindingIdentity      zfs.DatasetIdentity
+	Stream                  string
+	Inventory               []zfs.Dataset
+	DestinationInventory    []zfs.Dataset
+	Source                  zfs.State
+	Destination             zfs.State
+	DestinationExists       bool
+	DestinationIdentity     zfs.DatasetIdentity
+	RootDestinationExists   bool
+	RootDestinationIdentity zfs.DatasetIdentity
+	BindingIdentity         zfs.DatasetIdentity
 }
 
 func requestTransport(request Request) string {
@@ -61,6 +140,32 @@ func canonicalTarget(request Request) string {
 
 func canResumeFromBookmark(effective policy.Effective) bool {
 	return effective.Incremental == "latest" && !effective.Send.Replicate
+}
+
+// streamPolicy checks a member stream's own policy against the root's: the
+// member must itself send to this target, and must share the root's mapping.
+func streamPolicy(request Request, stream Member) (policy.Effective, error) {
+	if stream.Dataset == request.Source {
+		return request.Policy.Clone(), nil
+	}
+	p := stream.Policy.Clone()
+	if !p.Enabled || !p.Valid() {
+		return p, fmt.Errorf("member %s policy must be enabled and valid", stream.Dataset)
+	}
+	if p.Send.Replicate {
+		return p, fmt.Errorf("member %s cannot send recursively", stream.Dataset)
+	}
+	if p.Discard != request.Policy.Discard {
+		return p, fmt.Errorf("member %s does not share the root's receive mapping", stream.Dataset)
+	}
+	configured := slices.Contains(p.Local, request.DestinationRoot)
+	if requestTransport(request) != "local" {
+		configured = slices.Contains(p.Remote, request.RemoteName)
+	}
+	if !configured {
+		return p, fmt.Errorf("member %s does not send to this target", stream.Dataset)
+	}
+	return p, nil
 }
 
 // Expected records the exact received snapshot and source GUID to verify.
@@ -126,24 +231,38 @@ func completeReceiveExclusions(options *zfs.ReceiveOptions, p policy.Effective, 
 	options.Exclude = slices.Compact(options.Exclude)
 }
 
-// Build validates mapping, lineage, history and receive isolation without writes.
+// Build validates mapping, lineage, history and receive isolation for the
+// stream view describes, without writes.
 func Build(request Request, view View, installation string) (Plan, error) {
 	plan := Plan{Source: request.Source}
 	if err := zfs.ValidateDataset(request.Source); err != nil {
 		return plan, err
 	}
-	p := request.Policy.Clone()
-	if !p.Enabled || !p.Valid() {
+	rootPolicy := request.Policy.Clone()
+	if !rootPolicy.Enabled || !rootPolicy.Valid() {
 		return plan, fmt.Errorf("source policy must be enabled and valid")
 	}
-	if err := lifecycle.ActiveRoot(p, request.Source); err != nil {
+	if err := lifecycle.ActiveRoot(rootPolicy, request.Source); err != nil {
+		return plan, err
+	}
+	streamName := view.Stream
+	if streamName == "" {
+		streamName = request.Source
+	}
+	stream, err := request.stream(streamName)
+	if err != nil {
+		return plan, err
+	}
+	plan.Source = stream.Dataset
+	p, err := streamPolicy(request, stream)
+	if err != nil {
 		return plan, err
 	}
 	transport := requestTransport(request)
 	canonical := request.CanonicalTarget
 	switch transport {
 	case "local":
-		if !slices.Contains(p.Local, request.DestinationRoot) {
+		if !slices.Contains(rootPolicy.Local, request.DestinationRoot) && stream.Dataset == request.Source {
 			return plan, fmt.Errorf("destination is not configured by the source local property")
 		}
 		if canonical == "" {
@@ -153,7 +272,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 			return plan, fmt.Errorf("local canonical target does not match destination")
 		}
 	case "ssh", "native":
-		if request.RemoteName == "" || !slices.Contains(p.Remote, request.RemoteName) {
+		if request.RemoteName == "" || (stream.Dataset == request.Source && !slices.Contains(rootPolicy.Remote, request.RemoteName)) {
 			return plan, fmt.Errorf("remote is not configured by the source remote property")
 		}
 		if canonical == "" || strings.ContainsAny(canonical, "\x00\r\n") {
@@ -162,19 +281,22 @@ func Build(request Request, view View, installation string) (Plan, error) {
 	default:
 		return plan, fmt.Errorf("unsupported transfer transport %q", transport)
 	}
-	target, err := zfs.MapReceiveDataset(request.Source, request.DestinationRoot, zfs.ReceiveDiscard(p.Discard))
+	mappedRoot, target, err := request.mapped(stream.Dataset)
 	if err != nil {
 		return plan, err
 	}
 	plan.Destination = target
-	if transport == "local" && (inside(target, request.Source) || inside(request.Source, target)) {
+	if transport == "local" && (inside(mappedRoot, request.Source) || inside(request.Source, mappedRoot)) {
 		return plan, fmt.Errorf("source and destination scopes overlap")
 	}
 	source := objectMap(view.Source)
 	dest := objectMap(view.Destination)
-	root, ok := source[request.Source]
-	if !ok || root.GUID == 0 || (root.Type != "filesystem" && root.Type != "volume") {
+	if root, ok := source[request.Source]; !ok || root.GUID == 0 || (root.Type != "filesystem" && root.Type != "volume") {
 		return plan, fmt.Errorf("source dataset is missing")
+	}
+	sent, ok := source[stream.Dataset]
+	if !ok || sent.GUID == 0 || (sent.Type != "filesystem" && sent.Type != "volume") {
+		return plan, fmt.Errorf("member dataset is missing: %s", stream.Dataset)
 	}
 	for _, o := range view.Source.Objects {
 		if !inside(datasetOf(o.Name), request.Source) {
@@ -216,6 +338,13 @@ func Build(request Request, view View, installation string) (Plan, error) {
 	if view.DestinationIdentity.Name == "" || destinationDatasets[view.DestinationIdentity.Name].Name == "" || destinationDatasets[view.DestinationIdentity.Name].Type != view.DestinationIdentity.Type {
 		return plan, fmt.Errorf("destination identity does not match sparse inventory")
 	}
+	rootIdentity, rootExists := view.RootDestinationIdentity, view.RootDestinationExists
+	if stream.Dataset == request.Source {
+		rootIdentity, rootExists = view.DestinationIdentity, view.DestinationExists
+	}
+	if rootIdentity.Name == "" || destinationDatasets[rootIdentity.Name].Name == "" || destinationDatasets[rootIdentity.Name].Type != rootIdentity.Type || (rootExists && rootIdentity.Name != mappedRoot) || (!rootExists && !inside(mappedRoot, rootIdentity.Name)) {
+		return plan, fmt.Errorf("root destination identity does not match sparse inventory")
+	}
 	if view.DestinationExists {
 		destinationRoot, exists := dest[target]
 		if !exists || view.DestinationIdentity.Name != target || destinationRoot.GUID != view.DestinationIdentity.GUID || destinationRoot.Type != string(view.DestinationIdentity.Type) {
@@ -232,7 +361,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 			return plan, fmt.Errorf("destination identity is not the nearest existing ancestor")
 		}
 	}
-	encrypted := inventory[request.Source].EncryptionRoot != "" && inventory[request.Source].EncryptionRoot != "-"
+	encrypted := inventory[stream.Dataset].EncryptionRoot != "" && inventory[stream.Dataset].EncryptionRoot != "-"
 	descendant := ""
 	if p.Send.Replicate {
 		for _, d := range view.Inventory {
@@ -263,10 +392,12 @@ func Build(request Request, view View, installation string) (Plan, error) {
 	if suspended {
 		return plan, fmt.Errorf("target is suspended pending explicit remote revalidation")
 	}
-	if view.DestinationIdentity.Name == "" {
+	if rootIdentity.Name == "" {
 		return plan, fmt.Errorf("destination identity is missing")
 	}
-	wantedBinding, err := bindingForTarget(request, target, view.DestinationIdentity, transport, canonical)
+	// The binding proves the root's mapped destination, whichever stream is
+	// being planned: every member's replica is placed beneath it.
+	wantedBinding, err := bindingForTarget(request, mappedRoot, rootIdentity, transport, canonical)
 	if err != nil {
 		return plan, err
 	}
@@ -281,11 +412,11 @@ func Build(request Request, view View, installation string) (Plan, error) {
 			return plan, err
 		}
 		verifiedBinding := wantedBinding
-		if !view.DestinationExists {
+		if !rootExists {
 			if view.BindingIdentity.Name == "" {
 				return plan, fmt.Errorf("bound destination identity is missing")
 			}
-			verifiedBinding, err = bindingForTarget(request, target, view.BindingIdentity, transport, canonical)
+			verifiedBinding, err = bindingForTarget(request, mappedRoot, view.BindingIdentity, transport, canonical)
 			if err != nil {
 				return plan, err
 			}
@@ -297,10 +428,10 @@ func Build(request Request, view View, installation string) (Plan, error) {
 	}
 	var endpoint zfs.Object
 	for _, o := range view.Source.Objects {
-		if o.Type != "snapshot" || datasetOf(o.Name) != request.Source {
+		if o.Type != "snapshot" || datasetOf(o.Name) != stream.Dataset {
 			continue
 		}
-		if request.Snapshot != "" && o.Name != request.Snapshot {
+		if stream.Snapshot != "" && o.Name != stream.Snapshot {
 			continue
 		}
 		if _, err := ownership(view.Source, o, lineage); err != nil {
@@ -317,12 +448,12 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		return plan, fmt.Errorf("no selected owned snapshot exists")
 	}
 	plan.Snapshot = endpoint.Name
-	component := strings.TrimPrefix(endpoint.Name, request.Source+"@")
+	component := strings.TrimPrefix(endpoint.Name, stream.Dataset+"@")
 	for _, o := range view.Source.Objects {
 		if o.Type != "filesystem" && o.Type != "volume" {
 			continue
 		}
-		if !p.Send.Replicate && o.Name != request.Source {
+		if !p.Send.Replicate && o.Name != stream.Dataset {
 			continue
 		}
 		childLineage, err := lifecycle.DatasetLineage(view.Source, o.Name)
@@ -340,7 +471,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		if err != nil {
 			return plan, err
 		}
-		mapped := target + strings.TrimPrefix(o.Name, request.Source)
+		mapped := mappedRoot + strings.TrimPrefix(o.Name, request.Source)
 		if existing, found := dest[mapped]; found {
 			if existing.Type != o.Type {
 				return plan, fmt.Errorf("source/destination dataset types differ")
@@ -356,14 +487,22 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		plan.Endpoints = append(plan.Endpoints, Expected{Source: snap.Name, Destination: mapped + "@" + component, GUID: snap.GUID, Metadata: &metadata})
 	}
 	plan.Warnings = slices.Clone(p.Warnings)
-	plan.Send = zfs.SendOptions{Source: request.Source, Snapshot: endpoint.Name, Recursive: p.Send.Replicate, LargeBlocks: p.Send.LargeBlocks, Compressed: p.Send.Compressed, EmbeddedData: p.Send.EmbeddedData, Raw: p.Send.Raw, Properties: p.Send.Props}
+	plan.Send = zfs.SendOptions{Source: stream.Dataset, Snapshot: endpoint.Name, Recursive: p.Send.Replicate, LargeBlocks: p.Send.LargeBlocks, Compressed: p.Send.Compressed, EmbeddedData: p.Send.EmbeddedData, Raw: p.Send.Raw, Properties: p.Send.Props}
 	receiveProperties := maps.Clone(p.SetProperties)
-	if root.Type == "filesystem" {
+	if receiveProperties == nil {
+		receiveProperties = map[string]string{}
+	}
+	if sent.Type == "filesystem" {
 		if _, configured := receiveProperties["canmount"]; !configured {
 			receiveProperties["canmount"] = "noauto"
 		}
 	}
-	plan.Receive = zfs.ReceiveOptions{Root: request.DestinationRoot, Discard: zfs.ReceiveDiscard(p.Discard), Set: receiveProperties, Exclude: slices.Clone(p.IgnoreProperties)}
+	// Every stream receives into exactly the destination planned above. Letting
+	// receive derive it from the stream's own name with -d or -e would be a
+	// second mapping rule that must agree with the root's, and for a member
+	// under discard=all it does not: the member would land beside the root's
+	// replica rather than beneath it.
+	plan.Receive = zfs.ReceiveOptions{Root: target, Discard: zfs.ReceiveExact, Set: receiveProperties, Exclude: slices.Clone(p.IgnoreProperties)}
 	already := view.DestinationExists
 	for _, expected := range plan.Endpoints {
 		o, found := dest[expected.Destination]
@@ -377,6 +516,9 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		plan.Mode = "up-to-date"
 	} else if !view.DestinationExists {
 		plan.Mode = "full"
+		// Missing receive parents are created from a base that must exist:
+		// the configured root, or its parent when the root's replica is the
+		// configured root itself.
 		parent := request.DestinationRoot
 		if p.Discard == policy.DiscardOff {
 			index := strings.LastIndexByte(parent, '/')
@@ -399,7 +541,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 			return plan, fmt.Errorf("existing destination has no common base; run boomerangz dataset reseed for this source and target")
 		}
 		for _, o := range view.Source.Objects {
-			if datasetOf(o.Name) != request.Source || o.GUID != latest.GUID || o.CreateTXG >= endpoint.CreateTXG || o.Type != "snapshot" {
+			if datasetOf(o.Name) != stream.Dataset || o.GUID != latest.GUID || o.CreateTXG >= endpoint.CreateTXG || o.Type != "snapshot" {
 				continue
 			}
 			if _, err := ownership(view.Source, o, lineage); err == nil {
@@ -414,11 +556,11 @@ func Build(request Request, view View, installation string) (Plan, error) {
 				return plan, err
 			}
 			for _, r := range refs {
-				if r.Target != plan.TargetBinding.CanonicalTarget || r.GUID != latest.GUID {
+				if r.Target != plan.TargetBinding.CanonicalTarget || r.Dataset != stream.Dataset || r.GUID() != latest.GUID {
 					continue
 				}
-				o, exists := source[r.BookmarkName(request.Source)]
-				if exists && o.Type == "bookmark" && o.GUID == r.GUID && o.CreateTXG > 0 && o.CreateTXG < endpoint.CreateTXG {
+				o, exists := source[r.BookmarkName()]
+				if exists && o.Type == "bookmark" && o.GUID == r.GUID() && o.CreateTXG > 0 && o.CreateTXG < endpoint.CreateTXG {
 					plan.Base = o.Name
 					baseTXG = o.CreateTXG
 					break
@@ -442,7 +584,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		if o.Type != "snapshot" || o.CreateTXG == 0 || o.CreateTXG > endpoint.CreateTXG {
 			continue
 		}
-		if !plan.Send.Recursive && datasetOf(o.Name) != request.Source {
+		if !plan.Send.Recursive && datasetOf(o.Name) != stream.Dataset {
 			continue
 		}
 		include := o.Name == endpoint.Name
@@ -458,7 +600,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		if !include {
 			continue
 		}
-		mapped := target + strings.TrimPrefix(o.Name, request.Source)
+		mapped := mappedRoot + strings.TrimPrefix(o.Name, request.Source)
 		expected := Expected{Source: o.Name, Destination: mapped, GUID: o.GUID}
 		if metadata, err := ownership(view.Source, o, lineage); err == nil {
 			expected.Metadata = &metadata

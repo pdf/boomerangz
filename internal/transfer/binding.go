@@ -65,7 +65,7 @@ func InspectTarget(ctx context.Context, reader localIdentityReader, request Requ
 		inspection.Status = "invalid-mapping"
 		return inspection, fmt.Errorf("unsupported or incomplete target transport")
 	}
-	mapped, err := zfs.MapReceiveDataset(request.Source, request.DestinationRoot, zfs.ReceiveDiscard(request.Policy.Discard))
+	mapped, _, err := request.mapped(request.Source)
 	if err != nil {
 		inspection.Status = "invalid-mapping"
 		return inspection, err

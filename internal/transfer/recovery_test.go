@@ -114,7 +114,7 @@ func TestRoadwarriorResumesBeforeCoalescedSnapshot(t *testing.T) {
 	newest := PendingSnapshot{Name: "tank/data@newest", CreateTXG: 20}
 	_, _ = pending.Offer(request.Source, request.CanonicalTarget, newest)
 	engine := &scriptedApply{
-		results: []Result{{Plan: Plan{Mode: "resume", Snapshot: "tank/data@held"}, Verified: true}, {Plan: Plan{Mode: "incremental-latest", Snapshot: newest.Name}, Verified: true}},
+		results: []Result{{Plan: Plan{Source: request.Source, Mode: "resume", Snapshot: "tank/data@held"}, Verified: true}, {Plan: Plan{Source: request.Source, Mode: "incremental-latest", Snapshot: newest.Name}, Verified: true}},
 		errors:  []error{nil, nil},
 	}
 	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)

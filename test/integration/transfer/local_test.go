@@ -553,10 +553,10 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 					continue
 				}
 				found = true
-				snapshot := reference.SnapshotName(source)
+				snapshot := reference.SnapshotName()
 				retained = slices.Contains(sourceState.Holds[snapshot], reference.HoldName())
 				checkpointed = slices.ContainsFunc(sourceState.Objects, func(object zfs.Object) bool {
-					return object.Name == reference.BookmarkName(source) && object.Type == "bookmark" && object.GUID == reference.GUID
+					return object.Name == reference.BookmarkName() && object.Type == "bookmark" && object.GUID == reference.GUID()
 				})
 			}
 			if !found || !checkpointed || retained != (mode == "all") {

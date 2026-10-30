@@ -109,7 +109,7 @@ func (r *Runtime) retireReference(ctx context.Context, source string, effective 
 		return fmt.Errorf("target has resumable receive state")
 	}
 	members := make(map[string]lifecycle.ReferenceSource)
-	for _, member := range reference.Members() {
+	for _, member := range reference.Sources {
 		name := mappedSnapshot(source, inspection.MappedDataset, member)
 		if err := verifyReplica(state, name, lineage, member.GUID, member.Metadata); err != nil {
 			return err
@@ -186,13 +186,17 @@ func (r *Runtime) retireTargets(ctx context.Context, dataset string, recursive b
 	return nil
 }
 
-func (r *Runtime) pruneDestination(ctx context.Context, dataset string, effective policy.Effective, canonical string) (resultErr error) {
+// pruneDestination prunes each replica a target holds for a root against the
+// grid of the member it replicates. A replication root's replicas all follow
+// the root's grid; datasets nothing was sent for, such as placeholders for
+// holes, are left alone.
+func (r *Runtime) pruneDestination(ctx context.Context, dataset string, effective policy.Effective, canonical string, members []transfer.Member) (resultErr error) {
 	endpoint, err := r.retirementEndpoint(ctx, dataset, effective, canonical)
 	if err != nil {
 		return err
 	}
 	defer func() { resultErr = errors.Join(resultErr, endpoint.close()) }()
-	source, err := r.backend.InspectState(ctx, dataset, effective.Send.Replicate)
+	source, err := r.backend.InspectState(ctx, dataset, false)
 	if err != nil {
 		return err
 	}
@@ -204,7 +208,12 @@ func (r *Runtime) pruneDestination(ctx context.Context, dataset string, effectiv
 	if err != nil || inspection.Status != "verified" {
 		return errors.Join(fmt.Errorf("target binding is not verified"), err)
 	}
-	state, err := endpoint.executor.InspectState(ctx, inspection.MappedDataset, effective.Send.Replicate)
+	grids := map[string]policy.Grid{dataset: effective.Grid}
+	for _, member := range members {
+		grids[member.Dataset] = member.Policy.Grid
+	}
+	recursive := effective.Send.Replicate || len(members) > 0
+	state, err := endpoint.executor.InspectState(ctx, inspection.MappedDataset, recursive)
 	if err != nil {
 		return err
 	}
@@ -212,7 +221,14 @@ func (r *Runtime) pruneDestination(ctx context.Context, dataset string, effectiv
 		if object.Type != "filesystem" && object.Type != "volume" {
 			continue
 		}
-		decisions, planErr := lifecycle.PlanPrune(object.Name, lineage, effective.Grid, lifecycle.Snapshots(state, object.Name))
+		grid, replicated := grids[dataset+strings.TrimPrefix(object.Name, inspection.MappedDataset)]
+		if effective.Send.Replicate {
+			grid, replicated = effective.Grid, true
+		}
+		if !replicated {
+			continue
+		}
+		decisions, planErr := lifecycle.PlanPrune(object.Name, lineage, grid, lifecycle.Snapshots(state, object.Name))
 		if planErr != nil {
 			return planErr
 		}
@@ -246,7 +262,7 @@ func (r *Runtime) pruneDestination(ctx context.Context, dataset string, effectiv
 	return nil
 }
 
-func (r *Runtime) enqueueDestinationPrune(dataset string, effective policy.Effective, canonical, lockScope string) {
+func (r *Runtime) enqueueDestinationPrune(dataset string, effective policy.Effective, canonical, lockScope string, members []transfer.Member) {
 	ticket, err := r.gate.Queue(context.Background(), dataset, lifecycle.Management)
 	if err != nil {
 		return
@@ -257,7 +273,7 @@ func (r *Runtime) enqueueDestinationPrune(dataset string, effective policy.Effec
 		if startErr := ticket.Start(); startErr != nil {
 			return blockedOrCancelled(startErr)
 		}
-		if pruneErr := r.pruneDestination(ticket.Context(), dataset, effective, canonical); pruneErr != nil {
+		if pruneErr := r.pruneDestination(ticket.Context(), dataset, effective, canonical, members); pruneErr != nil {
 			return Outcome{State: "failed", Reason: pruneErr.Error()}
 		}
 		return Outcome{State: "succeeded"}

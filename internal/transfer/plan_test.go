@@ -283,8 +283,8 @@ func TestBookmarkBaseRequiresRecordedTargetProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := lifecycle.Reference{Target: "local:backup/data", GUID: base.GUID, Metadata: metadata}
-	view.Source.Objects[1] = zfs.Object{Name: ref.BookmarkName(request.Source), Type: "bookmark", GUID: base.GUID, CreateTXG: base.CreateTXG}
+	ref := lifecycle.Reference{Target: "local:backup/data", Dataset: request.Source, Metadata: metadata, Sources: []lifecycle.ReferenceSource{{Dataset: request.Source, GUID: base.GUID, Metadata: metadata}}}
+	view.Source.Objects[1] = zfs.Object{Name: ref.BookmarkName(), Type: "bookmark", GUID: base.GUID, CreateTXG: base.CreateTXG}
 	request.Policy.Incremental = "latest"
 	if _, err := Build(request, view, fixtureInstallation); err == nil {
 		t.Fatal("claimed name-only bookmark")
@@ -293,9 +293,9 @@ func TestBookmarkBaseRequiresRecordedTargetProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	view.Source.Properties = append(view.Source.Properties, zfs.Property{Dataset: request.Source, Name: lifecycle.ReferencePrefix + lifecycle.TargetID(ref.Target) + ":" + metadata.Snapshot, Value: string(value), Source: zfs.SourceLocal})
+	view.Source.Properties = append(view.Source.Properties, zfs.Property{Dataset: request.Source, Name: ref.PropertyName(), Value: string(value), Source: zfs.SourceLocal})
 	plan, err := Build(request, view, fixtureInstallation)
-	if err != nil || plan.Base != ref.BookmarkName(request.Source) {
+	if err != nil || plan.Base != ref.BookmarkName() {
 		t.Fatalf("bookmark=%v err=%v", plan, err)
 	}
 	request.Policy.Incremental = "all"

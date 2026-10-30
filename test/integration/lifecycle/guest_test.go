@@ -148,10 +148,10 @@ func TestGuestLifecycle(t *testing.T) {
 		//
 		// This phase tests the lifecycle hook; actual destination verification is
 		// the responsibility of the transfer implementation in phase 4.
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID); err != nil {
+		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()); err != nil {
 			t.Fatal(err)
 		}
-		bookmark := ref.BookmarkName(root)
+		bookmark := ref.BookmarkName()
 		bookmarks := func(t *testing.T) []string {
 			t.Helper()
 			state, stateErr := direct.InspectState(t.Context(), root, true)
@@ -170,7 +170,7 @@ func TestGuestLifecycle(t *testing.T) {
 		if !slices.Contains(checkpointed, bookmark) {
 			t.Fatalf("checkpoint created no versioned bookmark: %v", checkpointed)
 		}
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID+1); err == nil {
+		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()+1); err == nil {
 			t.Fatal("accepted wrong destination GUID")
 		}
 		if after := bookmarks(t); !slices.Equal(after, checkpointed) {
@@ -227,7 +227,7 @@ func TestGuestLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID); err != nil {
+		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()); err != nil {
 			t.Fatal(err)
 		}
 		// No transfer has run against this synthetic target; the test knows it has

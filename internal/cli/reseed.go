@@ -13,6 +13,7 @@ import (
 	"github.com/pdf/boomerangz/internal/discovery"
 	"github.com/pdf/boomerangz/internal/identity"
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
@@ -60,12 +61,10 @@ func runReseed(ctx context.Context, out io.Writer, cfg config.Config, reader dis
 	if err := lifecycle.ActiveRoot(entry.Policy, dataset); err != nil {
 		return err
 	}
-	local := slices.Contains(entry.Policy.Local, target)
-	remote := slices.Contains(entry.Policy.Remote, target)
-	if local == remote {
-		return fmt.Errorf("target %q must identify exactly one effective local destination or remote", target)
+	request, local, err := reseedRequest(generation, entry, target)
+	if err != nil {
+		return err
 	}
-	request := transfer.Request{Source: dataset, Policy: entry.Policy}
 	destination := zfs.ReseedExecutor(nil)
 	closeTarget := func() error { return nil }
 	if local {
@@ -109,4 +108,32 @@ func runReseed(ctx context.Context, out io.Writer, cfg config.Config, reader dis
 	encoder := json.NewEncoder(out)
 	encoder.SetIndent("", "  ")
 	return errors.Join(err, encoder.Encode(plan))
+}
+
+// reseedRequest resolves target for an actor root. A target belongs to the root
+// when the root or any of its members sends there, since the binding and every
+// stream's proof for it live on the root; the request carries the members that
+// send there so preflight covers their receives too.
+func reseedRequest(generation *discovery.Generation, entry discovery.Entry, target string) (transfer.Request, bool, error) {
+	dataset := entry.Dataset.Name
+	request := transfer.Request{Source: dataset, Policy: entry.Policy}
+	senders := []policy.Effective{entry.Policy}
+	if !entry.Policy.Send.Replicate {
+		for _, name := range entry.Members {
+			member, found := generation.Inspect(name)
+			if !found || !member.Member || name == dataset {
+				continue
+			}
+			senders = append(senders, member.Policy)
+			if slices.Contains(member.Policy.Local, target) || slices.Contains(member.Policy.Remote, target) {
+				request.Members = append(request.Members, transfer.Member{Dataset: name, Policy: member.Policy})
+			}
+		}
+	}
+	local := slices.ContainsFunc(senders, func(p policy.Effective) bool { return slices.Contains(p.Local, target) })
+	remote := slices.ContainsFunc(senders, func(p policy.Effective) bool { return slices.Contains(p.Remote, target) })
+	if local == remote {
+		return request, false, fmt.Errorf("target %q must identify exactly one effective local destination or remote", target)
+	}
+	return request, local, nil
 }

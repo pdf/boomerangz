@@ -184,7 +184,9 @@ func (s remoteTestStream) Run(_ context.Context, send zfs.SendOptions, receive z
 	}
 	component := strings.TrimPrefix(endpoint.Name, "tank/data@")
 	s.destination.destExists = true
-	s.destination.inventory = append(s.destination.inventory, zfs.Dataset{Name: "backup/data", Type: zfs.Filesystem, EncryptionRoot: "-"})
+	if !slices.ContainsFunc(s.destination.inventory, func(dataset zfs.Dataset) bool { return dataset.Name == "backup/data" }) {
+		s.destination.inventory = append(s.destination.inventory, zfs.Dataset{Name: "backup/data", Type: zfs.Filesystem, EncryptionRoot: "-"})
+	}
 	s.destination.destination = zfs.State{Objects: []zfs.Object{
 		{Name: receive.Root, Type: "filesystem", GUID: 20, CreateTXG: 20},
 		{Name: receive.Root + "@" + component, Type: "snapshot", GUID: endpoint.GUID, CreateTXG: 21},
@@ -212,7 +214,9 @@ func (s localTestStream) Run(_ context.Context, send zfs.SendOptions, receive zf
 	}
 	component := strings.TrimPrefix(endpoint.Name, "tank/data@")
 	s.backend.destExists = true
-	s.backend.inventory = append(s.backend.inventory, zfs.Dataset{Name: "backup/data", Type: zfs.Filesystem, EncryptionRoot: "-"})
+	if !slices.ContainsFunc(s.backend.inventory, func(dataset zfs.Dataset) bool { return dataset.Name == "backup/data" }) {
+		s.backend.inventory = append(s.backend.inventory, zfs.Dataset{Name: "backup/data", Type: zfs.Filesystem, EncryptionRoot: "-"})
+	}
 	s.backend.destination = zfs.State{Objects: []zfs.Object{
 		{Name: receive.Root, Type: "filesystem", GUID: 20, CreateTXG: 20},
 		{Name: receive.Root + "@" + component, Type: "snapshot", GUID: endpoint.GUID, CreateTXG: 21},
@@ -248,8 +252,10 @@ func TestApplyResumesHeldReceiveAfterRestart(t *testing.T) {
 	if err != nil || preview.Mode != "resume" || preview.Send.ResumeToken != "1-resume-token" {
 		t.Fatalf("preview=%+v err=%v", preview, err)
 	}
+	// The resumed receive was already the newest endpoint, so the replanning
+	// pass that follows a resume finds the target up to date.
 	result, err := restarted.Apply(t.Context(), request, nil)
-	if err != nil || !result.Verified || result.Plan.Mode != "resume" {
+	if err != nil || !result.Verified || !result.Resumed || result.ResumedSnapshot != preview.Snapshot || result.Plan.Mode != "up-to-date" {
 		t.Fatalf("result=%+v err=%v writes=%v", result, err, backend.writes)
 	}
 	if len(backend.source.Holds[result.Plan.Snapshot]) != 0 {
@@ -278,7 +284,7 @@ func TestApplyResumeSelectsEndpointProofAheadOfHeldIncrementalBase(t *testing.T)
 		t.Fatal(err)
 	}
 	result, err := restarted.Apply(t.Context(), request, nil)
-	if err != nil || !result.Verified || result.Plan.Mode != "resume" || result.Plan.Snapshot != view.Source.Objects[2].Name {
+	if err != nil || !result.Verified || !result.Resumed || result.ResumedSnapshot != view.Source.Objects[2].Name || result.Plan.Mode != "up-to-date" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
@@ -543,7 +549,7 @@ func TestApplyRotatesProtectedIncrementalAllBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	references, err := lifecycle.References(state, request.Source, fixtureLineage)
-	if err != nil || len(references) != 1 || references[0].SnapshotName(request.Source) != next {
+	if err != nil || len(references) != 1 || references[0].SnapshotName() != next {
 		t.Fatalf("references=%+v err=%v", references, err)
 	}
 }
@@ -575,7 +581,7 @@ func TestApplyRetainsNewerPendingRecoveryReference(t *testing.T) {
 	}
 	references, err := lifecycle.References(state, request.Source, fixtureLineage)
 	if err != nil || !slices.ContainsFunc(references, func(reference lifecycle.Reference) bool {
-		return reference.Target == newer.Target && reference.SnapshotName(request.Source) == newer.SnapshotName(request.Source)
+		return reference.Target == newer.Target && reference.SnapshotName() == newer.SnapshotName()
 	}) {
 		t.Fatalf("newer pending reference was released: refs=%+v err=%v", references, err)
 	}

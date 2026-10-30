@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
@@ -74,7 +75,7 @@ func (s *ReseedService) plan(ctx context.Context, request Request) (ReseedPlan, 
 			return plan, err
 		}
 	}
-	mapped, err := zfs.MapReceiveDataset(request.Source, request.DestinationRoot, zfs.ReceiveDiscard(request.Policy.Discard))
+	mapped, _, err := request.mapped(request.Source)
 	if err != nil {
 		return plan, err
 	}
@@ -230,16 +231,24 @@ func (s *ReseedService) Apply(ctx context.Context, request Request) (ReseedPlan,
 	return plan, nil
 }
 
+// reseedReceivePermissions covers the fresh receives that follow a reseed: the
+// root's own and each member stream's, whose receive overrides are their own.
 func reseedReceivePermissions(request Request) []string {
 	permissions := []string{"canmount", "create", "destroy", "mount", "receive:append", "userprop"}
-	for property := range request.Policy.SetProperties {
-		if !strings.Contains(property, ":") {
-			permissions = append(permissions, property)
-		}
+	policies := []policy.Effective{request.Policy}
+	for _, member := range request.Members {
+		policies = append(policies, member.Policy)
 	}
-	for _, property := range request.Policy.IgnoreProperties {
-		if !strings.Contains(property, ":") {
-			permissions = append(permissions, property)
+	for _, p := range policies {
+		for property := range p.SetProperties {
+			if !strings.Contains(property, ":") {
+				permissions = append(permissions, property)
+			}
+		}
+		for _, property := range p.IgnoreProperties {
+			if !strings.Contains(property, ":") {
+				permissions = append(permissions, property)
+			}
 		}
 	}
 	slices.Sort(permissions)

@@ -18,19 +18,25 @@ import (
 // old records until their corresponding hold and bookmark have been removed.
 const ReferencePrefix = policy.StateNamespace + "reference:"
 
-// Reference binds a target-specific hold/bookmark to proven snapshot metadata
-// and GUID. Target is a canonical non-secret destination identity supplied by
-// the transport planner, not a credential or arbitrary command.
+// Reference proves one stream's endpoint on one target. Dataset is the stream's
+// source: a member of the actor root, or the root itself, whose -R stream then
+// carries its whole subtree. Sources are exactly the snapshots that endpoint
+// consists of, sorted by dataset with the stream's own first, each held under
+// the target's tag and checkpointed by bookmark once the destination verifies.
+//
+// The record lives on the actor root, keyed by target, stream and snapshot
+// instant. Members keep their own cadences, so two members' newest snapshots
+// are usually different instants; keying by stream lets each member's proof
+// advance on its own. Target is a canonical non-secret destination identity
+// supplied by the transport planner, not a credential or arbitrary command.
 type Reference struct {
 	Target   string            `json:"target"`
-	Dataset  string            `json:"dataset,omitempty"`
-	GUID     uint64            `json:"guid"`
+	Dataset  string            `json:"dataset"`
 	Metadata Metadata          `json:"metadata"`
-	Sources  []ReferenceSource `json:"sources,omitempty"`
+	Sources  []ReferenceSource `json:"sources"`
 }
 
-// ReferenceSource is one member of a recursive snapshot set protected by the
-// single root reference property for its shared snapshot UUID.
+// ReferenceSource is one snapshot of a stream's endpoint.
 type ReferenceSource struct {
 	Dataset  string   `json:"dataset"`
 	GUID     uint64   `json:"guid"`
@@ -42,8 +48,15 @@ func TargetID(target string) string {
 	sum := sha256.Sum256([]byte(target))
 	return hex.EncodeToString(sum[:])
 }
+
+// streamID names a stream in a property name without putting arbitrary
+// dataset text there, and keeps the name well inside ZFS's limit.
+func streamID(dataset string) string {
+	sum := sha256.Sum256([]byte(dataset))
+	return hex.EncodeToString(sum[:16])
+}
 func (r Reference) property() string {
-	return ReferencePrefix + TargetID(r.Target) + ":" + r.Metadata.Snapshot
+	return ReferencePrefix + TargetID(r.Target) + ":" + streamID(r.Dataset) + ":" + r.Metadata.Snapshot
 }
 func (r Reference) hold() string { return SnapshotPrefix + TargetID(r.Target) }
 func (r Reference) bookmark() string {
@@ -51,11 +64,16 @@ func (r Reference) bookmark() string {
 }
 func (r Reference) snapshot() string { return r.Dataset + "@" + r.Metadata.Name() }
 
-func (r Reference) sources() []ReferenceSource {
-	if len(r.Sources) == 0 {
-		return []ReferenceSource{{Dataset: r.Dataset, GUID: r.GUID, Metadata: r.Metadata}}
+func (r Reference) sources() []ReferenceSource { return r.Sources }
+
+// GUID is the GUID of the stream's own snapshot.
+func (r Reference) GUID() uint64 {
+	for _, source := range r.Sources {
+		if source.Dataset == r.Dataset {
+			return source.GUID
+		}
 	}
-	return r.Sources
+	return 0
 }
 
 func (r Reference) sourceSnapshot(source ReferenceSource) string {
@@ -87,24 +105,37 @@ func referenceRecords(state zfs.State, dataset, lineage string) ([]Reference, er
 			continue
 		}
 		var r Reference
-		if json.Unmarshal([]byte(p.Value), &r) != nil || r.Target == "" || r.GUID == 0 || r.Metadata.Lineage != lineage || !ValidID(r.Metadata.Snapshot) || r.Metadata.Created.IsZero() || r.property() != p.Name || seen[p.Name] {
+		if json.Unmarshal([]byte(p.Value), &r) != nil || r.Target == "" || r.Metadata.Lineage != lineage || !ValidID(r.Metadata.Snapshot) || r.Metadata.Created.IsZero() || zfs.ValidateDataset(r.Dataset) != nil || r.property() != p.Name || seen[p.Name] {
 			return nil, fmt.Errorf("invalid reference proof %s", p.Name)
 		}
-		if r.Dataset == "" { // Accept pre-authority records on their exact root.
-			r.Dataset = dataset
-		}
-		if err := zfs.ValidateDataset(r.Dataset); err != nil || (r.Dataset != dataset && !strings.HasPrefix(r.Dataset, dataset+"/")) {
-			return nil, fmt.Errorf("invalid reference dataset in %s", p.Name)
-		}
-		for _, source := range r.sources() {
-			if err := zfs.ValidateDataset(source.Dataset); err != nil || (source.Dataset != dataset && !strings.HasPrefix(source.Dataset, dataset+"/")) || source.GUID == 0 || source.Metadata.Lineage != lineage || source.Metadata.Snapshot != r.Metadata.Snapshot || source.Metadata.Created != r.Metadata.Created {
-				return nil, fmt.Errorf("invalid recursive reference proof %s", p.Name)
-			}
+		if err := validSources(r, dataset); err != nil {
+			return nil, fmt.Errorf("invalid reference proof %s: %w", p.Name, err)
 		}
 		seen[p.Name] = true
 		refs = append(refs, r)
 	}
 	return refs, nil
+}
+
+// validSources requires a stream inside root whose sources are its own
+// snapshot followed by snapshots of its descendants, all of one instant and in
+// canonical order.
+func validSources(r Reference, root string) error {
+	if r.Dataset != root && !strings.HasPrefix(r.Dataset, root+"/") {
+		return fmt.Errorf("stream is outside root")
+	}
+	if len(r.Sources) == 0 || r.Sources[0].Dataset != r.Dataset {
+		return fmt.Errorf("stream snapshot must lead its sources")
+	}
+	for i, source := range r.Sources {
+		if zfs.ValidateDataset(source.Dataset) != nil || (i > 0 && !strings.HasPrefix(source.Dataset, r.Dataset+"/")) || source.GUID == 0 || source.Metadata != r.Metadata {
+			return fmt.Errorf("source %s does not belong to the stream's endpoint", source.Dataset)
+		}
+		if i > 0 && strings.Compare(r.Sources[i-1].Dataset, source.Dataset) >= 0 {
+			return fmt.Errorf("sources are not in canonical order")
+		}
+	}
+	return nil
 }
 
 func findOwned(state zfs.State, dataset, name, lineage string) (Snapshot, Metadata, error) {
@@ -122,16 +153,18 @@ func containsReference(refs []Reference, wanted Reference) bool {
 	return slices.ContainsFunc(refs, func(candidate Reference) bool { return reflect.DeepEqual(candidate, wanted) })
 }
 
-// Protect records a recovery proof before placing the target hold. If interrupted
-// between writes, the record remains reconstructable and a retry is idempotent.
+// Protect records a recovery proof for one snapshot's own stream before
+// placing the target hold. If interrupted between writes, the record remains
+// reconstructable and a retry is idempotent.
 func (s *Service) Protect(ctx context.Context, dataset, snapshot, target string) (Reference, error) {
-	return s.ProtectSet(ctx, dataset, []string{snapshot}, target)
+	stream, _, _ := strings.Cut(snapshot, "@")
+	return s.ProtectSet(ctx, dataset, stream, []string{snapshot}, target)
 }
 
-// ProtectSet records one root property and protects every member of a recursive
-// snapshot set. Recursive snapshots share one snapshot UUID, so separate
-// properties would collide and cannot serve as independent proofs.
-func (s *Service) ProtectSet(ctx context.Context, dataset string, snapshots []string, target string) (Reference, error) {
+// ProtectSet records the proof for one stream's endpoint on the actor root
+// dataset and holds every snapshot it consists of: the stream's own, and under
+// -R every descendant's at the same instant.
+func (s *Service) ProtectSet(ctx context.Context, dataset, stream string, snapshots []string, target string) (Reference, error) {
 	unlock, err := s.lock(ctx, dataset)
 	if err != nil {
 		return Reference{}, err
@@ -161,6 +194,9 @@ func (s *Service) ProtectSet(ctx context.Context, dataset string, snapshots []st
 	if err != nil {
 		return Reference{}, err
 	}
+	if err := zfs.ValidateDataset(stream); err != nil {
+		return Reference{}, err
+	}
 	var sources []ReferenceSource
 	seenSnapshots := make(map[string]bool)
 	for _, snapshot := range snapshots {
@@ -168,9 +204,9 @@ func (s *Service) ProtectSet(ctx context.Context, dataset string, snapshots []st
 			return Reference{}, fmt.Errorf("duplicate source snapshot")
 		}
 		seenSnapshots[snapshot] = true
-		snapshotDataset := strings.Split(snapshot, "@")[0]
-		if snapshotDataset != dataset && !strings.HasPrefix(snapshotDataset, dataset+"/") {
-			return Reference{}, fmt.Errorf("source snapshot is outside authoritative root")
+		snapshotDataset, _, _ := strings.Cut(snapshot, "@")
+		if snapshotDataset != stream && !strings.HasPrefix(snapshotDataset, stream+"/") {
+			return Reference{}, fmt.Errorf("source snapshot %s is outside stream %s", snapshot, stream)
 		}
 		owned, metadata, findErr := findOwned(state, snapshotDataset, snapshot, lineage)
 		if findErr != nil {
@@ -179,22 +215,9 @@ func (s *Service) ProtectSet(ctx context.Context, dataset string, snapshots []st
 		sources = append(sources, ReferenceSource{Dataset: snapshotDataset, GUID: owned.GUID, Metadata: metadata})
 	}
 	slices.SortFunc(sources, func(a, b ReferenceSource) int { return strings.Compare(a.Dataset, b.Dataset) })
-	rootIndex := slices.IndexFunc(sources, func(source ReferenceSource) bool { return source.Dataset == dataset })
-	if rootIndex < 0 {
-		return Reference{}, fmt.Errorf("recursive protection lacks root snapshot")
-	}
-	root := sources[rootIndex]
-	if rootIndex != 0 {
-		sources[0], sources[rootIndex] = sources[rootIndex], sources[0]
-	}
-	for _, source := range sources[1:] {
-		if source.Metadata.Snapshot != root.Metadata.Snapshot || source.Metadata.Created != root.Metadata.Created || source.Metadata.Lineage != root.Metadata.Lineage {
-			return Reference{}, fmt.Errorf("recursive snapshot metadata is inconsistent")
-		}
-	}
-	r := Reference{Target: target, Dataset: root.Dataset, GUID: root.GUID, Metadata: root.Metadata}
-	if len(sources) > 1 {
-		r.Sources = sources
+	r := Reference{Target: target, Dataset: stream, Metadata: sources[0].Metadata, Sources: sources}
+	if err := validSources(r, dataset); err != nil {
+		return Reference{}, err
 	}
 	refs, err := referenceRecords(state, dataset, lineage)
 	if err != nil {

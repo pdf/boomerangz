@@ -30,27 +30,14 @@ func References(state zfs.State, dataset, lineage string) ([]Reference, error) {
 	return referenceRecords(state, dataset, lineage)
 }
 
-// BookmarkName is the versioned cursor associated with a reference.
-func (r Reference) BookmarkName(dataset string) string {
-	if r.Dataset == "" {
-		return dataset + "#" + r.hold() + "-" + r.Metadata.Snapshot
-	}
-	return r.bookmark()
-}
+// BookmarkName is the versioned cursor of the stream's own snapshot.
+func (r Reference) BookmarkName() string { return r.bookmark() }
 
-// SnapshotName is the source snapshot associated with a reference.
-func (r Reference) SnapshotName(dataset string) string {
-	if r.Dataset == "" {
-		return dataset + "@" + r.Metadata.Name()
-	}
-	return r.snapshot()
-}
+// SnapshotName is the stream's own source snapshot.
+func (r Reference) SnapshotName() string { return r.snapshot() }
 
-// Members returns the protected source snapshot set, including the legacy
-// single-root representation as one member.
-func (r Reference) Members() []ReferenceSource {
-	return slices.Clone(r.sources())
-}
+// PropertyName is the root property that records this proof.
+func (r Reference) PropertyName() string { return r.property() }
 
 // HoldName returns the deterministic target hold associated with this proof.
 func (r Reference) HoldName() string { return r.hold() }
