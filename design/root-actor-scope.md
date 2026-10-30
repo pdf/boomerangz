@@ -347,6 +347,23 @@ removed. Each step leaves a state the next attempt recognises; nothing is
 destroyed until the placeholder is empty. A placeholder with a resumable
 receive beneath it defers only its own stream, so that receive can finish.
 
+Replacing the placeholder in place is not available. Checked against OpenZFS
+`zfs-2.4.4` and master:
+
+- A full stream onto an existing dataset needs `-F`
+  (`recv_begin_check_existing_impl` in `module/zfs/dmu_recv.c`, `EEXIST`).
+- Even with `-F`, the kernel refuses when the existing dataset is encrypted or
+  the stream is raw (same function, `EINVAL`), and a placeholder inherits its
+  parent's encryption.
+- libzfs refuses a forced full receive onto a destination that has snapshots
+  (`zfs_receive_one` in `lib/libzfs/libzfs_sendrecv.c`).
+- boomerangz never receives with `-F` in any case (`ReceiveOptions` in
+  `internal/zfs/stream.go`).
+
+Destroying the placeholder would take the member replicas beneath it, and
+renames keep each child's snapshots, so the replacement is built from renames
+and an ordinary receive.
+
 A placeholder is never a binding anchor: the root's destination identity is
 the nearest real dataset, so a member-only target binds to the real ancestor
 and the root joining it later is an ordinary bootstrap. A reseed during a
