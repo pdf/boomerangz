@@ -1,8 +1,11 @@
 # Glossary
 
 **Active root**
-: A dataset on which an effective `enabled=on` policy establishes an
-  independently scheduled management root.
+: An actor root that is currently managed.
+
+**Actor root**
+: An enabled dataset with no enabled ancestor. It owns its whole subtree: its
+  lineage, target bindings, recovery state and jobs cover every member.
 
 **Adoption**
 : An explicit, preview-first transfer of an existing managed dataset lineage
@@ -15,6 +18,11 @@
 **Destination root**
 : The ZFS dataset beneath which received data is stored.
 
+**Excluded dataset**
+: A dataset inside an actor root's subtree that is not one of its members,
+  because `enabled=off` applies to it. An excluded dataset with members beneath
+  it is a hole, replicated only as an empty placeholder.
+
 **Inactive grace period**
 : The delay between deactivation and automatic retirement of recoverable
   Boomerangz state. The default is 24 hours.
@@ -25,6 +33,11 @@
 
 **Local destination**
 : A destination dataset reached on the same host.
+
+**Member**
+: An enabled dataset inside an actor root's subtree. It is snapshotted, pruned
+  and sent by its root, with its own grid and send options, and carries no
+  Boomerangz state of its own.
 
 **Native destination**
 : Another Boomerangz installation reached through a secured paired listener.
@@ -42,7 +55,7 @@
   separate storage or another host.
 
 **Scheduling root**
-: The active dataset whose policy governs a snapshot or replication job.
+: The actor root whose job snapshots or replicates its members.
 
 **Snapshot**
 : A read-only ZFS point-in-time view. A snapshot on the source pool is not an

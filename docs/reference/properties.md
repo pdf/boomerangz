@@ -4,9 +4,15 @@ All public names begin with `org.boomerangz:`. Values configured locally on a
 dataset can be inherited by its descendants. Received copies do not activate a
 destination or control its policy.
 
+An enabled dataset with no enabled ancestor is an actor root that owns its
+subtree; enabled datasets beneath it are its members (see
+[Roots and members](/guide/datasets#roots-and-members)). Every property applies
+per member except `discard` and `replicate`, which belong to the root. Under
+`replicate=on` the root's properties govern its whole subtree.
+
 | Suffix | Default | Valid values | Effect |
 | --- | --- | --- | --- |
-| `enabled` | `off` | `on`, `off` | Enable or mask management. |
+| `enabled` | `off` | `on`, `off` | Make a dataset an actor root, or include it in or exclude it from its root. |
 | `remote` | Unset | Comma-separated configured remote names | Select network destinations. |
 | `local` | Unset | Comma-separated ZFS dataset names | Select destinations on this host. |
 | `policy` | `12x5m,24x1h,14x1d` | Positive grid tiers using `m`, `h`, `d`, `w`, `mo`, or `y` | Set snapshot cadence and retention. |
@@ -15,8 +21,8 @@ destination or control its policy.
 | `raw` | Encryption-dependent | `on`, `off` | Send encrypted data without decrypting it for transfer. |
 | `props` | `off` | `on`, `off` | Carry dataset properties while excluding Boomerangz policy from the receive. |
 | `incremental` | `all` | `all`, `latest` | Include intermediate snapshots or send directly from the common base. |
-| `replicate` | `off` | `on`, `off` | Replicate the complete descendant package. |
-| `discard` | `off` | `off`, `first`, `all` | Disable path rewriting, append the source path without its pool component, or append only the final component. |
+| `replicate` | `off` | `on`, `off` | Send the root's whole subtree as one `zfs send -R` package instead of one stream per member. Root only. |
+| `discard` | `off` | `off`, `first`, `all` | Disable path rewriting, append the source path without its pool component, or append only the final component. Root only. |
 | `set_prop:NAME` | Unset | Native ZFS property value | Set a property on receive. |
 | `ignore_prop:NAME` | Unset | `on`, `off` | Exclude an incoming property; `off` masks an inherited exclusion. |
 
@@ -33,10 +39,13 @@ Given source `tank/projects/code` and destination root `backup/archive`:
 | `first` | `backup/archive/projects/code` |
 | `all` | `backup/archive/code` |
 
-`off` means that Boomerangz passes no `-d` or `-e` path-mapping option to
-`zfs receive`; the configured destination is therefore the exact receive root.
-It does not append the complete source name. Descendants of a recursive stream
-are preserved relative to that root.
+The mapping applies to the actor root. Its members, and the descendants of a
+recursive stream, are placed at their path relative to the root beneath the
+root's mapped destination: with `discard=all`, member `tank/projects/code/web`
+is received at `backup/archive/code/web`, never at `backup/archive/web`.
+Boomerangz computes each destination itself and receives into it exactly,
+rather than passing `-d` or `-e` to `zfs receive`. Under `off` the configured
+destination is the root's replica itself.
 
 Choose the destination layout and delegation point together:
 

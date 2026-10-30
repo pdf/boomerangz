@@ -29,16 +29,28 @@ missing. Each job state change names its run and what that run acted on, such
 as the snapshot a transfer sent or the snapshots a prune destroyed.
 .TP
 .B trigger
-Queue an immediate snapshot for selected active roots, or all active roots when
-no dataset is named.
+Queue an immediate snapshot of every member of the selected actor roots, or of
+all active roots when no dataset is named. Naming a member is refused, and the
+error names its root.
 .TP
 .B dataset list
-List discovered datasets and their management status. Use
+List discovered datasets and their management status:
+.B active
+for an actor root,
+.B member
+or
+.B excluded
+within a root,
+.BR inactive ,
+or
+.BR invalid .
+Use
 .B --json
 for structured output.
 .TP
 .B dataset inspect DATASET
-Inspect one dataset's resolved policy and property provenance. Use
+Inspect one dataset's resolved policy, property provenance, and the actor root
+it belongs to or, for a root, its members. Use
 .B --json
 for structured output.
 .TP
@@ -48,10 +60,11 @@ Preview adoption of an existing lineage. Add
 to apply after revalidation.
 .TP
 .B dataset reseed DATASET TARGET
-Preview the destructive reset of one configured local destination root or
-named remote. Applying the plan abandons partial receive state, destroys the
-mapped replica subtree, and releases the corresponding source-side replication
-history. Add
+Preview the destructive reset of one actor root's replica on a local
+destination root or named remote that the root or any of its members sends to.
+Applying the plan abandons partial receive state, destroys the mapped replica
+subtree, and releases the source-side replication history of every member on
+that target. A member is refused, and the error names its root. Add
 .B --apply
 to apply after revalidation.
 .TP

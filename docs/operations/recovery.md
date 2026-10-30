@@ -49,8 +49,8 @@ sudo systemctl start boomerangz.service
 Applying a reseed permanently destroys the mapped replica subtree. When
 `discard=off`, that subtree is the configured destination root itself. Do not
 apply the plan if that root contains data which is not disposable replica data.
-This is required because Boomerangz performs non-forcing full receives: without
-`-d` or `-e`, OpenZFS creates the configured dataset from the full stream and
+This is required because Boomerangz performs non-forcing full receives into the
+exact mapped destination: OpenZFS creates that dataset from the full stream and
 will not treat an existing dataset as a fresh seed. Receive property overrides
 and exclusions do not change that rule.
 The effective destination account must have the normal receive permissions on
@@ -66,11 +66,11 @@ but local changes can make a non-forcing receive fail. Unmount the mapped
 dataset and its descendants before applying a reseed because they will be
 destroyed.
 
-The command operates on one managed source dataset. If the status output lists
-blocked descendant source datasets separately, reseed each listed source for
-the same target. Destroying an ancestor replica may leave no destination objects
-for the later commands, but those commands are still required to release each
-source dataset's independent recovery state and binding.
+The command operates on one actor root, and resets every member of that root
+on the target at once: the root's replica subtree holds every member's
+replica, and the root holds every member's recovery state and the target's
+binding. Run it against the root; it refuses a member and names the root to
+use. The target may be one only a member sends to.
 
 Reseed is retryable after partial failure. It refuses to proceed if the bound
 pool identity, configured mapping, source authority, or effective target has
@@ -78,15 +78,21 @@ changed during preflight.
 
 ## Deactivation and automatic retirement
 
-Disable management by setting `enabled=off`:
+Disable management of an actor root and its whole subtree by setting
+`enabled=off` on the root:
 
 ```sh
 sudo zfs set org.boomerangz:enabled=off tank/data
 ```
 
 The default 24-hour inactive grace period allows accidental deactivation to be
-reversed. If you re-enable the dataset during the grace period, management
-continues using its existing history.
+reversed. If you re-enable the root during the grace period, management
+continues using its existing history. Retirement covers every dataset beneath
+the root.
+
+Setting `enabled=off` on a member instead excludes it from its root without
+deactivating anything: it stops being snapshotted and sent, and what it already
+holds is pruned under its own grid until the root retires.
 
 After the grace period, the daemon retires only state it can prove belongs to
 this installation. An unavailable destination or unresolved transfer keeps the

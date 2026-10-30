@@ -27,7 +27,7 @@ Commands that read configuration accept:
 | --- | --- |
 | `boomerangz daemon` | Run management in the foreground. |
 | `boomerangz status` | `--credential NAME_OR_PATH`, `--watch`/`-w`, and `--json`. |
-| `boomerangz trigger [DATASET...]` | Empty selects every active root; `--credential NAME_OR_PATH` addresses a paired listener. |
+| `boomerangz trigger [DATASET...]` | Snapshot each named actor root's members now. Empty selects every active root; a member is refused with the root to use instead. `--credential NAME_OR_PATH` addresses a paired listener. |
 
 Interactive status uses a readable terminal view; an interactive watch adds the
 most recent job state changes beneath it. Redirected one-shot output is one JSON
@@ -47,10 +47,10 @@ continuing with changes missing. See
 
 | Command | Options and arguments |
 | --- | --- |
-| `boomerangz dataset list` | Print a readable inventory with each dataset's management status. Add `--json` for structured output. |
-| `boomerangz dataset inspect DATASET` | Print readable effective policy, provenance, activation, coverage, warnings, and errors for one exact dataset. Add `--json` for structured output. |
-| `boomerangz dataset adopt DATASET` | Preview adoption; `--apply` performs the revalidated plan. |
-| `boomerangz dataset reseed DATASET TARGET` | Preview destruction and fresh seeding of one configured local destination root or named remote; `--apply` performs the revalidated plan. |
+| `boomerangz dataset list` | Print a readable inventory with each dataset's management status: `active` for an actor root, `member` or `excluded` within a root, `inactive`, or `invalid`. Add `--json` for structured output, which carries `covered_by` and `member` on datasets within a root and `members` on a root. |
+| `boomerangz dataset inspect DATASET` | Print readable effective policy, provenance, activation, the actor root it belongs to or a root's members, warnings, and errors for one exact dataset. Add `--json` for structured output. |
+| `boomerangz dataset adopt DATASET` | Preview adoption of an actor root; `--apply` performs the revalidated plan. A member is refused with its root named. |
+| `boomerangz dataset reseed DATASET TARGET` | Preview destruction and fresh seeding of one actor root's replica on a local destination root or named remote that the root or any member sends to, resetting every member on it; `--apply` performs the revalidated plan. A member is refused with its root named. |
 | `boomerangz dataset clean [DATASET...]` | Preview decommissioning. Use `--recursive`, `--all`, `--destroy-owned-snapshots`, and `--apply` as needed. |
 | `boomerangz identity recover` | Preview recovery. `--owner UUID` resolves multiple candidates; `--apply` performs the revalidated plan. |
 
