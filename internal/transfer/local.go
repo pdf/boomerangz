@@ -127,6 +127,21 @@ func (e *PreparationChangedError) Error() string { return e.Reason }
 // Temporary permits local and remote coordinators to retry ordinary churn.
 func (*PreparationChangedError) Temporary() bool { return true }
 
+// PlaceholderBusyError reports a placeholder that cannot be replaced yet,
+// because a receive beneath it is still resumable. It defers only its own
+// stream: the streams beneath it run, finish their receives, and the next
+// attempt replaces it.
+type PlaceholderBusyError struct {
+	Dataset string
+}
+
+func (e *PlaceholderBusyError) Error() string {
+	return "placeholder " + e.Dataset + " has a resumable receive beneath it; it is replaced once that completes"
+}
+
+// Temporary lets the job retry once the receives beneath have finished.
+func (*PlaceholderBusyError) Temporary() bool { return true }
+
 // StreamError is one member stream's failure.
 type StreamError struct {
 	Dataset string
@@ -374,11 +389,21 @@ func (l *Local) load(ctx context.Context, request Request, stream string) (View,
 		}
 		view.Destination = ownTokens(view.Destination, target, request.Policy.Send.Replicate)
 	}
-	if stream == request.Source {
-		view.RootDestinationExists, view.RootDestinationIdentity = view.DestinationExists, view.DestinationIdentity
-		return view, nil
+	// The binding proves the root's replica, and a placeholder is never one:
+	// the root's identity is that of the nearest real dataset, so a
+	// placeholder standing in for the root's replica reads as absent.
+	anchor, err := nearestReal(ctx, l.target, mappedRoot, request.DestinationRoot, view.DestinationInventory)
+	if err != nil {
+		return view, err
 	}
-	view.RootDestinationExists, view.RootDestinationIdentity, err = identify(mappedRoot)
+	if anchor == "" {
+		if !l.sameHost {
+			return view, &DestinationUnavailableError{Root: request.DestinationRoot}
+		}
+		return view, fmt.Errorf("destination has no existing ancestor")
+	}
+	view.RootDestinationExists = anchor == mappedRoot
+	view.RootDestinationIdentity, err = l.target.InspectDatasetIdentity(ctx, anchor)
 	return view, err
 }
 
@@ -585,12 +610,13 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 		return l.applyStream(ctx, request, streams[0].Dataset, report)
 	}
 	var (
-		result Result
-		failed StreamsError
+		result  Result
+		failed  StreamsError
+		blocked []string
 	)
 	result.Verified = true
 	for _, stream := range streams {
-		if slices.ContainsFunc(failed.Failed, func(failure StreamError) bool { return inside(stream.Dataset, failure.Dataset) }) {
+		if slices.ContainsFunc(blocked, func(failure string) bool { return inside(stream.Dataset, failure) }) {
 			result.Verified = false
 			continue
 		}
@@ -606,6 +632,12 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 				return result, streamErr
 			}
 			failed.Failed = append(failed.Failed, StreamError{Dataset: stream.Dataset, Err: streamErr})
+			// A deferred placeholder is the one failure whose descendants must
+			// run: their pending receives are what it is waiting for.
+			var busy *PlaceholderBusyError
+			if !errors.As(streamErr, &busy) {
+				blocked = append(blocked, stream.Dataset)
+			}
 		}
 	}
 	if len(failed.Failed) > 0 {
@@ -635,6 +667,9 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 	streamPolicy := member.Policy
 	if stream == request.Source {
 		streamPolicy = request.Policy
+	}
+	if err := l.setAsidePlaceholder(ctx, request, stream); err != nil {
+		return Result{}, err
 	}
 	var result Result
 	before, err := l.load(ctx, request, stream)
@@ -783,7 +818,14 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 	// The binding proves the root's replica, which every stream is received
 	// beneath, so the first stream to bring it into existence promotes the
 	// bootstrap anchor to it.
-	if mappedRoot := plan.TargetBinding.MappedDataset; plan.TargetBinding.Anchor != mappedRoot {
+	mappedRoot := plan.TargetBinding.MappedDataset
+	rootState, rootErr := l.target.InspectState(ctx, mappedRoot, false)
+	if rootErr != nil {
+		return result, rootErr
+	}
+	// A placeholder is never an anchor: until the root's own replica replaces
+	// it, the binding stays on the nearest real ancestor.
+	if plan.TargetBinding.Anchor != mappedRoot && !isPlaceholder(rootState, mappedRoot) {
 		resolved, identityErr := l.target.InspectDatasetIdentity(ctx, mappedRoot)
 		if identityErr != nil {
 			return result, identityErr
@@ -862,8 +904,112 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 			}
 		}
 	}
+	if err := l.adoptPlaceholderChildren(ctx, request, stream); err != nil {
+		return result, err
+	}
 	result.Verified = true
 	return result, nil
+}
+
+// placeholderAside names where a placeholder waits while its dataset's own
+// replica is received in its place: a sibling, so it stays inside every
+// destination scope the placeholder was in.
+func placeholderAside(dataset string) string { return dataset + ".boomerangz-placeholder" }
+
+// setAsidePlaceholder makes room for a stream whose destination is still the
+// placeholder that once stood in for it, as a hole between its root and a
+// deeper member, or as the root's replica when only members sent here. A full
+// receive cannot replace an existing dataset without -F, which boomerangz
+// never uses, so the placeholder and the replicas beneath it move to a
+// sibling first; adoptPlaceholderChildren moves them back beneath the received
+// replica once it verifies.
+//
+// Every step leaves a state the next attempt recognises. The placeholder
+// moved aside with its destination absent is an ordinary full receive with
+// children waiting; with its destination received, the children are moved
+// across and the placeholder removed. Nothing is destroyed until the
+// placeholder is empty.
+func (l *Local) setAsidePlaceholder(ctx context.Context, request Request, stream string) error {
+	_, destination, err := request.mapped(stream)
+	if err != nil {
+		return err
+	}
+	inventory, err := l.target.ListDatasets(ctx)
+	if err != nil {
+		return err
+	}
+	exists := func(name string) bool {
+		return slices.ContainsFunc(inventory, func(dataset zfs.Dataset) bool { return dataset.Name == name })
+	}
+	aside := placeholderAside(destination)
+	if !exists(destination) {
+		return nil
+	}
+	state, err := l.target.InspectState(ctx, destination, true)
+	if err != nil {
+		return err
+	}
+	if !isPlaceholder(state, destination) {
+		return nil
+	}
+	if exists(aside) {
+		return fmt.Errorf("placeholder %s cannot be set aside: %s already exists", destination, aside)
+	}
+	if len(state.ResumeTokens) > 0 {
+		return &PlaceholderBusyError{Dataset: destination}
+	}
+	replicas, ok := l.target.(zfs.ReplicaExecutor)
+	if !ok {
+		return fmt.Errorf("destination cannot replace placeholder %s with its replica", destination)
+	}
+	parent := destination[:strings.LastIndexByte(destination, '/')]
+	if err := l.target.CheckPermissions(ctx, parent, []string{"create", "destroy", "mount", "rename"}); err != nil {
+		return fmt.Errorf("placeholder replacement permission preflight: %w", err)
+	}
+	return replicas.RenameDataset(ctx, destination, aside)
+}
+
+// adoptPlaceholderChildren finishes a placeholder replacement once the stream's
+// replica has verified: every child of the set-aside placeholder moves beneath
+// the replica, and the then empty placeholder is removed.
+func (l *Local) adoptPlaceholderChildren(ctx context.Context, request Request, stream string) error {
+	_, destination, err := request.mapped(stream)
+	if err != nil {
+		return err
+	}
+	aside := placeholderAside(destination)
+	inventory, err := l.target.ListDatasets(ctx)
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(inventory, func(dataset zfs.Dataset) bool { return dataset.Name == aside }) {
+		return nil
+	}
+	state, err := l.target.InspectState(ctx, aside, false)
+	if err != nil {
+		return err
+	}
+	if !isPlaceholder(state, aside) {
+		return fmt.Errorf("%s is not a placeholder boomerangz set aside; refusing to adopt its children", aside)
+	}
+	replicas, ok := l.target.(zfs.ReplicaExecutor)
+	if !ok {
+		return fmt.Errorf("destination cannot replace placeholder %s with its replica", destination)
+	}
+	for _, dataset := range inventory {
+		child, found := strings.CutPrefix(dataset.Name, aside+"/")
+		if !found || strings.Contains(child, "/") {
+			continue
+		}
+		target := destination + "/" + child
+		if slices.ContainsFunc(inventory, func(existing zfs.Dataset) bool { return existing.Name == target }) {
+			return fmt.Errorf("cannot move %s beneath the replica: %s already exists", dataset.Name, target)
+		}
+		if err := replicas.RenameDataset(ctx, dataset.Name, target); err != nil {
+			return fmt.Errorf("move %s beneath its replica: %w", dataset.Name, err)
+		}
+	}
+	return replicas.DestroyDataset(ctx, aside, false)
 }
 
 func verifyGUIDs(plan Plan, state zfs.State) error {

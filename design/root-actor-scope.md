@@ -336,27 +336,31 @@ whose replicas overlap. See [destination-collisions.md](destination-collisions.m
 
 ### 9.2 A placeholder blocks its dataset's own later replica
 
-A hole's mapped name is created as an empty placeholder so a deeper member can
-be received. If the hole's dataset later becomes a member, or a target the
-root did not send to before starts receiving the root, its full receive finds
-a dataset already there with no common base and blocks, asking for a reseed -
-which destroys the root's whole replica on that target. It fails closed, but
-the recovery is far wider than the cause. The same happens on `main` for any
-intermediate placeholder a peer created and another peer later claimed.
+Fixed after this document was first written. Every receive parent is created
+with `state:placeholder=on` in the same `zfs create`, so a placeholder is
+provably boomerangz's and provably never a replica. When a stream's destination
+is still a placeholder - a hole that became a member, or the root's replica on
+a target only members used before - the placeholder moves aside to a sibling,
+the stream's ordinary full receive creates the replica, and once it verifies
+the placeholder's children move beneath it and the empty placeholder is
+removed. Each step leaves a state the next attempt recognises; nothing is
+destroyed until the placeholder is empty. A placeholder with a resumable
+receive beneath it defers only its own stream, so that receive can finish.
 
-A fix receives the dataset under a temporary sibling name, moves the
-placeholder's children beneath it, and replaces the placeholder, which is not
-attempted here because it needs its own crash analysis.
+A placeholder is never a binding anchor: the root's destination identity is
+the nearest real dataset, so a member-only target binds to the real ancestor
+and the root joining it later is an ordinary bootstrap. A reseed during a
+replacement of the root's own replica destroys the set-aside placeholder with
+it, since it lies beside the root's replica rather than inside it.
 
-### 9.3 Bootstrap crash window, now also through placeholders
+### 9.3 Bootstrap crash window
 
 `TestGuestDaemonPowerLoss/receive-commit` pins a crash between a bootstrap
 receive committing and the binding being promoted: the next pass finds the
 mapped destination present under an ancestor-only binding and blocks for a
-reseed. The binding contract is unchanged (section 7), so that still holds.
-A member-only target adds a second route into the same window: the member's
-first stream creates the root's replica as a placeholder before the root's
-binding has been promoted to it.
+reseed. The binding contract is unchanged (section 7), so that still holds. A
+member-only target does not add a route into it: the root's placeholder is
+never mistaken for its replica (9.2).
 
 ### 9.4 A failed resume is sticky
 

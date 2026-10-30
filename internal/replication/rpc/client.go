@@ -100,6 +100,11 @@ func (e *clientExecutor) DestroyDataset(ctx context.Context, dataset string, rec
 	return e.client.mapError(err)
 }
 
+func (e *clientExecutor) RenameDataset(ctx context.Context, from, to string) error {
+	_, err := e.client.remote.RenameDataset(ctx, &RenameDatasetRequest{From: from, To: to})
+	return e.client.mapError(err)
+}
+
 func (e *clientExecutor) SetProperties(ctx context.Context, dataset string, properties map[string]string) error {
 	_, err := e.client.remote.SetProperties(ctx, &SetPropertiesRequest{Dataset: dataset, Properties: maps.Clone(properties)})
 	return e.client.mapError(err)

@@ -24,7 +24,7 @@ const ProtocolVersion = 4
 // MaxStreamChunk bounds each in-memory ZFS data message.
 const MaxStreamChunk = 256 * 1024
 
-var operations = []string{"abort-receive", "capabilities", "destroy-dataset", "permissions", "prepare-receive", "probe", "receive", "reconcile", "resume", "verify"}
+var operations = []string{"abort-receive", "capabilities", "destroy-dataset", "permissions", "prepare-receive", "probe", "receive", "reconcile", "rename-dataset", "resume", "verify"}
 
 // Server implements the transport-neutral remote endpoint over a typed ZFS
 // executor. AllowedRoot limits every mutation and receive to one configured
@@ -181,6 +181,27 @@ func (s *Server) DestroyDataset(ctx context.Context, request *DestroyDatasetRequ
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return &DestroyDatasetResponse{}, nil
+}
+
+// RenameDataset moves a dataset within one allowed destination root, as
+// replacing a placeholder with its replica requires. Neither name may be the
+// root itself, and both must lie under the same root, so a rename can neither
+// move a configured root nor carry a replica out of its scope.
+func (s *Server) RenameDataset(ctx context.Context, request *RenameDatasetRequest) (*RenameDatasetResponse, error) {
+	from, to := request.GetFrom(), request.GetTo()
+	if !slices.ContainsFunc(s.allowedRoots, func(root string) bool {
+		return from != root && to != root && scope.Inside(root, from) && scope.Inside(root, to)
+	}) {
+		return nil, status.Error(codes.PermissionDenied, "rename is outside one configured destination scope")
+	}
+	backend, ok := s.backend.(zfs.ReplicaExecutor)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "destination placeholder replacement is unavailable")
+	}
+	if err := backend.RenameDataset(ctx, from, to); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &RenameDatasetResponse{}, nil
 }
 
 // SetProperties applies validated reconciliation properties within scope.

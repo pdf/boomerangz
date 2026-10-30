@@ -60,7 +60,7 @@ func TestReseedDestroysPartialReplicaAndReleasesRecoveryState(t *testing.T) {
 func TestReseedRejectsChangedDestinationPool(t *testing.T) {
 	t.Parallel()
 	backend, request := newLocalBackend(t)
-	plan, err := Build(request, View{Inventory: backend.inventory, Source: backend.source, DestinationIdentity: zfs.DatasetIdentity{Name: "backup", Type: zfs.Filesystem, GUID: 10, Pool: "backup", PoolGUID: 11}}, fixtureInstallation)
+	plan, err := Build(request, rootStream(View{Inventory: backend.inventory, Source: backend.source, DestinationIdentity: zfs.DatasetIdentity{Name: "backup", Type: zfs.Filesystem, GUID: 10, Pool: "backup", PoolGUID: 11}}), fixtureInstallation)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -89,6 +89,7 @@ func TestGuestRootActorScope(t *testing.T) {
 	// own name would land at the destination root beside the root's replica.
 	mapped := destinationRoot + root[strings.LastIndexByte(root, '/'):]
 	members := []string{root, root + "/.local", root + "/.local/share", root + "/hole/deep"}
+	excluded := []string{root + "/.cache", root + "/.local/share/Steam", root + "/hole"}
 
 	// request resolves the root and its members the way the daemon does, from a
 	// discovery generation, so ownership comes from the real rules.
@@ -106,9 +107,9 @@ func TestGuestRootActorScope(t *testing.T) {
 		if !found || entry.CoveredBy != "" || !slices.Equal(entry.Members, members) {
 			t.Fatalf("root %s resolved with members %q, want %q", root, entry.Members, members)
 		}
-		for _, excluded := range []string{root + "/.cache", root + "/.local/share/Steam", root + "/hole"} {
-			if other, _ := generation.Inspect(excluded); other.CoveredBy != root || other.Member {
-				t.Fatalf("%s should be excluded from %s: %+v", excluded, root, other)
+		for _, name := range excluded {
+			if other, _ := generation.Inspect(name); other.CoveredBy != root || other.Member {
+				t.Fatalf("%s should be excluded from %s: %+v", name, root, other)
 			}
 		}
 		built := transfer.Request{Source: root, DestinationRoot: destinationRoot, Policy: entry.Policy}
@@ -208,6 +209,48 @@ func TestGuestRootActorScope(t *testing.T) {
 		refs := references(t)
 		if refs[root+"/.local"].Metadata != later || refs[root].Metadata != first || refs[root+"/.local/share"].Metadata != first {
 			t.Fatalf("one member's advance disturbed another's proof: %+v", refs)
+		}
+	})
+
+	chain("a-hole-becomes-a-member", func(t *testing.T) {
+		// The hole's placeholder holds the deeper member's replica. Including
+		// the hole means receiving its own replica in the placeholder's place
+		// and moving that member beneath it, intact, with real renames.
+		guid := func(t *testing.T, dataset string) string {
+			t.Helper()
+			out, err := exec.CommandContext(t.Context(), "zfs", "get", "-H", "-o", "value", "guid", dataset).CombinedOutput()
+			if err != nil {
+				t.Fatalf("zfs get guid %s: %v: %s", dataset, err, out)
+			}
+			return strings.TrimSpace(string(out))
+		}
+		deepGUID := guid(t, mapped+"/hole/deep")
+		command(t, "inherit", policy.Namespace+"enabled", root+"/hole")
+		members = []string{root, root + "/.local", root + "/.local/share", root + "/hole", root + "/hole/deep"}
+		excluded = []string{root + "/.cache", root + "/.local/share/Steam"}
+		req := request(t)
+		hole, snapErr := service.CreateSnapshot(t.Context(), root, []string{root + "/hole"}, now.Add(-20*time.Minute), req.Policy)
+		if snapErr != nil {
+			t.Fatal(snapErr)
+		}
+		result, applyErr := engine.Apply(t.Context(), req, nil)
+		if applyErr != nil || !result.Verified {
+			t.Fatalf("result=%+v err=%v", result, applyErr)
+		}
+		if !exists(t, mapped+"/hole@"+hole.Name()) {
+			t.Fatal("the hole's own replica was not received")
+		}
+		if got := guid(t, mapped+"/hole/deep"); got != deepGUID {
+			t.Fatalf("the member beneath was recreated rather than moved: guid %s, want %s", got, deepGUID)
+		}
+		if !exists(t, mapped+"/hole/deep@"+first.Name()) {
+			t.Fatal("the member beneath lost its history")
+		}
+		if exists(t, mapped+"/hole.boomerangz-placeholder") {
+			t.Fatal("the set-aside placeholder was left behind")
+		}
+		if out, err := exec.CommandContext(t.Context(), "zfs", "get", "-H", "-o", "source", zfs.PlaceholderProperty, mapped+"/hole").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) == "local" {
+			t.Fatalf("the replica still carries the placeholder marker: %s %v", out, err)
 		}
 	})
 

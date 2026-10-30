@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -29,12 +30,14 @@ type treePool struct {
 	tokens   map[string]string
 	// resumes maps a resume token to the source snapshot its receive was for.
 	resumes map[string]string
-	txg     uint64
-	guid    uint64
+	// failRename fails the next rename of each dataset it names.
+	failRename map[string]bool
+	txg        uint64
+	guid       uint64
 }
 
 func newTreePool(names ...string) *treePool {
-	p := &treePool{holds: map[string][]string{}, tokens: map[string]string{}, resumes: map[string]string{}, txg: 1, guid: 1}
+	p := &treePool{holds: map[string][]string{}, tokens: map[string]string{}, resumes: map[string]string{}, failRename: map[string]bool{}, txg: 1, guid: 1}
 	for _, name := range names {
 		p.create(name)
 	}
@@ -215,6 +218,84 @@ func (p *treePool) CreateReceiveParent(_ context.Context, name string) error {
 		return fmt.Errorf("parent does not exist: %s", parent)
 	}
 	p.create(name)
+	p.props = append(p.props, zfs.Property{Dataset: name, Name: zfs.PlaceholderProperty, Value: "on", Source: zfs.SourceLocal})
+	return nil
+}
+
+// RenameDataset moves a dataset with everything beneath it, as zfs rename
+// does, and fails when its injected failure names the dataset.
+func (p *treePool) RenameDataset(_ context.Context, from, to string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.failRename[from] {
+		delete(p.failRename, from)
+		return fmt.Errorf("injected rename failure on %s", from)
+	}
+	if !p.exists(from) || p.exists(to) {
+		return fmt.Errorf("cannot rename %s to %s", from, to)
+	}
+	if parent := to[:strings.LastIndexByte(to, '/')]; !p.exists(parent) {
+		return fmt.Errorf("parent does not exist: %s", parent)
+	}
+	move := func(name string) string {
+		base := datasetOf(name)
+		if base == from || strings.HasPrefix(base, from+"/") {
+			return to + strings.TrimPrefix(name, from)
+		}
+		return name
+	}
+	for i := range p.datasets {
+		p.datasets[i].Name = move(p.datasets[i].Name)
+	}
+	for i := range p.objects {
+		p.objects[i].Name = move(p.objects[i].Name)
+	}
+	for i := range p.props {
+		p.props[i].Dataset = move(p.props[i].Dataset)
+	}
+	holds, tokens := map[string][]string{}, map[string]string{}
+	for name, value := range p.holds {
+		holds[move(name)] = value
+	}
+	for name, value := range p.tokens {
+		tokens[move(name)] = value
+	}
+	p.holds, p.tokens = holds, tokens
+	slices.SortFunc(p.datasets, func(a, b zfs.Dataset) int { return strings.Compare(a.Name, b.Name) })
+	return nil
+}
+
+// DestroyDataset removes a dataset; without recursive, only one that has no
+// children and no snapshots, as zfs destroy refuses anything else.
+func (p *treePool) DestroyDataset(_ context.Context, name string, recursive bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if recursive {
+		gone := func(object string) bool {
+			base := datasetOf(object)
+			return base == name || strings.HasPrefix(base, name+"/")
+		}
+		p.datasets = slices.DeleteFunc(p.datasets, func(dataset zfs.Dataset) bool { return gone(dataset.Name) })
+		p.objects = slices.DeleteFunc(p.objects, func(object zfs.Object) bool { return gone(object.Name) })
+		p.props = slices.DeleteFunc(p.props, func(property zfs.Property) bool { return gone(property.Dataset) })
+		maps.DeleteFunc(p.tokens, func(dataset, _ string) bool { return gone(dataset) })
+		return nil
+	}
+	for _, object := range p.objects {
+		if object.Name != name && datasetOf(object.Name) == name || strings.HasPrefix(object.Name, name+"/") {
+			return fmt.Errorf("cannot destroy %s: it has children or snapshots", name)
+		}
+	}
+	p.datasets = slices.DeleteFunc(p.datasets, func(dataset zfs.Dataset) bool { return dataset.Name == name })
+	p.objects = slices.DeleteFunc(p.objects, func(object zfs.Object) bool { return object.Name == name })
+	p.props = slices.DeleteFunc(p.props, func(property zfs.Property) bool { return property.Dataset == name })
+	return nil
+}
+
+func (p *treePool) AbortReceive(_ context.Context, dataset string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.tokens, dataset)
 	return nil
 }
 
@@ -535,4 +616,320 @@ func must[T any](value T, err error) T {
 		panic(err)
 	}
 	return value
+}
+
+// setProperty replaces a dataset's local boomerangz property, or removes it
+// when value is empty, as zfs set and zfs inherit would.
+func (p *treePool) setProperty(dataset, key, value string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.props = slices.DeleteFunc(p.props, func(row zfs.Property) bool {
+		return row.Dataset == dataset && row.Name == policy.Namespace+key && row.Source == zfs.SourceLocal
+	})
+	if value != "" {
+		p.props = append(p.props, zfs.Property{Dataset: dataset, Name: policy.Namespace + key, Value: value, Source: zfs.SourceLocal})
+	}
+}
+
+// resolve builds the request for one local target from the pool's current
+// properties, as the daemon does from a discovery generation: each dataset
+// inherits from its parent, and members are the named datasets whose policy
+// sends to the target. The root's own stream joins only if it sends there.
+func (p *treePool) resolve(t *testing.T, target string, members ...string) Request {
+	t.Helper()
+	p.mu.Lock()
+	rows := slices.Clone(p.props)
+	p.mu.Unlock()
+	effective := map[string]policy.Effective{}
+	var walk func(name string) policy.Effective
+	walk = func(name string) policy.Effective {
+		if resolved, found := effective[name]; found {
+			return resolved
+		}
+		var own []zfs.Property
+		for _, row := range rows {
+			if row.Dataset == name && strings.HasPrefix(row.Name, policy.Namespace) {
+				own = append(own, row)
+			}
+		}
+		var parent *policy.Effective
+		if name != "tank/home" {
+			inherited := walk(name[:strings.LastIndexByte(name, '/')])
+			parent = &inherited
+		}
+		effective[name] = policy.Resolve(zfs.Dataset{Name: name, Type: zfs.Filesystem, EncryptionRoot: "-"}, parent, own, nil)
+		return effective[name]
+	}
+	request := Request{Source: "tank/home", DestinationRoot: target, Policy: walk("tank/home")}
+	for _, name := range append([]string{"tank/home"}, members...) {
+		if resolved := walk(name); resolved.Enabled && slices.Contains(resolved.Local, target) {
+			request.Members = append(request.Members, Member{Dataset: name, Policy: resolved})
+		}
+	}
+	return request
+}
+
+func (p *treePool) isPlaceholder(t *testing.T, dataset string) bool {
+	t.Helper()
+	state, err := p.InspectState(t.Context(), dataset, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return isPlaceholder(state, dataset)
+}
+
+func bindingAnchor(t *testing.T, pool *treePool, target string) string {
+	t.Helper()
+	state := must(pool.InspectState(t.Context(), "tank/home", false))
+	binding, err := storedTargetBinding(state, "tank/home", "local:"+target)
+	if err != nil || binding == nil {
+		t.Fatalf("binding=%+v err=%v", binding, err)
+	}
+	return binding.Anchor
+}
+
+func TestHoleBecomingAMemberReplacesItsPlaceholder(t *testing.T) {
+	t.Parallel()
+	pool, request, service := treeRoot(t, "hole!", "hole/deep+")
+	start := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	first := snapshotAt(t, service, request, start, "tank/home", "tank/home/hole/deep")
+	engine, err := NewLocal(pool, treeStream{pool: pool}, treeInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Apply(t.Context(), request, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !pool.isPlaceholder(t, "backup/home/hole") {
+		t.Fatal("fixture: the hole's mapped name is not a marked placeholder")
+	}
+	deepGUID := must(pool.InspectDatasetIdentity(t.Context(), "backup/home/hole/deep")).GUID
+
+	// Including the hole makes it a member that has never been sent: its full
+	// receive has to replace the placeholder its own child sits beneath.
+	pool.setProperty("tank/home/hole", "enabled", "")
+	members := pool.resolve(t, "backup", "tank/home/hole", "tank/home/hole/deep")
+	hole := snapshotAt(t, service, members, start.Add(time.Hour), "tank/home/hole")
+	result, err := engine.Apply(t.Context(), members, nil)
+	if err != nil || !result.Verified || len(result.Streams) != 3 || result.Streams[1].Plan.Mode != "full" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if pool.isPlaceholder(t, "backup/home/hole") {
+		t.Fatal("the placeholder was not replaced")
+	}
+	if _, found := pool.object("backup/home/hole@" + hole); !found {
+		t.Fatal("the hole's replica was not received")
+	}
+	// The member beneath moved intact: same dataset, same history.
+	if moved := must(pool.InspectDatasetIdentity(t.Context(), "backup/home/hole/deep")).GUID; moved != deepGUID {
+		t.Fatalf("the member beneath was recreated rather than moved: %d, want %d", moved, deepGUID)
+	}
+	if _, found := pool.object("backup/home/hole/deep@" + first); !found {
+		t.Fatal("the member beneath lost its history")
+	}
+	if pool.exists(placeholderAside("backup/home/hole")) {
+		t.Fatal("the set-aside placeholder was left behind")
+	}
+	// And it carries on incrementally from that history.
+	next := snapshotAt(t, service, members, start.Add(2*time.Hour), "tank/home/hole/deep")
+	result, err = engine.Apply(t.Context(), members, nil)
+	if err != nil || result.Streams[2].Plan.Mode != "incremental-latest" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if _, found := pool.object("backup/home/hole/deep@" + next); !found {
+		t.Fatal("the moved member did not advance")
+	}
+}
+
+func TestInterruptedPlaceholderReplacementCompletesNextAttempt(t *testing.T) {
+	t.Parallel()
+	for name, interrupt := range map[string]func(*treePool) treeStream{
+		// The placeholder is set aside and the replica's receive fails,
+		// leaving it resumable.
+		"receive": func(pool *treePool) treeStream {
+			return treeStream{pool: pool, failing: map[string]bool{"tank/home/hole": true}}
+		},
+		// The replica verifies, then moving the placeholder's children
+		// beneath it fails.
+		"adoption": func(pool *treePool) treeStream {
+			pool.failRename[placeholderAside("backup/home/hole")+"/deep"] = true
+			return treeStream{pool: pool}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			pool, request, service := treeRoot(t, "hole!", "hole/deep+")
+			start := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+			first := snapshotAt(t, service, request, start, "tank/home", "tank/home/hole/deep")
+			engine := must(NewLocal(pool, treeStream{pool: pool}, treeInstallation))
+			if _, err := engine.Apply(t.Context(), request, nil); err != nil {
+				t.Fatal(err)
+			}
+			pool.setProperty("tank/home/hole", "enabled", "")
+			members := pool.resolve(t, "backup", "tank/home/hole", "tank/home/hole/deep")
+			snapshotAt(t, service, members, start.Add(time.Hour), "tank/home/hole")
+			interrupted := must(NewLocal(pool, interrupt(pool), treeInstallation))
+			if _, err := interrupted.Apply(t.Context(), members, nil); err == nil {
+				t.Fatal("the injected interruption succeeded")
+			}
+			if !pool.exists(placeholderAside("backup/home/hole")) {
+				t.Fatal("fixture: the interruption left nothing set aside")
+			}
+			result, err := engine.Apply(t.Context(), members, nil)
+			if err != nil || !result.Verified {
+				t.Fatalf("the next attempt did not finish the replacement: result=%+v err=%v", result, err)
+			}
+			if pool.exists(placeholderAside("backup/home/hole")) || pool.isPlaceholder(t, "backup/home/hole") {
+				t.Fatal("the replacement was left half done")
+			}
+			if _, found := pool.object("backup/home/hole/deep@" + first); !found {
+				t.Fatal("the member beneath lost its history")
+			}
+		})
+	}
+}
+
+// A target only a member sends to needs the root's replica as a placeholder.
+// The binding must never anchor on it, or the root joining that target later
+// would find its replica's name taken by a dataset the binding vouches for.
+func TestMemberOnlyTargetNeverAnchorsOnAPlaceholder(t *testing.T) {
+	t.Parallel()
+	pool, _, service := treeRoot(t, "docs")
+	pool.setProperty("tank/home", "local", "")
+	pool.setProperty("tank/home/docs", "local", "backup")
+	request := pool.resolve(t, "backup", "tank/home/docs")
+	if len(request.Members) != 1 || request.Members[0].Dataset != "tank/home/docs" {
+		t.Fatalf("fixture: members = %+v", request.Members)
+	}
+	start := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	docs := snapshotAt(t, service, request, start, "tank/home", "tank/home/docs")
+	engine := must(NewLocal(pool, treeStream{pool: pool}, treeInstallation))
+	if _, err := engine.Apply(t.Context(), request, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !pool.isPlaceholder(t, "backup/home") {
+		t.Fatal("fixture: the root's replica is not a placeholder")
+	}
+	if anchor := bindingAnchor(t, pool, "backup"); anchor != "backup" {
+		t.Fatalf("the binding anchored on %s, want the real ancestor backup", anchor)
+	}
+	// A later pass must not read the placeholder as the root's replica.
+	if result, err := engine.Apply(t.Context(), request, nil); err != nil || !result.Verified {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+
+	// The root joins the target: its replica replaces the placeholder and
+	// the binding is promoted to it as an ordinary bootstrap.
+	pool.setProperty("tank/home", "local", "backup")
+	joined := pool.resolve(t, "backup", "tank/home/docs")
+	root := snapshotAt(t, service, joined, start.Add(time.Hour), "tank/home")
+	result, err := engine.Apply(t.Context(), joined, nil)
+	if err != nil || !result.Verified || result.Streams[0].Plan.Mode != "full" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if _, found := pool.object("backup/home@" + root); !found || pool.isPlaceholder(t, "backup/home") {
+		t.Fatal("the root's replica did not replace its placeholder")
+	}
+	if _, found := pool.object("backup/home/docs@" + docs); !found {
+		t.Fatal("the member's replica did not move beneath the root's")
+	}
+	if anchor := bindingAnchor(t, pool, "backup"); anchor != "backup/home" {
+		t.Fatalf("the binding stayed on %s, want the root's replica", anchor)
+	}
+}
+
+// A placeholder with a resumable receive beneath it waits for that receive:
+// its stream is deferred, the stream beneath runs and finishes, and the next
+// attempt replaces the placeholder.
+func TestPlaceholderWaitsForTheReceiveBeneathIt(t *testing.T) {
+	t.Parallel()
+	pool, request, service := treeRoot(t, "hole!", "hole/deep+")
+	start := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	snapshotAt(t, service, request, start, "tank/home", "tank/home/hole/deep")
+	failing := must(NewLocal(pool, treeStream{pool: pool, failing: map[string]bool{"tank/home/hole/deep": true}}, treeInstallation))
+	if _, err := failing.Apply(t.Context(), request, nil); err == nil {
+		t.Fatal("injected failure succeeded")
+	}
+	if pool.tokens["backup/home/hole/deep"] == "" {
+		t.Fatal("fixture: no resumable receive beneath the placeholder")
+	}
+	pool.setProperty("tank/home/hole", "enabled", "")
+	members := pool.resolve(t, "backup", "tank/home/hole", "tank/home/hole/deep")
+	snapshotAt(t, service, members, start.Add(time.Hour), "tank/home/hole")
+	engine := must(NewLocal(pool, treeStream{pool: pool}, treeInstallation))
+	result, err := engine.Apply(t.Context(), members, nil)
+	var failed *StreamsError
+	if !errors.As(err, &failed) || len(failed.Failed) != 1 || failed.Failed[0].Dataset != "tank/home/hole" || !failed.Temporary() {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if deep := result.Streams[len(result.Streams)-1]; deep.Plan.Source != "tank/home/hole/deep" || !deep.Verified || !deep.Resumed {
+		t.Fatalf("the receive beneath was held back: %+v", deep)
+	}
+	if result, err := engine.Apply(t.Context(), members, nil); err != nil || !result.Verified || pool.isPlaceholder(t, "backup/home/hole") {
+		t.Fatalf("the placeholder was not replaced once free: result=%+v err=%v", result, err)
+	}
+}
+
+// A dataset without the marker is not boomerangz's to move, whatever it
+// holds: the stream fails closed as it always has.
+func TestUnmarkedDestinationIsNeverReplaced(t *testing.T) {
+	t.Parallel()
+	pool, request, service := treeRoot(t, "other")
+	pool.create("backup/home")
+	pool.create("backup/home/other")
+	snapshotAt(t, service, request, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), "tank/home", "tank/home/other")
+	engine := must(NewLocal(pool, treeStream{pool: pool}, treeInstallation))
+	if _, err := engine.Apply(t.Context(), request, nil); err == nil || !strings.Contains(err.Error(), "no common base") {
+		t.Fatalf("an unmarked destination was not refused: %v", err)
+	}
+	if pool.exists(placeholderAside("backup/home")) || pool.exists(placeholderAside("backup/home/other")) {
+		t.Fatal("an unmarked dataset was moved")
+	}
+}
+
+// A reseed while the root's own replica is replacing its placeholder must
+// destroy the set-aside placeholder too: it sits beside the root's replica,
+// outside what the reseed destroys, holding member replicas whose proofs the
+// reseed releases. Left behind, they would be moved back beneath the fresh
+// replica as if they were current.
+func TestReseedDestroysASetAsideRootPlaceholder(t *testing.T) {
+	t.Parallel()
+	pool, _, service := treeRoot(t, "docs")
+	pool.setProperty("tank/home", "local", "")
+	pool.setProperty("tank/home/docs", "local", "backup")
+	start := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	memberOnly := pool.resolve(t, "backup", "tank/home/docs")
+	snapshotAt(t, service, memberOnly, start, "tank/home", "tank/home/docs")
+	engine := must(NewLocal(pool, treeStream{pool: pool}, treeInstallation))
+	if _, err := engine.Apply(t.Context(), memberOnly, nil); err != nil {
+		t.Fatal(err)
+	}
+	pool.setProperty("tank/home", "local", "backup")
+	joined := pool.resolve(t, "backup", "tank/home/docs")
+	snapshotAt(t, service, joined, start.Add(time.Hour), "tank/home")
+	failing := must(NewLocal(pool, treeStream{pool: pool, failing: map[string]bool{"tank/home": true}}, treeInstallation))
+	if _, err := failing.Apply(t.Context(), joined, nil); err == nil {
+		t.Fatal("injected root failure succeeded")
+	}
+	aside := placeholderAside("backup/home")
+	if !pool.exists(aside + "/docs") {
+		t.Fatal("fixture: the member replica is not waiting beneath the set-aside placeholder")
+	}
+	reseed := must(NewReseedService(pool, pool, treeInstallation))
+	plan, err := reseed.Apply(t.Context(), joined)
+	if err != nil || !plan.Applied || plan.SetAside != aside || !slices.Contains(plan.DestinationObjects, aside+"/docs") {
+		t.Fatalf("reseed=%+v err=%v", plan, err)
+	}
+	if pool.exists(aside) || pool.exists("backup/home") {
+		t.Fatal("reseed left the root's replica or its set-aside placeholder behind")
+	}
+	result, err := engine.Apply(t.Context(), joined, nil)
+	if err != nil || !result.Verified {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	for _, stream := range result.Streams {
+		if stream.Plan.Mode != "full" {
+			t.Errorf("%s resumed stale history as %q after a reseed", stream.Plan.Source, stream.Plan.Mode)
+		}
+	}
 }

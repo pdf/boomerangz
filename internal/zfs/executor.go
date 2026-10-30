@@ -79,6 +79,21 @@ type ReseedExecutor interface {
 	DestroyDataset(context.Context, string, bool) error
 }
 
+// PlaceholderProperty marks a dataset boomerangz created only so that a deeper
+// replica could be received beneath it. Every receive parent carries it from
+// the moment it is created, so the marker is proof the dataset was never a
+// replica of anything.
+const PlaceholderProperty = propertyNamespace + "state:placeholder"
+
+// ReplicaExecutor exposes the destination operations that replace a
+// placeholder with the replica it stood in for: moving the placeholder aside,
+// moving its children beneath the received replica, and removing it.
+type ReplicaExecutor interface {
+	Executor
+	RenameDataset(context.Context, string, string) error
+	DestroyDataset(context.Context, string, bool) error
+}
+
 // Object is a filesystem, volume, snapshot, or bookmark in a lifecycle query.
 type Object struct {
 	Name      string

@@ -706,6 +706,25 @@ exec zfs "$@"
 					t.Fatalf("member follow-up=%+v err=%v", result, applyErr)
 				}
 				command(t, "list", "-H", "-o", "name", mapped+"/hole/deep@"+follow.Name())
+
+				// Including the hole replaces its placeholder through the
+				// transport: set aside, received, the member beneath moved
+				// back with its history, the placeholder removed.
+				command(t, "inherit", policy.Namespace+"enabled", tree+"/hole")
+				members = append(members, tree+"/hole")
+				hole, snapErr := snapshots.CreateSnapshot(t.Context(), tree, []string{tree + "/hole"}, now.Add(2*time.Minute), memberRequest(t).Policy)
+				if snapErr != nil {
+					t.Fatal(snapErr)
+				}
+				result, applyErr = target.engine.Apply(t.Context(), memberRequest(t), nil)
+				if applyErr != nil || !result.Verified || len(result.Streams) != len(members) {
+					t.Fatalf("hole inclusion=%+v err=%v", result, applyErr)
+				}
+				command(t, "list", "-H", "-o", "name", mapped+"/hole@"+hole.Name())
+				command(t, "list", "-H", "-o", "name", mapped+"/hole/deep@"+follow.Name())
+				if exec.CommandContext(t.Context(), "zfs", "list", "-H", mapped+"/hole.boomerangz-placeholder").Run() == nil {
+					t.Fatal("the set-aside placeholder was left behind")
+				}
 			})
 		})
 	}

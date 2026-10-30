@@ -339,9 +339,6 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		return plan, fmt.Errorf("destination identity does not match sparse inventory")
 	}
 	rootIdentity, rootExists := view.RootDestinationIdentity, view.RootDestinationExists
-	if stream.Dataset == request.Source {
-		rootIdentity, rootExists = view.DestinationIdentity, view.DestinationExists
-	}
 	if rootIdentity.Name == "" || destinationDatasets[rootIdentity.Name].Name == "" || destinationDatasets[rootIdentity.Name].Type != rootIdentity.Type || (rootExists && rootIdentity.Name != mappedRoot) || (!rootExists && !inside(mappedRoot, rootIdentity.Name)) {
 		return plan, fmt.Errorf("root destination identity does not match sparse inventory")
 	}

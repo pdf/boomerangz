@@ -14,18 +14,23 @@ import (
 
 // ReseedPlan is the complete destructive scope of one source-target reset.
 type ReseedPlan struct {
-	Dataset            string                `json:"dataset"`
-	Target             string                `json:"target"`
-	Binding            TargetBinding         `json:"binding"`
-	BindingStored      bool                  `json:"binding_stored"`
-	ReceiveAnchor      string                `json:"receive_anchor"`
-	DestinationExists  bool                  `json:"destination_exists"`
-	DestinationObjects []string              `json:"destination_objects,omitempty"`
-	ResumeDatasets     []string              `json:"resume_datasets,omitempty"`
-	References         []lifecycle.Reference `json:"references,omitempty"`
-	Suspended          bool                  `json:"suspended,omitempty"`
-	Warning            string                `json:"warning"`
-	Applied            bool                  `json:"applied"`
+	Dataset            string        `json:"dataset"`
+	Target             string        `json:"target"`
+	Binding            TargetBinding `json:"binding"`
+	BindingStored      bool          `json:"binding_stored"`
+	ReceiveAnchor      string        `json:"receive_anchor"`
+	DestinationExists  bool          `json:"destination_exists"`
+	DestinationObjects []string      `json:"destination_objects,omitempty"`
+	// SetAside is the root replica's placeholder, moved aside while the root's
+	// own replica replaces it, with the member replicas waiting beneath it.
+	// It lies beside the mapped replica rather than inside it, so it is
+	// destroyed with it explicitly.
+	SetAside       string                `json:"set_aside,omitempty"`
+	ResumeDatasets []string              `json:"resume_datasets,omitempty"`
+	References     []lifecycle.Reference `json:"references,omitempty"`
+	Suspended      bool                  `json:"suspended,omitempty"`
+	Warning        string                `json:"warning"`
+	Applied        bool                  `json:"applied"`
 }
 
 // ReseedService coordinates destructive destination cleanup with release of
@@ -148,6 +153,24 @@ func (s *ReseedService) plan(ctx context.Context, request Request) (ReseedPlan, 
 		slices.Sort(plan.DestinationObjects)
 		slices.Sort(plan.ResumeDatasets)
 	}
+	if aside := placeholderAside(binding.MappedDataset); datasets[aside] {
+		state, inspectErr := s.destination.InspectState(ctx, aside, true)
+		if inspectErr != nil {
+			return ReseedPlan{}, inspectErr
+		}
+		if !isPlaceholder(state, aside) {
+			return ReseedPlan{}, fmt.Errorf("%s is not a placeholder boomerangz set aside; refusing reseed", aside)
+		}
+		plan.SetAside = aside
+		for _, object := range state.Objects {
+			plan.DestinationObjects = append(plan.DestinationObjects, object.Name)
+		}
+		for dataset := range state.ResumeTokens {
+			plan.ResumeDatasets = append(plan.ResumeDatasets, dataset)
+		}
+		slices.Sort(plan.DestinationObjects)
+		slices.Sort(plan.ResumeDatasets)
+	}
 	references, err := lifecycle.References(source, request.Source, lineage)
 	if err != nil {
 		return ReseedPlan{}, err
@@ -184,6 +207,11 @@ func (s *ReseedService) Apply(ctx context.Context, request Request) (ReseedPlan,
 			return plan, fmt.Errorf("destination cleanup permission preflight: %w", err)
 		}
 	}
+	if plan.SetAside != "" {
+		if err := s.destination.CheckPermissions(ctx, plan.SetAside, []string{"destroy", "mount"}); err != nil {
+			return plan, fmt.Errorf("set-aside placeholder cleanup permission preflight: %w", err)
+		}
+	}
 	if err := s.destination.CheckPermissions(ctx, plan.ReceiveAnchor, reseedReceivePermissions(request)); err != nil {
 		return plan, fmt.Errorf("fresh receive permission preflight: %w", err)
 	}
@@ -202,6 +230,11 @@ func (s *ReseedService) Apply(ctx context.Context, request Request) (ReseedPlan,
 	if plan.DestinationExists {
 		if err := s.destination.DestroyDataset(ctx, plan.Binding.MappedDataset, true); err != nil {
 			return plan, fmt.Errorf("destroy mapped destination %s: %w", plan.Binding.MappedDataset, err)
+		}
+	}
+	if plan.SetAside != "" {
+		if err := s.destination.DestroyDataset(ctx, plan.SetAside, true); err != nil {
+			return plan, fmt.Errorf("destroy set-aside placeholder %s: %w", plan.SetAside, err)
 		}
 	}
 	references := slices.Clone(plan.References)

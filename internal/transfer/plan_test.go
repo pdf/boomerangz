@@ -36,6 +36,14 @@ func testFixture(t *testing.T) (Request, View) {
 	return request, view
 }
 
+// rootStream completes a view of the root's own stream as load does when no
+// placeholder stands in for the root's replica: the root's destination is the
+// stream's.
+func rootStream(view View) View {
+	view.RootDestinationExists, view.RootDestinationIdentity = view.DestinationExists, view.DestinationIdentity
+	return view
+}
+
 func addDestinationBase(view *View) {
 	base := view.Source.Objects[1]
 	base.Name = "backup/data" + strings.TrimPrefix(base.Name, "tank/data")
@@ -49,7 +57,7 @@ func addDestinationBase(view *View) {
 func TestBuildFullIncrementalAndNoop(t *testing.T) {
 	t.Parallel()
 	request, view := testFixture(t)
-	plan, err := Build(request, view, fixtureInstallation)
+	plan, err := Build(request, rootStream(view), fixtureInstallation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +65,7 @@ func TestBuildFullIncrementalAndNoop(t *testing.T) {
 		t.Fatalf("full plan=%v", plan)
 	}
 	addDestinationBase(&view)
-	plan, err = Build(request, view, fixtureInstallation)
+	plan, err = Build(request, rootStream(view), fixtureInstallation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +73,7 @@ func TestBuildFullIncrementalAndNoop(t *testing.T) {
 		t.Fatalf("-I plan=%v", plan)
 	}
 	request.Policy.Incremental = "latest"
-	plan, err = Build(request, view, fixtureInstallation)
+	plan, err = Build(request, rootStream(view), fixtureInstallation)
 	if err != nil || plan.Mode != "incremental-latest" || len(plan.Expected) != 1 {
 		t.Fatalf("-i plan=%v err=%v", plan, err)
 	}
@@ -73,7 +81,7 @@ func TestBuildFullIncrementalAndNoop(t *testing.T) {
 	endpoint.Name = "backup/data" + strings.TrimPrefix(endpoint.Name, "tank/data")
 	endpoint.CreateTXG = 102
 	view.Destination.Objects = append(view.Destination.Objects, endpoint)
-	plan, err = Build(request, view, fixtureInstallation)
+	plan, err = Build(request, rootStream(view), fixtureInstallation)
 	if err != nil || plan.Mode != "up-to-date" {
 		t.Fatalf("noop=%v err=%v", plan, err)
 	}
@@ -90,7 +98,7 @@ func TestBuildRemoteUsesIndependentDestinationInventory(t *testing.T) {
 	view.DestinationInventory = []zfs.Dataset{{Name: "tank", Type: zfs.Filesystem, EncryptionRoot: "-"}}
 	view.DestinationIdentity = zfs.DatasetIdentity{Name: "tank", Type: zfs.Filesystem, GUID: 50, Pool: "tank", PoolGUID: 51}
 
-	plan, err := Build(request, view, fixtureInstallation)
+	plan, err := Build(request, rootStream(view), fixtureInstallation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +109,7 @@ func TestBuildRemoteUsesIndependentDestinationInventory(t *testing.T) {
 		t.Fatalf("remote destination identity was not used: %+v", plan.TargetBinding)
 	}
 	view.Source.Properties = append(view.Source.Properties, zfs.Property{Dataset: request.Source, Name: targetSuspendedProperty(request.CanonicalTarget), Value: "unverified", Source: zfs.SourceLocal})
-	if _, err := Build(request, view, fixtureInstallation); err == nil || !strings.Contains(err.Error(), "suspended") {
+	if _, err := Build(request, rootStream(view), fixtureInstallation); err == nil || !strings.Contains(err.Error(), "suspended") {
 		t.Fatalf("suspended remote was not rejected: %v", err)
 	}
 }
@@ -142,7 +150,7 @@ func TestBuildRefusesUnsafeDestinations(t *testing.T) {
 				value.Dataset = ""
 				request.Policy.Values[policy.Namespace+"enabled"] = value
 			}
-			if _, err := Build(request, view, fixtureInstallation); err == nil {
+			if _, err := Build(request, rootStream(view), fixtureInstallation); err == nil {
 				t.Fatalf("accepted %s", kind)
 			}
 		})
@@ -152,7 +160,7 @@ func TestBuildRefusesUnsafeDestinations(t *testing.T) {
 func TestTargetBindingDetectsReplacementAndMappingDrift(t *testing.T) {
 	t.Parallel()
 	request, view := testFixture(t)
-	initial, err := Build(request, view, fixtureInstallation)
+	initial, err := Build(request, rootStream(view), fixtureInstallation)
 	if err != nil || !initial.BindingNew || initial.TargetBinding.Anchor != "backup" || initial.TargetBinding.RelativePath != "data" {
 		t.Fatalf("initial binding=%+v err=%v", initial, err)
 	}
@@ -163,7 +171,7 @@ func TestTargetBindingDetectsReplacementAndMappingDrift(t *testing.T) {
 	property := targetBindingProperty(initial.TargetBinding.CanonicalTarget)
 	view.Source.Properties = append(view.Source.Properties, zfs.Property{Dataset: request.Source, Name: property, Value: encoded, Source: zfs.SourceLocal})
 	view.BindingIdentity = view.DestinationIdentity
-	if _, err := Build(request, view, fixtureInstallation); err != nil {
+	if _, err := Build(request, rootStream(view), fixtureInstallation); err != nil {
 		t.Fatalf("stable bootstrap binding rejected: %v", err)
 	}
 
@@ -171,7 +179,7 @@ func TestTargetBindingDetectsReplacementAndMappingDrift(t *testing.T) {
 	// ancestor-only bootstrap binding. Successful Apply promotes the binding only
 	// after received GUID verification.
 	addDestinationBase(&view)
-	if _, err := Build(request, view, fixtureInstallation); err == nil {
+	if _, err := Build(request, rootStream(view), fixtureInstallation); err == nil {
 		t.Fatal("ancestor binding authorized an unverified new destination")
 	}
 	wanted, err := bindingFor(request, "backup/data", view.DestinationIdentity)
@@ -184,11 +192,11 @@ func TestTargetBindingDetectsReplacementAndMappingDrift(t *testing.T) {
 			view.Source.Properties[i].Value = encoded
 		}
 	}
-	if _, err := Build(request, view, fixtureInstallation); err != nil {
+	if _, err := Build(request, rootStream(view), fixtureInstallation); err != nil {
 		t.Fatalf("verified destination binding rejected: %v", err)
 	}
 	view.DestinationIdentity.GUID++
-	if _, err := Build(request, view, fixtureInstallation); err == nil {
+	if _, err := Build(request, rootStream(view), fixtureInstallation); err == nil {
 		t.Fatal("same-named replacement accepted")
 	}
 }
@@ -225,7 +233,7 @@ func TestTargetBindingAllowsNewIntermediateAncestor(t *testing.T) {
 		request.Policy.Values[key] = value
 	}
 
-	initial, err := Build(request, view, fixtureInstallation)
+	initial, err := Build(request, rootStream(view), fixtureInstallation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +245,7 @@ func TestTargetBindingAllowsNewIntermediateAncestor(t *testing.T) {
 	view.BindingIdentity = view.DestinationIdentity
 	view.Inventory = append(view.Inventory, zfs.Dataset{Name: "backup/projects", Type: zfs.Filesystem})
 	view.DestinationIdentity = zfs.DatasetIdentity{Name: "backup/projects", Type: zfs.Filesystem, GUID: 12, Pool: "backup", PoolGUID: 11}
-	plan, err := Build(request, view, fixtureInstallation)
+	plan, err := Build(request, rootStream(view), fixtureInstallation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +257,7 @@ func TestTargetBindingAllowsNewIntermediateAncestor(t *testing.T) {
 func TestVerifyTargetBindingRejectsSameNamedReplacement(t *testing.T) {
 	t.Parallel()
 	request, view := testFixture(t)
-	plan, err := Build(request, view, fixtureInstallation)
+	plan, err := Build(request, rootStream(view), fixtureInstallation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +294,7 @@ func TestBookmarkBaseRequiresRecordedTargetProof(t *testing.T) {
 	ref := lifecycle.Reference{Target: "local:backup/data", Dataset: request.Source, Metadata: metadata, Sources: []lifecycle.ReferenceSource{{Dataset: request.Source, GUID: base.GUID, Metadata: metadata}}}
 	view.Source.Objects[1] = zfs.Object{Name: ref.BookmarkName(), Type: "bookmark", GUID: base.GUID, CreateTXG: base.CreateTXG}
 	request.Policy.Incremental = "latest"
-	if _, err := Build(request, view, fixtureInstallation); err == nil {
+	if _, err := Build(request, rootStream(view), fixtureInstallation); err == nil {
 		t.Fatal("claimed name-only bookmark")
 	}
 	value, err := json.Marshal(ref)
@@ -294,17 +302,17 @@ func TestBookmarkBaseRequiresRecordedTargetProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	view.Source.Properties = append(view.Source.Properties, zfs.Property{Dataset: request.Source, Name: ref.PropertyName(), Value: string(value), Source: zfs.SourceLocal})
-	plan, err := Build(request, view, fixtureInstallation)
+	plan, err := Build(request, rootStream(view), fixtureInstallation)
 	if err != nil || plan.Base != ref.BookmarkName() {
 		t.Fatalf("bookmark=%v err=%v", plan, err)
 	}
 	request.Policy.Incremental = "all"
-	if _, err := Build(request, view, fixtureInstallation); err == nil {
+	if _, err := Build(request, rootStream(view), fixtureInstallation); err == nil {
 		t.Fatal("used bookmark for -I")
 	}
 	request.Policy.Incremental = "latest"
 	request.Policy.Send.Replicate = true
-	if _, err := Build(request, view, fixtureInstallation); err == nil {
+	if _, err := Build(request, rootStream(view), fixtureInstallation); err == nil {
 		t.Fatal("used bookmark for recursive replication")
 	}
 }
@@ -327,7 +335,7 @@ func TestBuildRecursiveEndpointsAndNamespaceExclusions(t *testing.T) {
 		}
 	}
 	view.Source.Properties = append(view.Source.Properties, zfs.Property{Dataset: "tank", Name: policy.Namespace + "ignore_prop:quota", Value: "on", Source: zfs.SourceLocal})
-	plan, err := Build(request, view, fixtureInstallation)
+	plan, err := Build(request, rootStream(view), fixtureInstallation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +362,7 @@ func TestBuildRefusesEncryptedPropertyStreamWithoutRaw(t *testing.T) {
 	if !request.Policy.Send.Props || request.Policy.Send.Raw {
 		t.Fatalf("fixture did not reach the guard: props=%t raw=%t", request.Policy.Send.Props, request.Policy.Send.Raw)
 	}
-	if _, err := Build(request, view, fixtureInstallation); err == nil || !strings.Contains(err.Error(), "raw mode") {
+	if _, err := Build(request, rootStream(view), fixtureInstallation); err == nil || !strings.Contains(err.Error(), "raw mode") {
 		t.Fatalf("encrypted props without raw: err=%v", err)
 	}
 	// The same source with raw restored must plan normally, so the refusal is
@@ -363,7 +371,7 @@ func TestBuildRefusesEncryptedPropertyStreamWithoutRaw(t *testing.T) {
 	if !request.Policy.Send.Raw {
 		t.Fatal("raw was not defaulted on for an encrypted source")
 	}
-	if _, err := Build(request, view, fixtureInstallation); err != nil {
+	if _, err := Build(request, rootStream(view), fixtureInstallation); err != nil {
 		t.Fatalf("encrypted raw plan: %v", err)
 	}
 }

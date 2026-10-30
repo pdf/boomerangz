@@ -75,6 +75,7 @@ resolves policy from `ListDatasets` output rather than a literal.
 | Reseed recovery of an otherwise-blocked target | `TestGuestLocalTransfer/reseed-recovery` |
 | Members streamed into the root's replica at their root-relative paths under `discard=all`, holes created as placeholders, excluded datasets not sent, one proof per stream and no state on members | `TestGuestRootActorScope/members-nest-under-the-root` |
 | One member advancing without disturbing another member's proof | `TestGuestRootActorScope/a-member-advances-alone` |
+| A hole included again: its replica replaces the placeholder with real renames, the member beneath moved intact with its history, no placeholder left behind | `TestGuestRootActorScope/a-hole-becomes-a-member` |
 | Reseed of a root resetting every member's proof and binding, and the next transfer re-bootstrapping every member - the incident root actor scope was designed against | `TestGuestRootActorScope/reseed-resets-every-member` |
 | Recursive `replicate` with `discard=first` and `discard=all` mapping | `TestGuestLocalTransfer/recursive-mapping` |
 | Linux `canmount=noauto` ancestor preparation under an ordinary receive root | `TestGuestLocalTransfer/linux-ancestor-preparation` |
@@ -89,7 +90,7 @@ resolves policy from `ListDatasets` output rather than a literal.
 | Full bootstrap over `ssh` direct, `ssh-shell` and `native`, with transport recorded in the target binding | `TestGuestSSHTransfer` |
 | Full bootstrap, `-i` vs `-I` with a foreign intermediate, receive overrides and namespace isolation, bookmark base after the source snapshot is pruned, resume after an interrupted receive, unrelated-destination refusal, and reseed recovery through the transport's `zfs.ReseedExecutor` - each run over `local`, `ssh-direct`, `ssh-shell` and `native` | `TestGuestTransportParity/<transport>` |
 | Recursive `replicate` with `discard=first` and `discard=all` over each transport: the received subtree, the intermediate receive ancestor prepared remotely, the sibling bases a recursive incremental gathers, and a foreign snapshot on the recursive destination refused | `TestGuestTransportParity/<transport>/recursive-mapping` |
-| Member streams over each transport under `discard=all`: each member at its root-relative path, the hole's placeholder created remotely, and a member advancing alone | `TestGuestTransportParity/<transport>/member-streams` |
+| Member streams over each transport under `discard=all`: each member at its root-relative path, the hole's placeholder created remotely, a member advancing alone, and the hole's placeholder replaced through the transport's rename once it is included | `TestGuestTransportParity/<transport>/member-streams` |
 
 `TestGuestTransportParity` carries `local` as a control arm rather than as
 coverage: the local engine already owns those behaviours in the table above, so

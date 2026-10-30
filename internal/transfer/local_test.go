@@ -49,6 +49,13 @@ func (b *localBackend) InspectState(_ context.Context, dataset string, _ bool) (
 	if dataset == "backup/data" && b.destExists {
 		return cloneState(b.destination)
 	}
+	// Any other dataset the inventory holds exists as an empty filesystem, as
+	// a real pool would report it.
+	for _, existing := range b.inventory {
+		if existing.Name == dataset {
+			return zfs.State{Objects: []zfs.Object{{Name: dataset, Type: string(existing.Type), GUID: 1}}}, nil
+		}
+	}
 	return zfs.State{}, fmt.Errorf("dataset absent")
 }
 

@@ -189,12 +189,31 @@ func validateObject(name string) error {
 }
 
 // CreateReceiveParent creates one exact receive container that is never
-// mounted automatically. It never creates parents implicitly.
+// mounted automatically, marked as a placeholder in the same operation. It
+// never creates parents implicitly.
 func (d *Direct) CreateReceiveParent(ctx context.Context, dataset string) error {
 	if err := validateDataset(dataset); err != nil {
 		return err
 	}
-	_, err := d.runner.Run(ctx, "create", "-o", "canmount=noauto", dataset)
+	_, err := d.runner.Run(ctx, "create", "-o", "canmount=noauto", "-o", PlaceholderProperty+"=on", dataset)
+	return err
+}
+
+// RenameDataset moves one exact dataset, with its descendants and snapshots,
+// to another name in the same pool. It never creates parents implicitly.
+func (d *Direct) RenameDataset(ctx context.Context, from, to string) error {
+	if err := validateDataset(from); err != nil {
+		return err
+	}
+	if err := validateDataset(to); err != nil {
+		return err
+	}
+	fromPool, _, _ := strings.Cut(from, "/")
+	toPool, _, _ := strings.Cut(to, "/")
+	if fromPool != toPool || from == fromPool || to == toPool || from == to || strings.HasPrefix(to, from+"/") {
+		return fmt.Errorf("cannot rename %s to %s", from, to)
+	}
+	_, err := d.runner.Run(ctx, "rename", from, to)
 	return err
 }
 

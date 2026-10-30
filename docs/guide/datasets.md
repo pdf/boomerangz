@@ -97,7 +97,10 @@ sudo zfs set org.boomerangz:enabled=on tank/home/projects/current
 
 Nothing is snapshotted or sent for a hole, but its name is created at each
 destination as an empty placeholder so the deeper member can be received
-beneath it.
+beneath it. If the hole is included again later, its own replica replaces the
+placeholder and the replicas beneath move under it with their history. The
+same happens when a root starts sending to a destination only its members used
+before. This needs the `rename` permission on the destination.
 
 Each member keeps its own retention grid, send options, incremental mode,
 receive overrides and destinations, including destinations its root does not

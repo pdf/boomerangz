@@ -13,7 +13,7 @@ to the service account:
 ```sh
 sudo zfs create backup/boomerangz
 sudo zfs allow -u boomerangz \
-  canmount,create,destroy,mount,receive:append,userprop \
+  canmount,create,destroy,mount,receive:append,rename,userprop \
   backup/boomerangz
 ```
 
@@ -79,7 +79,7 @@ Create the destination dataset and delegate its receive permissions:
 ```sh
 sudo zfs create tank/backups
 sudo zfs allow -u boomerangz \
-  canmount,create,destroy,mount,receive:append,userprop \
+  canmount,create,destroy,mount,receive:append,rename,userprop \
   tank/backups
 ```
 
@@ -125,7 +125,7 @@ Delegate only the destination permissions to this account:
 ```sh
 sudo zfs create tank/backups
 sudo zfs allow -u boomerangz-replication \
-  canmount,create,destroy,mount,receive:append,userprop \
+  canmount,create,destroy,mount,receive:append,rename,userprop \
   tank/backups
 ```
 
@@ -225,7 +225,7 @@ that will store the replica:
 ```sh
 sudo zfs create tank/backups
 sudo zfs allow -u boomerangz \
-  canmount,create,destroy,mount,receive:append,userprop \
+  canmount,create,destroy,mount,receive:append,rename,userprop \
   tank/backups
 ```
 

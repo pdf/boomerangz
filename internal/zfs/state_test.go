@@ -149,10 +149,35 @@ func TestCreateReceiveParentArguments(t *testing.T) {
 	if err := d.CreateReceiveParent(t.Context(), "backup/root/data"); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(r.args, []string{"create", "-o", "canmount=noauto", "backup/root/data"}) {
+	if !reflect.DeepEqual(r.args, []string{"create", "-o", "canmount=noauto", "-o", "org.boomerangz:state:placeholder=on", "backup/root/data"}) {
 		t.Fatalf("args=%v", r.args)
 	}
 	if err := d.CreateReceiveParent(t.Context(), "-invalid"); err == nil {
 		t.Fatal("accepted invalid dataset")
+	}
+}
+
+func TestRenameDatasetArguments(t *testing.T) {
+	t.Parallel()
+	r := &fakeRunner{}
+	d := &Direct{runner: r}
+	if err := d.RenameDataset(t.Context(), "backup/root/hole", "backup/root/hole.boomerangz-placeholder"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(r.args, []string{"rename", "backup/root/hole", "backup/root/hole.boomerangz-placeholder"}) {
+		t.Fatalf("args=%v", r.args)
+	}
+	for _, pair := range [][2]string{
+		{"backup/a", "other/a"},
+		{"backup", "backup/a"},
+		{"backup/a", "backup"},
+		{"backup/a", "backup/a"},
+		{"backup/a", "backup/a/b"},
+		{"backup/a", "-x"},
+	} {
+		r.args = nil
+		if err := d.RenameDataset(t.Context(), pair[0], pair[1]); err == nil || r.args != nil {
+			t.Errorf("rename %s to %s accepted", pair[0], pair[1])
+		}
 	}
 }

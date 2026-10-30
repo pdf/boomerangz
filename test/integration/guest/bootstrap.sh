@@ -95,13 +95,14 @@ setup() {
 	# own encryption roots; on the destination it is what receiving a raw
 	# encrypted stream and inspecting the result requires. quota is likewise
 	# fixture-only: the exhaustion test constrains its own destination
-	# container rather than filling the pool.
+	# container rather than filling the pool. rename is what replacing a hole's
+	# placeholder with its dataset's own replica needs.
 	zfs allow -u "$service_user" bookmark,change-key,create,destroy,encryption,hold,keyformat,keylocation,load-key,mount,pbkdf2iters,refreservation,release,send,snapshot,userprop,volblocksize,volsize "$source_pool/data"
-	zfs allow -u "$service_user" canmount,compression,create,destroy,encryption,keyformat,keylocation,load-key,mount,mountpoint,pbkdf2iters,quota,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
+	zfs allow -u "$service_user" canmount,compression,create,destroy,encryption,keyformat,keylocation,load-key,mount,mountpoint,pbkdf2iters,quota,readonly,rename,receive,receive:append,snapshot,userprop "$destination_pool/data"
 	if [[ $direct_ssh_user != "$service_user" ]]; then
 		# Direct SSH runs ZFS as the remote login identity. Grant that dedicated,
 		# non-administrative account destination permissions only.
-		zfs allow -u "$direct_ssh_user" canmount,compression,create,destroy,mount,mountpoint,readonly,receive,receive:append,snapshot,userprop "$destination_pool/data"
+		zfs allow -u "$direct_ssh_user" canmount,compression,create,destroy,mount,mountpoint,readonly,rename,receive,receive:append,snapshot,userprop "$destination_pool/data"
 	fi
 
 	printf 'source_pool=%s\ndestination_pool=%s\n' "$source_pool" "$destination_pool"
