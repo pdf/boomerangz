@@ -116,11 +116,11 @@ func TestGuestLifecycle(t *testing.T) {
 	)
 
 	chain("snapshot-scope", func(t *testing.T) {
-		first, err := service.CreateSnapshot(t.Context(), root, true, now.Add(-2*time.Hour), effective)
+		first, err := service.CreateSnapshot(t.Context(), root, zfstest.Subtree(t, root), now.Add(-2*time.Hour), effective)
 		if err != nil {
 			t.Fatal(err)
 		}
-		second, err = service.CreateSnapshot(t.Context(), root, false, now, effective)
+		second, err = service.CreateSnapshot(t.Context(), root, []string{root}, now, effective)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -260,7 +260,7 @@ func TestGuestLifecycle(t *testing.T) {
 		command(t, "zfs", "create", "-u", cliRoot)
 		command(t, "zfs", "set", policy.Namespace+"enabled=on", cliRoot)
 		command(t, "zfs", "snapshot", cliRoot+"@foreign")
-		if _, err := service.CreateSnapshot(t.Context(), cliRoot, false, time.Now(), activePolicy(cliRoot)); err != nil {
+		if _, err := service.CreateSnapshot(t.Context(), cliRoot, []string{cliRoot}, time.Now(), activePolicy(cliRoot)); err != nil {
 			t.Fatal(err)
 		}
 		if err := direct.InheritProperty(t.Context(), cliRoot, lifecycle.LineageProperty); err != nil {

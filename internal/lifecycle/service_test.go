@@ -47,17 +47,10 @@ func (b *memoryBackend) SetProperties(_ context.Context, object string, values m
 	return nil
 }
 
-func (b *memoryBackend) Snapshot(_ context.Context, dataset, name string, recursive bool, values map[string]string) error {
-	b.writes = append(b.writes, "snapshot "+dataset)
-	objects := append([]zfs.Object(nil), b.state.Objects...)
-	for _, object := range objects {
-		if object.Type != "filesystem" && object.Type != "volume" {
-			continue
-		}
-		if object.Name != dataset && (!recursive || !strings.HasPrefix(object.Name, dataset+"/")) {
-			continue
-		}
-		full := object.Name + "@" + name
+func (b *memoryBackend) Snapshot(_ context.Context, datasets []string, name string, values map[string]string) error {
+	b.writes = append(b.writes, "snapshot "+strings.Join(datasets, " "))
+	for _, dataset := range datasets {
+		full := dataset + "@" + name
 		b.state.Objects = append(b.state.Objects, zfs.Object{Name: full, Type: "snapshot", GUID: uint64(100 + len(b.state.Objects))})
 		for key, value := range values {
 			b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: full, Name: key, Value: value, Source: zfs.SourceLocal})
@@ -149,27 +142,69 @@ func addTestAuthority(b *memoryBackend) {
 
 func TestServiceCreatesAndVerifiesSnapshots(t *testing.T) {
 	t.Parallel()
-	for _, recursive := range []bool{false, true} {
+	tree := []zfs.Object{
+		{Name: "tank/data", Type: "filesystem", GUID: 1},
+		{Name: "tank/data/hole", Type: "filesystem", GUID: 2},
+		{Name: "tank/data/hole/deep", Type: "volume", GUID: 3},
+	}
+	for name, test := range map[string]struct {
+		members []string
+		skipped []string
+	}{
+		"root alone": {members: []string{"tank/data"}, skipped: []string{"tank/data/hole", "tank/data/hole/deep"}},
+		"sparse":     {members: []string{"tank/data", "tank/data/hole/deep"}, skipped: []string{"tank/data/hole"}},
+		"due member": {members: []string{"tank/data/hole/deep"}, skipped: []string{"tank/data", "tank/data/hole"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			b := &memoryBackend{state: zfs.State{Objects: slices.Clone(tree)}}
+			s, err := NewService(b, testInstallation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata, err := s.CreateSnapshot(t.Context(), "tank/data", test.members, time.Now(), activeTestPolicy("tank/data"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ValidID(metadata.Lineage) || len(b.writes) != 2 {
+				t.Fatalf("metadata=%v writes=%v", metadata, b.writes)
+			}
+			for _, member := range test.members {
+				snapshots := snapshotsIn(b.state, member)
+				if len(snapshots) != 1 {
+					t.Fatalf("%s holds %d snapshots, want 1", member, len(snapshots))
+				}
+				if _, err := Ownership(snapshots[0], metadata.Lineage); err != nil {
+					t.Fatalf("%s: %v", member, err)
+				}
+			}
+			for _, excluded := range test.skipped {
+				if snapshots := snapshotsIn(b.state, excluded); len(snapshots) != 0 {
+					t.Fatalf("snapshotted %s outside the member set: %v", excluded, snapshots)
+				}
+			}
+		})
+	}
+}
+
+func TestServiceRejectsMalformedMemberSets(t *testing.T) {
+	t.Parallel()
+	for name, members := range map[string][]string{
+		"empty":    nil,
+		"outside":  {"tank/data", "tank/other"},
+		"sibling":  {"tank/database"},
+		"repeated": {"tank/data", "tank/data"},
+	} {
 		b := &memoryBackend{state: zfs.State{Objects: []zfs.Object{{Name: "tank/data", Type: "filesystem", GUID: 1}}}}
-		if recursive {
-			b.state.Objects = append(b.state.Objects, zfs.Object{Name: "tank/data/child", Type: "volume", GUID: 2})
-		}
 		s, err := NewService(b, testInstallation)
 		if err != nil {
 			t.Fatal(err)
 		}
-		metadata, err := s.CreateSnapshot(t.Context(), "tank/data", recursive, time.Now(), activeTestPolicy("tank/data"))
-		if err != nil {
-			t.Fatal(err)
+		if _, err := s.CreateSnapshot(t.Context(), "tank/data", members, time.Now(), activeTestPolicy("tank/data")); err == nil {
+			t.Errorf("%s: accepted %q", name, members)
 		}
-		if !ValidID(metadata.Lineage) || len(b.writes) != 2 {
-			t.Fatalf("metadata=%v writes=%v", metadata, b.writes)
-		}
-		if _, err := Ownership(snapshotsIn(b.state, "tank/data")[0], metadata.Lineage); err != nil {
-			t.Fatal(err)
-		}
-		if recursive && len(snapshotsIn(b.state, "tank/data/child")) != 1 {
-			t.Fatal("missing recursive child")
+		if len(b.writes) != 0 {
+			t.Errorf("%s: wrote %v", name, b.writes)
 		}
 	}
 }
@@ -178,7 +213,7 @@ func TestServiceAdoptionAndPruning(t *testing.T) {
 	t.Parallel()
 	b := backendWithSnapshots(t)
 	s, _ := NewService(b, testInstallation)
-	if _, err := s.CreateSnapshot(t.Context(), "tank/data", false, time.Now(), activeTestPolicy("tank/data")); err == nil || len(b.writes) != 0 {
+	if _, err := s.CreateSnapshot(t.Context(), "tank/data", []string{"tank/data"}, time.Now(), activeTestPolicy("tank/data")); err == nil || len(b.writes) != 0 {
 		t.Fatal("silently replaced lost lineage")
 	}
 	lineage, err := s.AdoptDataset(t.Context(), "tank/data", activeTestPolicy("tank/data"))
@@ -252,7 +287,7 @@ func TestServiceRejectsHiddenLineageAndCancelledContext(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := s.CreateSnapshot(ctx, "tank/data", false, time.Now(), activeTestPolicy("tank/data")); err == nil || len(b.writes) != 0 {
+	if _, err := s.CreateSnapshot(ctx, "tank/data", []string{"tank/data"}, time.Now(), activeTestPolicy("tank/data")); err == nil || len(b.writes) != 0 {
 		t.Fatal("mutated cancelled scope")
 	}
 }
@@ -311,5 +346,22 @@ func TestStateChangeRefusalIsTypedAndTemporary(t *testing.T) {
 	var temporary interface{ Temporary() bool }
 	if !errors.As(err, &temporary) || !temporary.Temporary() {
 		t.Fatalf("err = %v is not temporary", err)
+	}
+}
+
+func TestSubtreeNamesDatasetsBeneathRoot(t *testing.T) {
+	t.Parallel()
+	state := zfs.State{Objects: []zfs.Object{
+		{Name: "tank/data", Type: "filesystem"},
+		{Name: "tank/data@snap", Type: "snapshot"},
+		{Name: "tank/data/child", Type: "filesystem"},
+		{Name: "tank/data/child/zvol", Type: "volume"},
+		{Name: "tank/data#mark", Type: "bookmark"},
+		{Name: "tank/database", Type: "filesystem"},
+		{Name: "tank", Type: "filesystem"},
+	}}
+	want := []string{"tank/data", "tank/data/child", "tank/data/child/zvol"}
+	if got := Subtree(state, "tank/data"); !slices.Equal(got, want) {
+		t.Fatalf("Subtree = %q, want %q", got, want)
 	}
 }

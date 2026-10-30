@@ -16,7 +16,7 @@ import (
 type Backend interface {
 	InspectState(context.Context, string, bool) (zfs.State, error)
 	SetProperties(context.Context, string, map[string]string) error
-	Snapshot(context.Context, string, string, bool, map[string]string) error
+	Snapshot(context.Context, []string, string, map[string]string) error
 	DestroySnapshot(context.Context, string) error
 }
 
@@ -262,7 +262,7 @@ func (s *Service) AdoptDataset(ctx context.Context, dataset string, effective po
 // CreateSnapshot creates one snapshot or recursive snapshot set with metadata
 // attached atomically by zfs snapshot. Scheduling/cadence is the caller's concern.
 // Existing snapshot metadata requires explicit adoption if root lineage is lost.
-func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive bool, now time.Time, effective policy.Effective) (Metadata, error) {
+func (s *Service) CreateSnapshot(ctx context.Context, dataset string, members []string, now time.Time, effective policy.Effective) (Metadata, error) {
 	unlock, err := s.lock(ctx, dataset)
 	if err != nil {
 		return Metadata{}, err
@@ -274,7 +274,14 @@ func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive 
 	if err := ActiveRoot(effective, dataset); err != nil {
 		return Metadata{}, err
 	}
-	state, err := s.backend.InspectState(ctx, dataset, recursive)
+	if err := validateMembers(dataset, members); err != nil {
+		return Metadata{}, err
+	}
+	// The root's whole subtree is inspected whatever the member set is: holes
+	// and excluded descendants still have to hold no lineage of their own, and
+	// the scope-stability checks either side of creation must notice a dataset
+	// appearing anywhere beneath the root.
+	state, err := s.backend.InspectState(ctx, dataset, true)
 	if err != nil {
 		return Metadata{}, err
 	}
@@ -327,14 +334,14 @@ func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive 
 	if err != nil {
 		return Metadata{}, err
 	}
-	if err := s.unchanged(ctx, dataset, recursive, state); err != nil {
+	if err := s.unchanged(ctx, dataset, true, state); err != nil {
 		return Metadata{}, err
 	}
 	if fresh {
 		if err := s.backend.SetProperties(ctx, dataset, map[string]string{LineageProperty: lineage, OwnerProperty: s.installation}); err != nil {
 			return Metadata{}, err
 		}
-		current, err := s.backend.InspectState(ctx, dataset, recursive)
+		current, err := s.backend.InspectState(ctx, dataset, true)
 		if err != nil {
 			return Metadata{}, err
 		}
@@ -343,33 +350,65 @@ func (s *Service) CreateSnapshot(ctx context.Context, dataset string, recursive 
 			return Metadata{}, fmt.Errorf("scope changed during lineage initialization")
 		}
 	}
-	if err := s.backend.Snapshot(ctx, dataset, metadata.Name(), recursive, metadata.Properties()); err != nil {
+	if err := s.backend.Snapshot(ctx, members, metadata.Name(), metadata.Properties()); err != nil {
 		return Metadata{}, err
 	}
-	after, err := s.backend.InspectState(ctx, dataset, recursive)
+	after, err := s.backend.InspectState(ctx, dataset, true)
 	if err != nil {
 		return Metadata{}, err
 	}
 	if !reflect.DeepEqual(datasetObjects(state), datasetObjects(after)) {
 		return Metadata{}, fmt.Errorf("dataset scope changed during snapshot creation")
 	}
-	for _, object := range state.Objects {
-		if object.Type != "filesystem" && object.Type != "volume" {
-			continue
-		}
+	for _, member := range members {
 		verified := false
-		for _, snapshot := range snapshotsIn(after, object.Name) {
-			if snapshot.Name != object.Name+"@"+metadata.Name() {
+		for _, snapshot := range snapshotsIn(after, member) {
+			if snapshot.Name != member+"@"+metadata.Name() {
 				continue
 			}
 			actual, err := Ownership(snapshot, lineage)
 			verified = err == nil && actual == metadata
 		}
 		if !verified {
-			return Metadata{}, fmt.Errorf("created snapshot could not be verified on %s", object.Name)
+			return Metadata{}, fmt.Errorf("created snapshot could not be verified on %s", member)
 		}
 	}
 	return metadata, nil
+}
+
+// Subtree names root and every filesystem and volume beneath it in state, in
+// inventory order.
+func Subtree(state zfs.State, root string) []string {
+	var names []string
+	for _, object := range state.Objects {
+		if (object.Type == "filesystem" || object.Type == "volume") && (object.Name == root || strings.HasPrefix(object.Name, root+"/")) {
+			names = append(names, object.Name)
+		}
+	}
+	return names
+}
+
+// validateMembers requires a non-empty set of distinct datasets inside root's
+// subtree. The root itself need not be among them: per-member grids mean a tick
+// can be due for a descendant alone.
+func validateMembers(root string, members []string) error {
+	if len(members) == 0 {
+		return fmt.Errorf("snapshot requires at least one member")
+	}
+	seen := make(map[string]bool, len(members))
+	for _, member := range members {
+		if err := zfs.ValidateDataset(member); err != nil {
+			return err
+		}
+		if member != root && !strings.HasPrefix(member, root+"/") {
+			return fmt.Errorf("member %s is outside root %s", member, root)
+		}
+		if seen[member] {
+			return fmt.Errorf("member %s is repeated", member)
+		}
+		seen[member] = true
+	}
+	return nil
 }
 
 // Prune returns the initial preview and, when apply is true, re-plans before

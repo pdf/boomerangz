@@ -708,7 +708,12 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 		if serviceErr != nil {
 			return Outcome{State: "failed", Reason: serviceErr.Error()}
 		}
-		metadata, createErr := service.CreateSnapshot(ticket.Context(), schedule.Dataset, schedule.Policy.Send.Replicate, r.now(), schedule.Policy)
+		members, membersErr := r.snapshotMembers(schedule.Dataset, schedule.Policy.Send.Replicate)
+		if membersErr != nil {
+			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
+			return Outcome{State: "failed", Reason: membersErr.Error()}
+		}
+		metadata, createErr := service.CreateSnapshot(ticket.Context(), schedule.Dataset, members, r.now(), schedule.Policy)
 		if createErr != nil {
 			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
 			return Outcome{State: "failed", Reason: createErr.Error()}
@@ -730,6 +735,20 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 		return false
 	}
 	return true
+}
+
+// snapshotMembers names the datasets one snapshot of dataset covers: the whole
+// filesystem and volume subtree for a replication root, whose single stream
+// carries all of it, and the dataset alone otherwise.
+func (r *Runtime) snapshotMembers(dataset string, replicate bool) ([]string, error) {
+	if !replicate {
+		return []string{dataset}, nil
+	}
+	state, err := r.backend.InspectState(context.Background(), dataset, true)
+	if err != nil {
+		return nil, err
+	}
+	return lifecycle.Subtree(state, dataset), nil
 }
 
 // nextOwnedSnapshot returns when the newest owned snapshot makes the next one

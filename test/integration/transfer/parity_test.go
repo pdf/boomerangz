@@ -287,7 +287,7 @@ exec zfs "$@"
 		policy.Namespace+"remote=home",
 		policy.Namespace+"local="+container("local")+"/resume",
 		resumeSource)
-	resumeMetadata, err := snapshots.CreateSnapshot(t.Context(), resumeSource, false, time.Now().UTC(),
+	resumeMetadata, err := snapshots.CreateSnapshot(t.Context(), resumeSource, []string{resumeSource}, time.Now().UTC(),
 		request(t, parityTarget{root: container("local") + "/resume"}, resumeSource, zfs.Volume, "").Policy)
 	if err != nil {
 		t.Fatal(err)
@@ -343,7 +343,7 @@ exec zfs "$@"
 			var last lifecycle.Metadata
 
 			chain("full-bootstrap", func(t *testing.T) {
-				first, snapErr := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-4*time.Hour),
+				first, snapErr := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-4*time.Hour),
 					request(t, latestTarget, source, zfs.Filesystem, "").Policy)
 				if snapErr != nil {
 					t.Fatal(snapErr)
@@ -365,7 +365,7 @@ exec zfs "$@"
 			})
 
 			chain("incremental-modes", func(t *testing.T) {
-				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-3*time.Hour),
+				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-3*time.Hour),
 					request(t, latestTarget, source, zfs.Filesystem, "").Policy); snapErr != nil {
 					t.Fatal(snapErr)
 				}
@@ -373,7 +373,7 @@ exec zfs "$@"
 				// must carry it and -i must not.
 				command(t, "snapshot", source+"@foreign-"+suffix)
 				var snapErr error
-				last, snapErr = snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-2*time.Hour),
+				last, snapErr = snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-2*time.Hour),
 					request(t, latestTarget, source, zfs.Filesystem, "").Policy)
 				if snapErr != nil {
 					t.Fatal(snapErr)
@@ -416,7 +416,7 @@ exec zfs "$@"
 				// Advance the incremental-all target so it no longer protects
 				// last, then prune last from the source. The latest-only
 				// target must fall back to its bookmark.
-				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-time.Hour),
+				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-time.Hour),
 					request(t, allTarget, source, zfs.Filesystem, "").Policy); snapErr != nil {
 					t.Fatal(snapErr)
 				}
@@ -440,7 +440,7 @@ exec zfs "$@"
 				// failure here to the planted snapshot rather than to the
 				// transport. Previewing the identical request first, and
 				// requiring a plan back, is what does that.
-				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, false, now,
+				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now,
 					request(t, latestTarget, source, zfs.Filesystem, "").Policy); snapErr != nil {
 					t.Fatal(snapErr)
 				}
@@ -558,7 +558,7 @@ exec zfs "$@"
 							t.Helper()
 							return request(t, target, tree, zfs.Filesystem, "")
 						}
-						bootstrap, snapErr := snapshots.CreateSnapshot(t.Context(), tree, true, now,
+						bootstrap, snapErr := snapshots.CreateSnapshot(t.Context(), tree, zfstest.Subtree(t, tree), now,
 							recursiveRequest(t).Policy)
 						if snapErr != nil {
 							t.Fatal(snapErr)
@@ -590,7 +590,7 @@ exec zfs "$@"
 							}
 						}
 
-						follow, snapErr := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(time.Minute),
+						follow, snapErr := snapshots.CreateSnapshot(t.Context(), tree, zfstest.Subtree(t, tree), now.Add(time.Minute),
 							recursiveRequest(t).Policy)
 						if snapErr != nil {
 							t.Fatal(snapErr)
@@ -611,7 +611,7 @@ exec zfs "$@"
 						// planted snapshot rather than to any fault in the
 						// transport, so preview the identical request first
 						// and require a real plan back.
-						if _, snapErr := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(2*time.Minute),
+						if _, snapErr := snapshots.CreateSnapshot(t.Context(), tree, zfstest.Subtree(t, tree), now.Add(2*time.Minute),
 							recursiveRequest(t).Policy); snapErr != nil {
 							t.Fatal(snapErr)
 						}

@@ -49,7 +49,7 @@ func (b *targetBackend) InheritProperty(_ context.Context, object, property stri
 	b.states[object] = state
 	return nil
 }
-func (*targetBackend) Snapshot(context.Context, string, string, bool, map[string]string) error {
+func (*targetBackend) Snapshot(context.Context, []string, string, map[string]string) error {
 	return nil
 }
 func (b *targetBackend) DestroySnapshot(_ context.Context, snapshot string) error {

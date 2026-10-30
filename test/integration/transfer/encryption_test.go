@@ -143,7 +143,7 @@ func TestGuestEncryptedTransfer(t *testing.T) {
 		if !effective.Valid() {
 			t.Fatalf("policy invalid: %v", effective.Errors)
 		}
-		if _, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), effective); err != nil {
+		if _, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC(), effective); err != nil {
 			t.Fatal(err)
 		}
 		result, err := engine.Apply(t.Context(), transfer.Request{Source: source, DestinationRoot: destination, Policy: effective}, nil)
@@ -200,7 +200,7 @@ func TestGuestEncryptedTransfer(t *testing.T) {
 		if !effective.Send.Raw {
 			t.Fatal("raw was not in effect for the key-unavailable transfer")
 		}
-		if _, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), effective); err != nil {
+		if _, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC(), effective); err != nil {
 			t.Fatal(err)
 		}
 		result, err := engine.Apply(t.Context(), transfer.Request{Source: source, DestinationRoot: destination, Policy: effective}, nil)
@@ -216,7 +216,7 @@ func TestGuestEncryptedTransfer(t *testing.T) {
 		if plain.Send.Raw {
 			t.Fatal("raw=off was not honoured")
 		}
-		if _, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC().Add(time.Minute), plain); err != nil {
+		if _, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC().Add(time.Minute), plain); err != nil {
 			t.Fatal(err)
 		}
 		plainRequest := transfer.Request{Source: source, DestinationRoot: destination, Policy: plain}
@@ -260,7 +260,7 @@ func TestGuestEncryptedTransfer(t *testing.T) {
 		if effective.Send.Raw {
 			t.Fatal("raw was defaulted on for an unencrypted source")
 		}
-		if _, err := snapshots.CreateSnapshot(t.Context(), plainSource, false, time.Now().UTC(), effective); err != nil {
+		if _, err := snapshots.CreateSnapshot(t.Context(), plainSource, []string{plainSource}, time.Now().UTC(), effective); err != nil {
 			t.Fatal(err)
 		}
 		result, err := engine.Apply(t.Context(), transfer.Request{Source: plainSource, DestinationRoot: encryptedRoot, Policy: effective}, nil)

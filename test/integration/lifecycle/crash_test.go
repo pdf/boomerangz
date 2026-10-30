@@ -81,7 +81,7 @@ func TestGuestInterruptedLineageInitialization(t *testing.T) {
 	t.Run("resumes-the-claimed-lineage", func(t *testing.T) {
 		dataset := root + "/resumed"
 		lineage := interrupted(t, dataset, installation)
-		metadata, createErr := service.CreateSnapshot(t.Context(), dataset, false, now, activePolicy(dataset))
+		metadata, createErr := service.CreateSnapshot(t.Context(), dataset, []string{dataset}, now, activePolicy(dataset))
 		if createErr != nil {
 			t.Fatalf("a root claimed but never snapshotted refused its first snapshot: %v", createErr)
 		}
@@ -104,7 +104,7 @@ func TestGuestInterruptedLineageInitialization(t *testing.T) {
 		// snapshot under it would fork the lineage behind that installation's
 		// back, so it must be refused rather than adopted.
 		interrupted(t, dataset, "ffffffff-eeee-4ddd-8ccc-bbbbbbbbbbbb")
-		_, createErr := service.CreateSnapshot(t.Context(), dataset, false, now, activePolicy(dataset))
+		_, createErr := service.CreateSnapshot(t.Context(), dataset, []string{dataset}, now, activePolicy(dataset))
 		if createErr == nil {
 			t.Fatal("a root claimed by another installation accepted a snapshot")
 		}
@@ -138,7 +138,7 @@ func TestGuestInterruptedLineageInitialization(t *testing.T) {
 		if strings.TrimSpace(string(inheritedLineage)) != lineage {
 			t.Fatalf("the child did not inherit the parent's lineage marker: %q", inheritedLineage)
 		}
-		metadata, createErr := service.CreateSnapshot(t.Context(), child, false, now, activePolicy(child))
+		metadata, createErr := service.CreateSnapshot(t.Context(), child, []string{child}, now, activePolicy(child))
 		if createErr != nil {
 			t.Fatalf("a child under a claimed parent refused its first snapshot: %v", createErr)
 		}

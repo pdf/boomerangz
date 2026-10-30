@@ -238,17 +238,24 @@ func parseProperties(output []byte) ([]Property, error) {
 }
 
 // Snapshot creates a snapshot with validated internal properties.
-func (d *Direct) Snapshot(ctx context.Context, dataset, snapshot string, recursive bool, properties map[string]string) error {
-	if err := validateDataset(dataset); err != nil {
-		return err
+func (d *Direct) Snapshot(ctx context.Context, datasets []string, snapshot string, properties map[string]string) error {
+	if len(datasets) == 0 {
+		return fmt.Errorf("snapshot requires at least one dataset")
 	}
 	if err := validateComponent("snapshot", snapshot); err != nil {
 		return err
 	}
-	args := []string{"snapshot"}
-	if recursive {
-		args = append(args, "-r")
+	seen := make(map[string]bool, len(datasets))
+	for _, dataset := range datasets {
+		if err := validateDataset(dataset); err != nil {
+			return err
+		}
+		if seen[dataset] {
+			return fmt.Errorf("snapshot set repeats dataset %q", dataset)
+		}
+		seen[dataset] = true
 	}
+	args := []string{"snapshot"}
 	keys := make([]string, 0, len(properties))
 	for key := range properties {
 		if !strings.HasPrefix(key, propertyNamespace) {
@@ -260,7 +267,14 @@ func (d *Direct) Snapshot(ctx context.Context, dataset, snapshot string, recursi
 	for _, key := range keys {
 		args = append(args, "-o", key+"="+properties[key])
 	}
-	_, err := d.runner.Run(ctx, append(args, dataset+"@"+snapshot)...)
+	// One invocation, so the whole set shares a transaction group. Names are
+	// ordered for a reproducible command line, not because ZFS requires it.
+	names := make([]string, 0, len(datasets))
+	for _, dataset := range datasets {
+		names = append(names, dataset+"@"+snapshot)
+	}
+	sort.Strings(names)
+	_, err := d.runner.Run(ctx, append(args, names...)...)
 	return err
 }
 

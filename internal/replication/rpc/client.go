@@ -116,7 +116,7 @@ func (*clientExecutor) GetActivationProperties(context.Context) ([]zfs.Property,
 func (*clientExecutor) GetStoredProperties(context.Context, []string) ([]zfs.Property, error) {
 	return nil, fmt.Errorf("source property queries are unavailable through remote replication RPC")
 }
-func (*clientExecutor) Snapshot(context.Context, string, string, bool, map[string]string) error {
+func (*clientExecutor) Snapshot(context.Context, []string, string, map[string]string) error {
 	return fmt.Errorf("source snapshot mutations are unavailable through remote replication RPC")
 }
 func (*clientExecutor) DestroySnapshot(context.Context, string) error {

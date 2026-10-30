@@ -93,7 +93,7 @@ func TestGuestDestinationExhaustion(t *testing.T) {
 			Policy:          policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, nil),
 		}
 	}
-	metadata, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), request(t).Policy)
+	metadata, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC(), request(t).Policy)
 	if err != nil {
 		t.Fatal(err)
 	}

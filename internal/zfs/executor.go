@@ -60,7 +60,10 @@ type Executor interface {
 	CreateReceiveParent(context.Context, string) error
 	SetProperties(context.Context, string, map[string]string) error
 	InheritProperty(context.Context, string, string) error
-	Snapshot(context.Context, string, string, bool, map[string]string) error
+	// Snapshot creates one snapshot name across an explicit set of datasets in
+	// a single atomic transaction group. The set may be sparse, which `-r` cannot
+	// express, so there is no recursive variant.
+	Snapshot(context.Context, []string, string, map[string]string) error
 	DestroySnapshot(context.Context, string) error
 	Bookmark(context.Context, string, string) error
 	DestroyBookmark(context.Context, string) error

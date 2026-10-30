@@ -248,7 +248,7 @@ func TestGuestDatasetCLI(t *testing.T) {
 	var lineage string
 
 	chain("bootstrap", func(t *testing.T) {
-		metadata, err := snapshots.CreateSnapshot(t.Context(), active, true, time.Now().UTC(), effective(t))
+		metadata, err := snapshots.CreateSnapshot(t.Context(), active, zfstest.Subtree(t, active), time.Now().UTC(), effective(t))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -383,7 +383,7 @@ func TestGuestIdentityRecoverCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	effective := policy.Resolve(zfs.Dataset{Name: root, Type: zfs.Filesystem, EncryptionRoot: "-"}, nil, rows, nil)
-	if _, err := snapshots.CreateSnapshot(t.Context(), root, false, time.Now().UTC(), effective); err != nil {
+	if _, err := snapshots.CreateSnapshot(t.Context(), root, []string{root}, time.Now().UTC(), effective); err != nil {
 		t.Fatal(err)
 	}
 
@@ -461,7 +461,7 @@ func TestGuestIdentityRecoverCLI(t *testing.T) {
 		if serviceErr != nil {
 			t.Fatal(serviceErr)
 		}
-		if _, err := recovered.CreateSnapshot(t.Context(), root, false, time.Now().UTC().Add(time.Minute), effective); err != nil {
+		if _, err := recovered.CreateSnapshot(t.Context(), root, []string{root}, time.Now().UTC().Add(time.Minute), effective); err != nil {
 			t.Fatalf("recovered installation could not extend the lineage it adopted: %v", err)
 		}
 	})

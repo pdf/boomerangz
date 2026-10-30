@@ -234,7 +234,7 @@ func TestGuestDaemonPruneJob(t *testing.T) {
 	now := time.Now().UTC()
 	expired := make([]string, 0, 3)
 	for _, age := range []time.Duration{30 * time.Minute, 20 * time.Minute, 10 * time.Minute} {
-		metadata, createErr := service.CreateSnapshot(t.Context(), source, false, now.Add(-age), effective)
+		metadata, createErr := service.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-age), effective)
 		if createErr != nil {
 			t.Fatal(createErr)
 		}

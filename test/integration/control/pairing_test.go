@@ -143,7 +143,7 @@ replication_roots = [%q]
 	if err != nil {
 		t.Fatal(err)
 	}
-	metadata, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), effective)
+	metadata, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC(), effective)
 	if err != nil {
 		t.Fatal(err)
 	}

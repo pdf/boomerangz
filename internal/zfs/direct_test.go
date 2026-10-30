@@ -150,16 +150,35 @@ func TestSnapshotBuildsDeterministicArguments(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{}
 	direct := &Direct{runner: runner}
-	err := direct.Snapshot(context.Background(), "tank/data", "boomerangz-test", true, map[string]string{
+	// A sparse set: tank/data/hole is deliberately absent, which -r cannot say.
+	err := direct.Snapshot(context.Background(), []string{"tank/data/hole/deep", "tank/data"}, "boomerangz-test", map[string]string{
 		"org.boomerangz:state:snapshot": "abc",
 		"org.boomerangz:state:created":  "now",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "-r", "-o", "org.boomerangz:state:created=now", "-o", "org.boomerangz:state:snapshot=abc", "tank/data@boomerangz-test"}
+	want := []string{"snapshot", "-o", "org.boomerangz:state:created=now", "-o", "org.boomerangz:state:snapshot=abc", "tank/data/hole/deep@boomerangz-test", "tank/data@boomerangz-test"}
 	if !reflect.DeepEqual(runner.args, want) {
 		t.Fatalf("arguments = %#v, want %#v", runner.args, want)
+	}
+}
+
+func TestSnapshotRejectsMalformedSets(t *testing.T) {
+	t.Parallel()
+	for name, datasets := range map[string][]string{
+		"empty":    nil,
+		"repeated": {"tank/data", "tank/data"},
+		"invalid":  {"tank/data", "tank/data@nope"},
+	} {
+		runner := &fakeRunner{}
+		direct := &Direct{runner: runner}
+		if err := direct.Snapshot(context.Background(), datasets, "boomerangz-test", nil); err == nil {
+			t.Errorf("%s: accepted %q", name, datasets)
+		}
+		if runner.args != nil {
+			t.Errorf("%s: runner invoked with %#v", name, runner.args)
+		}
 	}
 }
 

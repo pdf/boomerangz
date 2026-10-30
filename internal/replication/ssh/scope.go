@@ -92,7 +92,7 @@ func (*scopedExecutor) GetActivationProperties(context.Context) ([]zfs.Property,
 func (*scopedExecutor) GetStoredProperties(context.Context, []string) ([]zfs.Property, error) {
 	return nil, fmt.Errorf("source operations are unavailable through a destination endpoint")
 }
-func (*scopedExecutor) Snapshot(context.Context, string, string, bool, map[string]string) error {
+func (*scopedExecutor) Snapshot(context.Context, []string, string, map[string]string) error {
 	return fmt.Errorf("source operations are unavailable through a destination endpoint")
 }
 func (*scopedExecutor) DestroySnapshot(context.Context, string) error {

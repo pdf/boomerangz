@@ -156,7 +156,7 @@ func (b *runtimeBackend) InspectState(context.Context, string, bool) (zfs.State,
 func (*runtimeBackend) SetProperties(context.Context, string, map[string]string) error { return nil }
 func (*runtimeBackend) CreateReceiveParent(context.Context, string) error              { return nil }
 func (*runtimeBackend) InheritProperty(context.Context, string, string) error          { return nil }
-func (*runtimeBackend) Snapshot(context.Context, string, string, bool, map[string]string) error {
+func (*runtimeBackend) Snapshot(context.Context, []string, string, map[string]string) error {
 	return nil
 }
 func (*runtimeBackend) DestroySnapshot(context.Context, string) error  { return nil }

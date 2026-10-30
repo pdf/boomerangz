@@ -105,7 +105,7 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 	}
 	known := map[string]struct{}{"home": {}}
 	effective := policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, known)
-	metadata, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), effective)
+	metadata, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC(), effective)
 	if err != nil {
 		t.Fatal(err)
 	}
