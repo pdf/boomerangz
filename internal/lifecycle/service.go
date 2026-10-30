@@ -411,32 +411,65 @@ func validateMembers(root string, members []string) error {
 	return nil
 }
 
+// Retention names one dataset in a root's subtree and the grid its snapshots of
+// the root's lineage are pruned against: a member's own grid, or for a dataset
+// since excluded from the root, the grid it still resolves. An excluded
+// dataset is never snapshotted again, so its newest snapshot anchors the grid
+// and what it keeps is bounded by the grid rather than destroyed outright; the
+// rest goes when the root retires.
+type Retention struct {
+	Dataset string
+	Grid    policy.Grid
+}
+
 // Prune returns the initial preview and, when apply is true, re-plans before
 // each exact deletion. Previously completed deletions are not rolled back on error.
-func (s *Service) Prune(ctx context.Context, dataset string, effective policy.Effective, apply bool) ([]Decision, error) {
-	unlock, err := s.lock(ctx, dataset)
+func (s *Service) Prune(ctx context.Context, root string, effective policy.Effective, retention Retention, apply bool) ([]Decision, error) {
+	unlock, err := s.lock(ctx, root)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
+	if err := zfs.ValidateDataset(root); err != nil {
+		return nil, err
+	}
+	if err := ActiveRoot(effective, root); err != nil {
+		return nil, err
+	}
+	dataset := retention.Dataset
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return nil, err
 	}
-	if err := ActiveRoot(effective, dataset); err != nil {
-		return nil, err
+	if dataset != root && !strings.HasPrefix(dataset, root+"/") {
+		return nil, fmt.Errorf("retention dataset %s is outside root %s", dataset, root)
 	}
-	state, err := s.backend.InspectState(ctx, dataset, false)
+	// Authority and lineage live on the root alone; the snapshots being pruned
+	// live on the retention dataset, which is the root itself or a member.
+	read := func() (zfs.State, string, error) {
+		rootState, err := s.backend.InspectState(ctx, root, false)
+		if err != nil {
+			return zfs.State{}, "", err
+		}
+		lineage, err := RootAuthority(rootState, root, s.installation)
+		if err != nil {
+			return zfs.State{}, "", err
+		}
+		state := rootState
+		if dataset != root {
+			if state, err = s.backend.InspectState(ctx, dataset, false); err != nil {
+				return zfs.State{}, "", err
+			}
+		}
+		if err := scopeReady(state, dataset); err != nil {
+			return zfs.State{}, "", err
+		}
+		return state, lineage, nil
+	}
+	state, lineage, err := read()
 	if err != nil {
 		return nil, err
 	}
-	if err := scopeReady(state, dataset); err != nil {
-		return nil, err
-	}
-	lineage, err := RootAuthority(state, dataset, s.installation)
-	if err != nil {
-		return nil, err
-	}
-	plan, err := PlanPrune(dataset, lineage, effective.Grid, snapshotsIn(state, dataset))
+	plan, err := PlanPrune(dataset, lineage, retention.Grid, snapshotsIn(state, dataset))
 	if err != nil || !apply {
 		return plan, err
 	}
@@ -444,21 +477,17 @@ func (s *Service) Prune(ctx context.Context, dataset string, effective policy.Ef
 		if !decision.Destroy {
 			continue
 		}
-		current, err := s.backend.InspectState(ctx, dataset, false)
+		current, actual, err := read()
 		if err != nil {
-			return plan, err
-		}
-		if err := scopeReady(current, dataset); err != nil {
 			return plan, err
 		}
 		if !reflect.DeepEqual(datasetObjects(state), datasetObjects(current)) {
 			return plan, fmt.Errorf("dataset identity changed before pruning")
 		}
-		actual, err := RootAuthority(current, dataset, s.installation)
-		if err != nil || actual != lineage {
+		if actual != lineage {
 			return plan, fmt.Errorf("lineage changed before pruning")
 		}
-		decisions, err := PlanPrune(dataset, lineage, effective.Grid, snapshotsIn(current, dataset))
+		decisions, err := PlanPrune(dataset, lineage, retention.Grid, snapshotsIn(current, dataset))
 		if err != nil {
 			return plan, err
 		}

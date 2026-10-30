@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -36,6 +37,8 @@ type memoryZFS struct {
 	inventory  []zfs.Dataset
 	identities map[string]zfs.DatasetIdentity
 	states     map[string]zfs.State
+	// snapshotted records each Snapshot call's datasets, in order.
+	snapshotted [][]string
 }
 
 func (m *memoryZFS) state(object string) zfs.State {
@@ -74,12 +77,20 @@ func (*memoryZFS) GetStoredProperties(context.Context, []string) ([]zfs.Property
 	return nil, nil
 }
 
-func (m *memoryZFS) InspectState(_ context.Context, dataset string, _ bool) (zfs.State, error) {
+func (m *memoryZFS) InspectState(_ context.Context, dataset string, recursive bool) (zfs.State, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state, found := m.states[dataset]
 	if !found {
 		return zfs.State{}, fmt.Errorf("dataset absent: %s", dataset)
+	}
+	if recursive {
+		state = mergeStates(state)
+		for _, name := range slices.Sorted(maps.Keys(m.states)) {
+			if strings.HasPrefix(name, dataset+"/") {
+				state = mergeStates(state, m.states[name])
+			}
+		}
 	}
 	var cloned zfs.State
 	data, err := json.Marshal(state)
@@ -87,6 +98,81 @@ func (m *memoryZFS) InspectState(_ context.Context, dataset string, _ bool) (zfs
 		err = json.Unmarshal(data, &cloned)
 	}
 	return cloned, err
+}
+
+// mergeStates combines per-dataset states into one, as a recursive inspection
+// reports a subtree.
+func mergeStates(states ...zfs.State) zfs.State {
+	var merged zfs.State
+	for _, state := range states {
+		merged.Objects = append(merged.Objects, state.Objects...)
+		merged.Properties = append(merged.Properties, state.Properties...)
+		for name, holds := range state.Holds {
+			if merged.Holds == nil {
+				merged.Holds = make(map[string][]string)
+			}
+			merged.Holds[name] = holds
+		}
+		for name, clones := range state.Clones {
+			if merged.Clones == nil {
+				merged.Clones = make(map[string][]string)
+			}
+			merged.Clones[name] = clones
+		}
+		for name, received := range state.Received {
+			if merged.Received == nil {
+				merged.Received = make(map[string]map[string]string)
+			}
+			merged.Received[name] = received
+		}
+		for name, token := range state.ResumeTokens {
+			if merged.ResumeTokens == nil {
+				merged.ResumeTokens = make(map[string]string)
+			}
+			merged.ResumeTokens[name] = token
+		}
+	}
+	return merged
+}
+
+// Snapshot creates the snapshot on every named dataset at one new txg.
+func (m *memoryZFS) Snapshot(_ context.Context, datasets []string, name string, properties map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var txg uint64
+	for _, state := range m.states {
+		for _, object := range state.Objects {
+			txg = max(txg, object.CreateTXG)
+		}
+	}
+	txg++
+	m.snapshotted = append(m.snapshotted, slices.Clone(datasets))
+	for i, dataset := range datasets {
+		if _, found := m.states[dataset]; !found {
+			return fmt.Errorf("dataset absent: %s", dataset)
+		}
+		full := dataset + "@" + name
+		m.update(dataset, func(state *zfs.State) {
+			state.Objects = append(state.Objects, zfs.Object{Name: full, Type: "snapshot", GUID: 1000 + 10*txg + uint64(i), CreateTXG: txg})
+			for key, value := range properties {
+				state.Properties = append(state.Properties, zfs.Property{Dataset: full, Name: key, Value: value, Source: zfs.SourceLocal})
+			}
+		})
+	}
+	return nil
+}
+
+func (m *memoryZFS) DestroySnapshot(_ context.Context, snapshot string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.state(snapshot).Holds[snapshot]) > 0 {
+		return fmt.Errorf("snapshot is held: %s", snapshot)
+	}
+	m.update(snapshot, func(state *zfs.State) {
+		state.Objects = slices.DeleteFunc(state.Objects, func(object zfs.Object) bool { return object.Name == snapshot })
+		state.Properties = slices.DeleteFunc(state.Properties, func(row zfs.Property) bool { return row.Dataset == snapshot })
+	})
+	return nil
 }
 
 func (m *memoryZFS) SetProperties(_ context.Context, object string, values map[string]string) error {

@@ -187,7 +187,7 @@ func TestGuestLifecycle(t *testing.T) {
 		}
 		grid, _ := policy.ParseGrid("1x5m")
 		effective.Grid = grid
-		preview, err := service.Prune(t.Context(), root, effective, true)
+		preview, err := service.Prune(t.Context(), root, effective, lifecycle.Retention{Dataset: root, Grid: effective.Grid}, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -199,7 +199,7 @@ func TestGuestLifecycle(t *testing.T) {
 		if err := direct.Release(t.Context(), "foreign-test-hold", old); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := service.Prune(t.Context(), root, effective, true); err != nil {
+		if _, err := service.Prune(t.Context(), root, effective, lifecycle.Retention{Dataset: root, Grid: effective.Grid}, true); err != nil {
 			t.Fatal(err)
 		}
 	})

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -21,7 +22,11 @@ type memoryBackend struct {
 	writes     []string
 }
 
-func (b *memoryBackend) InspectState(ctx context.Context, _ string, _ bool) (zfs.State, error) {
+// InspectState returns the part of the pool a real inspection of dataset would:
+// the dataset itself, or its whole subtree when recursive, with the snapshots,
+// bookmarks and properties that belong to those datasets. Returning the whole
+// pool would let a test pass that reads the wrong scope.
+func (b *memoryBackend) InspectState(ctx context.Context, dataset string, recursive bool) (zfs.State, error) {
 	if err := ctx.Err(); err != nil {
 		return zfs.State{}, err
 	}
@@ -34,8 +39,21 @@ func (b *memoryBackend) InspectState(ctx context.Context, _ string, _ bool) (zfs
 	if err != nil {
 		return cloned, err
 	}
-	err = json.Unmarshal(data, &cloned)
-	return cloned, err
+	if err = json.Unmarshal(data, &cloned); err != nil {
+		return cloned, err
+	}
+	inScope := func(name string) bool {
+		base, _, _ := strings.Cut(name, "@")
+		base, _, _ = strings.Cut(base, "#")
+		return base == dataset || (recursive && strings.HasPrefix(base, dataset+"/"))
+	}
+	cloned.Objects = slices.DeleteFunc(cloned.Objects, func(o zfs.Object) bool { return !inScope(o.Name) })
+	cloned.Properties = slices.DeleteFunc(cloned.Properties, func(p zfs.Property) bool { return !inScope(p.Dataset) })
+	maps.DeleteFunc(cloned.Holds, func(name string, _ []string) bool { return !inScope(name) })
+	maps.DeleteFunc(cloned.Clones, func(name string, _ []string) bool { return !inScope(name) })
+	maps.DeleteFunc(cloned.Received, func(name string, _ map[string]string) bool { return !inScope(name) })
+	maps.DeleteFunc(cloned.ResumeTokens, func(name string, _ string) bool { return !inScope(name) })
+	return cloned, nil
 }
 
 func (b *memoryBackend) SetProperties(_ context.Context, object string, values map[string]string) error {
@@ -226,11 +244,11 @@ func TestServiceAdoptionAndPruning(t *testing.T) {
 	grid, _ := policy.ParseGrid("1x5m")
 	effective := activeTestPolicy("tank/data")
 	effective.Grid = grid
-	preview, err := s.Prune(t.Context(), "tank/data", effective, false)
+	preview, err := s.Prune(t.Context(), "tank/data", effective, Retention{Dataset: "tank/data", Grid: effective.Grid}, false)
 	if err != nil || len(preview) != 3 || len(b.writes) != 1 {
 		t.Fatalf("preview: %v %v", preview, err)
 	}
-	if _, err := s.Prune(t.Context(), "tank/data", effective, true); err != nil {
+	if _, err := s.Prune(t.Context(), "tank/data", effective, Retention{Dataset: "tank/data", Grid: effective.Grid}, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(b.writes) != 3 {
@@ -270,7 +288,7 @@ func TestServiceRefusesChangedOrResumableState(t *testing.T) {
 			grid, _ := policy.ParseGrid("1x5m")
 			effective := activeTestPolicy("tank/data")
 			effective.Grid = grid
-			if _, err := s.Prune(t.Context(), "tank/data", effective, true); err == nil || len(b.writes) != 0 {
+			if _, err := s.Prune(t.Context(), "tank/data", effective, Retention{Dataset: "tank/data", Grid: effective.Grid}, true); err == nil || len(b.writes) != 0 {
 				t.Fatalf("mutation after %s: %v %v", change, b.writes, err)
 			}
 		})
@@ -363,5 +381,56 @@ func TestSubtreeNamesDatasetsBeneathRoot(t *testing.T) {
 	want := []string{"tank/data", "tank/data/child", "tank/data/child/zvol"}
 	if got := Subtree(state, "tank/data"); !slices.Equal(got, want) {
 		t.Fatalf("Subtree = %q, want %q", got, want)
+	}
+}
+
+func TestServicePrunesEachMemberAgainstItsOwnGrid(t *testing.T) {
+	t.Parallel()
+	b := &memoryBackend{state: zfs.State{Objects: []zfs.Object{
+		{Name: "tank/data", Type: "filesystem", GUID: 1},
+		{Name: "tank/data/member", Type: "filesystem", GUID: 2},
+		{Name: "tank/other", Type: "filesystem", GUID: 3},
+	}}}
+	s, err := NewService(b, testInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := activeTestPolicy("tank/data")
+	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	for i := range 3 {
+		if _, err := s.CreateSnapshot(t.Context(), "tank/data", []string{"tank/data", "tank/data/member"}, start.Add(time.Duration(i)*time.Hour), effective); err != nil {
+			t.Fatal(err)
+		}
+	}
+	short, _ := policy.ParseGrid("1x5m")
+	long, _ := policy.ParseGrid("12x1h")
+	// The member carries no lineage of its own; its snapshots are proven
+	// against the root's, and only its own grid decides what it keeps.
+	decisions, err := s.Prune(t.Context(), "tank/data", effective, Retention{Dataset: "tank/data/member", Grid: short}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destroyed := 0
+	for _, decision := range decisions {
+		if !strings.HasPrefix(decision.Snapshot, "tank/data/member@") {
+			t.Fatalf("pruned outside the member: %v", decision)
+		}
+		if decision.Destroy {
+			destroyed++
+		}
+	}
+	if destroyed != 2 || len(snapshotsIn(b.state, "tank/data/member")) != 1 {
+		t.Fatalf("member kept %d snapshots after destroying %d", len(snapshotsIn(b.state, "tank/data/member")), destroyed)
+	}
+	if _, err := s.Prune(t.Context(), "tank/data", effective, Retention{Dataset: "tank/data", Grid: long}, true); err != nil {
+		t.Fatal(err)
+	}
+	if kept := len(snapshotsIn(b.state, "tank/data")); kept != 3 {
+		t.Fatalf("the root's longer grid kept %d of 3", kept)
+	}
+	for _, outside := range []string{"tank/other", "tank/database"} {
+		if _, err := s.Prune(t.Context(), "tank/data", effective, Retention{Dataset: outside, Grid: short}, true); err == nil {
+			t.Fatalf("pruned %s outside the root", outside)
+		}
 	}
 }

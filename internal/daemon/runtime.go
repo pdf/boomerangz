@@ -513,10 +513,10 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 		}
 		if changed[name] {
 			entry, _ := generation.Inspect(name)
-			deadline, _, deadlineErr := r.nextOwnedSnapshot(name, entry.Policy.Grid.Cadence())
-			if deadlineErr != nil {
-				r.logger.Error("inspect existing transfer work", "dataset", name, "error", deadlineErr)
-			} else if !deadline.IsZero() {
+			owned, ownedErr := r.hasOwnedSnapshot(name)
+			if ownedErr != nil {
+				r.logger.Error("inspect existing transfer work", "dataset", name, "error", ownedErr)
+			} else if owned {
 				r.enqueueTransfers(name, entry.Policy, "")
 			}
 		}
@@ -695,36 +695,57 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 		if startErr := ticket.Start(); startErr != nil {
 			return blockedOrCancelled(startErr)
 		}
-		deadline, latest, deadlineErr := r.nextOwnedSnapshot(schedule.Dataset, schedule.Policy.Grid.Cadence())
+		satisfied, latest, deadlineErr := r.satisfiedMembers(schedule)
 		if deadlineErr != nil {
 			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
 			return Outcome{State: "failed", Reason: deadlineErr.Error()}
 		}
-		if !schedule.Force && !deadline.IsZero() && r.now().Before(deadline) {
-			r.scheduler.Retry(schedule.Dataset, deadline)
+		var due []string
+		for _, name := range schedule.Due {
+			if _, deferred := satisfied[name]; !deferred {
+				due = append(due, name)
+			}
+		}
+		if len(due) == 0 {
+			r.scheduler.Complete(schedule.Dataset, nil, r.now(), satisfied)
 			return Outcome{State: "scheduled", Reason: "existing owned snapshot sets the next deadline", Identity: daemonstate.Identity{Snapshot: latest}}
 		}
 		service, serviceErr := r.service()
 		if serviceErr != nil {
 			return Outcome{State: "failed", Reason: serviceErr.Error()}
 		}
-		members, membersErr := r.snapshotMembers(schedule.Dataset, schedule.Policy.Send.Replicate)
-		if membersErr != nil {
-			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
-			return Outcome{State: "failed", Reason: membersErr.Error()}
+		retentions := memberRetentions(schedule, due)
+		if schedule.Policy.Send.Replicate {
+			// One -R stream needs the snapshot on every dataset ZFS holds
+			// beneath the root now, including any created since discovery.
+			subtree, subtreeErr := r.subtree(schedule.Dataset)
+			if subtreeErr != nil {
+				r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
+				return Outcome{State: "failed", Reason: subtreeErr.Error()}
+			}
+			due, retentions = subtree, nil
+			for _, name := range subtree {
+				retentions = append(retentions, lifecycle.Retention{Dataset: name, Grid: schedule.Policy.Grid})
+			}
 		}
-		metadata, createErr := service.CreateSnapshot(ticket.Context(), schedule.Dataset, members, r.now(), schedule.Policy)
+		metadata, createErr := service.CreateSnapshot(ticket.Context(), schedule.Dataset, due, r.now(), schedule.Policy)
 		if createErr != nil {
 			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
 			return Outcome{State: "failed", Reason: createErr.Error()}
 		}
-		completed := r.now()
-		r.scheduler.Complete(schedule.Dataset, completed)
-		created := daemonstate.Identity{Snapshot: schedule.Dataset + "@" + metadata.Name()}
+		r.scheduler.Complete(schedule.Dataset, due, r.now(), satisfied)
+		created := daemonstate.Identity{Snapshot: due[0] + "@" + metadata.Name()}
+		if slices.Contains(due, schedule.Dataset) {
+			created.Snapshot = schedule.Dataset + "@" + metadata.Name()
+			// Datasets excluded from the root are never snapshotted again, so
+			// their remaining snapshots only need pruning on the root's own
+			// cadence, not on every member's.
+			retentions = append(retentions, r.excludedRetentions(schedule.Dataset)...)
+		}
 		if !r.enqueueTransfers(schedule.Dataset, schedule.Policy, created.Snapshot) {
 			return Outcome{State: "failed", Reason: "new snapshot could not be protected for every transfer target", Identity: created}
 		}
-		r.enqueuePrune(schedule.Dataset, schedule.Policy)
+		r.enqueuePrune(schedule.Dataset, schedule.Policy, retentions)
 		return Outcome{State: "succeeded", Identity: created}
 	}
 	if added, submitErr := r.management.Submit(job); submitErr != nil || !added {
@@ -737,46 +758,133 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 	return true
 }
 
-// snapshotMembers names the datasets one snapshot of dataset covers: the whole
-// filesystem and volume subtree for a replication root, whose single stream
-// carries all of it, and the dataset alone otherwise.
-func (r *Runtime) snapshotMembers(dataset string, replicate bool) ([]string, error) {
-	if !replicate {
-		return []string{dataset}, nil
-	}
-	state, err := r.backend.InspectState(context.Background(), dataset, true)
+// subtree names the root and every filesystem and volume ZFS holds beneath it.
+func (r *Runtime) subtree(root string) ([]string, error) {
+	state, err := r.backend.InspectState(context.Background(), root, true)
 	if err != nil {
 		return nil, err
 	}
-	return lifecycle.Subtree(state, dataset), nil
+	return lifecycle.Subtree(state, root), nil
 }
 
-// nextOwnedSnapshot returns when the newest owned snapshot makes the next one
-// due, and that snapshot's name; both are zero when there is none.
-func (r *Runtime) nextOwnedSnapshot(dataset string, cadence time.Duration) (time.Time, string, error) {
-	state, err := r.backend.InspectState(context.Background(), dataset, false)
-	if err != nil {
-		return time.Time{}, "", err
-	}
-	lineage, authoritative := rootLineage(state, dataset, r.installation)
-	if !authoritative {
-		// A fresh root has no authority until its first successful snapshot.
-		return time.Time{}, "", nil
-	}
-	var (
-		latest time.Time
-		name   string
-	)
-	for _, snapshot := range lifecycle.Snapshots(state, dataset) {
-		metadata, ownershipErr := lifecycle.Ownership(snapshot, lineage)
-		if ownershipErr == nil && metadata.Created.After(latest) {
-			latest, name = metadata.Created, snapshot.Name
+// memberRetentions pairs each named member with its own grid.
+func memberRetentions(schedule Schedule, names []string) []lifecycle.Retention {
+	var retentions []lifecycle.Retention
+	for _, member := range schedule.Members {
+		if slices.Contains(names, member.Dataset) {
+			retentions = append(retentions, member.Retention())
 		}
 	}
-	if latest.IsZero() {
-		return time.Time{}, "", nil
+	return retentions
+}
+
+// excludedRetentions names the datasets inside root that are not members, with
+// the grid each still resolves. They may hold snapshots of the root's lineage
+// from before they were excluded.
+func (r *Runtime) excludedRetentions(root string) []lifecycle.Retention {
+	r.mu.Lock()
+	generation := r.generation
+	r.mu.Unlock()
+	if generation == nil {
+		return nil
 	}
-	return latest.Add(cadence), name, nil
+	var retentions []lifecycle.Retention
+	for _, entry := range generation.Entries() {
+		if entry.CoveredBy == root && !entry.Member && entry.Inspected && entry.Policy.Grid.Cadence() > 0 {
+			retentions = append(retentions, lifecycle.Retention{Dataset: entry.Dataset.Name, Grid: entry.Policy.Grid})
+		}
+	}
+	return retentions
+}
+
+// satisfiedMembers maps each due member whose newest owned snapshot already
+// covers its own cadence to the deadline that snapshot sets, and names the
+// newest owned snapshot of the root itself, or failing that of any member.
+// Deadlines live only in memory, so this is what stops a restart from
+// snapshotting every member at once. A forced schedule satisfies nothing.
+func (r *Runtime) satisfiedMembers(schedule Schedule) (map[string]time.Time, string, error) {
+	if schedule.Force {
+		return nil, "", nil
+	}
+	state, err := r.backend.InspectState(context.Background(), schedule.Dataset, true)
+	if err != nil {
+		return nil, "", err
+	}
+	lineage, authoritative := rootLineage(state, schedule.Dataset, r.installation)
+	if !authoritative {
+		// A fresh root has no authority until its first successful snapshot.
+		return nil, "", nil
+	}
+	newest := func(dataset string) (time.Time, string) {
+		var (
+			latest time.Time
+			name   string
+		)
+		for _, snapshot := range lifecycle.Snapshots(state, dataset) {
+			metadata, ownershipErr := lifecycle.Ownership(snapshot, lineage)
+			if ownershipErr == nil && metadata.Created.After(latest) {
+				latest, name = metadata.Created, snapshot.Name
+			}
+		}
+		return latest, name
+	}
+	now := r.now()
+	satisfied := make(map[string]time.Time)
+	var (
+		rootName, anyName string
+		anyCreated        time.Time
+	)
+	for _, member := range schedule.Members {
+		created, name := newest(member.Dataset)
+		if created.IsZero() {
+			continue
+		}
+		if member.Dataset == schedule.Dataset {
+			rootName = name
+		}
+		if created.After(anyCreated) {
+			anyCreated, anyName = created, name
+		}
+		if deadline := created.Add(member.Grid.Cadence()); now.Before(deadline) {
+			satisfied[member.Dataset] = deadline
+		}
+	}
+	if schedule.Policy.Send.Replicate {
+		// One cadence, the root's, governs the whole -R subtree.
+		if deadline, found := satisfied[schedule.Dataset]; found {
+			for _, name := range schedule.Due {
+				satisfied[name] = deadline
+			}
+		} else {
+			clear(satisfied)
+		}
+	}
+	if rootName == "" {
+		rootName = anyName
+	}
+	return satisfied, rootName, nil
+}
+
+// hasOwnedSnapshot reports whether anything in the root's subtree already holds
+// a snapshot of its lineage, which is what makes catch-up transfer work
+// meaningful.
+func (r *Runtime) hasOwnedSnapshot(root string) (bool, error) {
+	state, err := r.backend.InspectState(context.Background(), root, true)
+	if err != nil {
+		return false, err
+	}
+	lineage, authoritative := rootLineage(state, root, r.installation)
+	if !authoritative {
+		return false, nil
+	}
+	for _, dataset := range lifecycle.Subtree(state, root) {
+		for _, snapshot := range lifecycle.Snapshots(state, dataset) {
+			if _, ownershipErr := lifecycle.Ownership(snapshot, lineage); ownershipErr == nil {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func rootLineage(state zfs.State, dataset, installation string) (string, bool) {
@@ -784,7 +892,13 @@ func rootLineage(state zfs.State, dataset, installation string) (string, bool) {
 	return lineage, err == nil
 }
 
-func (r *Runtime) enqueuePrune(dataset string, effective policy.Effective) {
+// enqueuePrune prunes the named datasets of one root in a single job, each
+// against its own grid. They share the root's lock, so one job rather than one
+// per member avoids the root contending with itself.
+func (r *Runtime) enqueuePrune(dataset string, effective policy.Effective, retentions []lifecycle.Retention) {
+	if len(retentions) == 0 {
+		return
+	}
 	ticket, err := r.gate.Queue(context.Background(), dataset, lifecycle.Management)
 	if err != nil {
 		return
@@ -799,14 +913,18 @@ func (r *Runtime) enqueuePrune(dataset string, effective policy.Effective) {
 		if serviceErr != nil {
 			return Outcome{State: "failed", Reason: serviceErr.Error()}
 		}
-		decisions, pruneErr := service.Prune(ticket.Context(), dataset, effective, true)
-		if pruneErr != nil {
-			return Outcome{State: "failed", Reason: pruneErr.Error()}
-		}
 		var destroyed []string
-		for _, decision := range decisions {
-			if decision.Destroy {
-				destroyed = append(destroyed, decision.Snapshot)
+		for _, retention := range retentions {
+			decisions, pruneErr := service.Prune(ticket.Context(), dataset, effective, retention, true)
+			if pruneErr != nil {
+				// A failed pass returns its plan, not what it destroyed, so
+				// only completed passes are reported.
+				return Outcome{State: "failed", Reason: pruneErr.Error(), Identity: daemonstate.DestroyedIdentity(destroyed)}
+			}
+			for _, decision := range decisions {
+				if decision.Destroy {
+					destroyed = append(destroyed, decision.Snapshot)
+				}
 			}
 		}
 		return Outcome{State: "succeeded", Identity: daemonstate.DestroyedIdentity(destroyed)}
@@ -817,7 +935,9 @@ func (r *Runtime) enqueuePrune(dataset string, effective policy.Effective) {
 }
 
 func (r *Runtime) latestPending(dataset, snapshot string) (transfer.PendingSnapshot, error) {
-	state, err := r.backend.InspectState(context.Background(), dataset, false)
+	// A tick may snapshot a member without the root, so the snapshot can sit
+	// anywhere in the root's subtree.
+	state, err := r.backend.InspectState(context.Background(), dataset, true)
 	if err != nil {
 		return transfer.PendingSnapshot{}, err
 	}

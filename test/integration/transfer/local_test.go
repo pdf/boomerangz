@@ -215,7 +215,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := snapshots.Prune(t.Context(), retentionSource, retentionPolicy, true); err != nil {
+		if _, err := snapshots.Prune(t.Context(), retentionSource, retentionPolicy, lifecycle.Retention{Dataset: retentionSource, Grid: retentionPolicy.Grid}, true); err != nil {
 			t.Fatal(err)
 		}
 		if err := exec.CommandContext(t.Context(), "zfs", "list", "-H", "-t", "snapshot", retentionSource+"@"+retentionBase.Name()).Run(); err != nil {
@@ -232,7 +232,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 		if len(retentionState.Holds[retentionSource+"@"+retentionBase.Name()]) != 0 || len(retentionState.Holds[retentionSource+"@"+retentionNext.Name()]) == 0 {
 			t.Fatalf("incremental-all hold did not rotate: %v", retentionState.Holds)
 		}
-		if _, err := snapshots.Prune(t.Context(), retentionSource, retentionPolicy, true); err != nil {
+		if _, err := snapshots.Prune(t.Context(), retentionSource, retentionPolicy, lifecycle.Retention{Dataset: retentionSource, Grid: retentionPolicy.Grid}, true); err != nil {
 			t.Fatal(err)
 		}
 		if err := exec.CommandContext(t.Context(), "zfs", "list", "-H", "-t", "snapshot", retentionSource+"@"+retentionBase.Name()).Run(); err == nil {
