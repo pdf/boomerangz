@@ -45,6 +45,10 @@ jobs:
       matrix:
         target:
           - cachyos
+          # The current Ubuntu LTS and interim releases; each config.sh pins
+          # its image.
+          - ubuntu-lts
+          - ubuntu-current
         # Each shard runs whole stages, unfiltered, in a guest of its own, so
         # the suite takes as long as its longest shard. Together the shards
         # are every stage; TestCIShardsCoverEveryStage checks that.

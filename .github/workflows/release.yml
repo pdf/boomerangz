@@ -76,9 +76,19 @@ jobs:
           retention-days: 1
 
   validate:
+    name: Validate packages (${{ matrix.target }})
     needs: draft
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Arch packages are validated on CachyOS; the .deb, installed from an
+        # apt repository built as publish-apt builds it, on each Ubuntu.
+        target:
+          - cachyos
+          - ubuntu-lts
+          - ubuntu-current
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -105,12 +115,12 @@ jobs:
       - name: Validate release packages in the supported guest
         env:
           BOOMERANGZ_RELEASE_DIR: ${{ github.workspace }}/dist
-        run: make integration-package-test INTEGRATION_TARGET=cachyos
+        run: make integration-package-test INTEGRATION_TARGET=${{ matrix.target }}
       - name: Publish diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: release-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          name: release-validation-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/boomerangz-integration/*/diagnostics
           if-no-files-found: warn
           retention-days: 7
@@ -155,3 +165,76 @@ jobs:
           commit_email: ${{ vars.AUR_COMMIT_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           commit_message: Release ${{ github.ref_name }}
+
+  # The apt repository lives beside the documentation on the gh-pages branch,
+  # served at https://boomerangz.org/apt, so it shares the documentation
+  # workflow's concurrency group: both push to that branch.
+  publish-apt:
+    if: ${{ vars.PUBLISH_APT == 'true' }}
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: documentation-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # The repository carries one release, so only the newest final release
+      # replaces it: a prerelease, or a patch to an older line, would roll
+      # every user back.
+      - name: Decide whether this release is the newest
+        id: newest
+        run: |
+          set -euo pipefail
+          newest=$(git tag --list 'v*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          if [[ $GITHUB_REF_NAME == "$newest" ]]; then
+            echo 'publish=true' >>"$GITHUB_OUTPUT"
+          else
+            printf 'Not publishing %s to apt: the newest release is %s.\n' "$GITHUB_REF_NAME" "$newest"
+          fi
+      - uses: actions/download-artifact@v8
+        if: steps.newest.outputs.publish == 'true'
+        with:
+          name: release-dist
+          path: dist
+      - name: Install repository tools
+        if: steps.newest.outputs.publish == 'true'
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends apt-utils
+      - name: Import the repository signing key
+        id: key
+        if: steps.newest.outputs.publish == 'true'
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME=$RUNNER_TEMP/gnupg
+          install -d -m 0700 "$GNUPGHOME"
+          printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --import
+          fingerprint=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+          [[ -n $fingerprint ]]
+          echo "GNUPGHOME=$GNUPGHOME" >>"$GITHUB_ENV"
+          echo "fingerprint=$fingerprint" >>"$GITHUB_OUTPUT"
+      - name: Build the apt repository on gh-pages
+        if: steps.newest.outputs.publish == 'true'
+        env:
+          KEY: ${{ steps.key.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+          site=$RUNNER_TEMP/boomerangz-site
+          git fetch origin gh-pages:refs/remotes/origin/gh-pages
+          git worktree add -B gh-pages "$site" origin/gh-pages
+          bash .github/scripts/apt-repository.sh "$site/apt" "$KEY" dist/*.deb
+          git -C "$site" config user.name github-actions
+          git -C "$site" config user.email github-actions@github.com
+          git -C "$site" add --all apt
+          if git -C "$site" diff --cached --quiet; then
+            exit 0
+          fi
+          git -C "$site" commit -m "apt: publish $GITHUB_REF_NAME"
+          git -C "$site" push origin HEAD:gh-pages
