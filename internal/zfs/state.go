@@ -126,20 +126,46 @@ func (d *Direct) inspectState(ctx context.Context, dataset string, recursive boo
 			snapshots = append(snapshots, object.Name)
 		}
 	}
-	// Fixed ownership keys also reveal hidden received metadata omitted by all.
-	queries := []string{"all", propertyNamespace + "state:lineage," + propertyNamespace + "state:snapshot"}
+	// The received column is most of what a property query costs: ZFS reads
+	// it per object and per property, which made a query for all of them
+	// several times slower than the same query without it. Every property is
+	// therefore read without it, and the received column is asked only for
+	// this namespace, the only one it is read for: the keys the first query
+	// listed for some object in the chunk, plus the fixed ownership keys,
+	// which also reveal hidden received metadata that all omits. A row of
+	// the second query is kept only for a fixed key or for a key the first
+	// query listed for that object, so the state is what one query for all
+	// with the received column would have produced.
+	fixed := []string{propertyNamespace + "state:lineage", propertyNamespace + "state:snapshot"}
 	rows := make(map[string][][][]string, len(names))
+	add := func(query int, f []string) {
+		if rows[f[0]] == nil {
+			rows[f[0]] = make([][][]string, 2)
+		}
+		rows[f[0]][query] = append(rows[f[0]][query], f)
+	}
 	for _, chunk := range d.inspectionChunks(names) {
-		for query, keys := range queries {
-			err := d.readRows(ctx, chunk, 5, "property outside exact object query", func(f []string) {
-				if rows[f[0]] == nil {
-					rows[f[0]] = make([][][]string, len(queries))
-				}
-				rows[f[0]][query] = append(rows[f[0]][query], f)
-			}, append([]string{"get", "-H", "-p", "-o", "name,property,value,received,source", keys}, chunk...)...)
-			if err != nil {
-				return State{}, err
+		listed := make(map[string]bool)
+		keys := slices.Clone(fixed)
+		err := d.readRows(ctx, chunk, 4, "property outside exact object query", func(f []string) {
+			add(0, []string{f[0], f[1], f[2], "-", f[3]})
+			if strings.HasPrefix(f[1], propertyNamespace) {
+				listed[f[0]+"\x00"+f[1]] = true
+				keys = append(keys, f[1])
 			}
+		}, append([]string{"get", "-H", "-p", "-o", "name,property,value,source", "all"}, chunk...)...)
+		if err != nil {
+			return State{}, err
+		}
+		slices.Sort(keys)
+		keys = slices.Compact(keys)
+		err = d.readRows(ctx, chunk, 5, "property outside exact object query", func(f []string) {
+			if slices.Contains(fixed, f[1]) || listed[f[0]+"\x00"+f[1]] {
+				add(1, f)
+			}
+		}, append([]string{"get", "-H", "-p", "-o", "name,property,value,received,source", strings.Join(keys, ",")}, chunk...)...)
+		if err != nil {
+			return State{}, err
 		}
 	}
 	for _, name := range names {
