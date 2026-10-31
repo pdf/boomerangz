@@ -217,10 +217,7 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 		t.Fatal(err)
 	}
 	waiter := statuswait.New(t, runtime)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- runtime.Run(ctx) }()
+	stop := serveDaemon(t, runtime)
 	// Each wait is for the outcome the behaviour is about, which names what it
 	// acted on. The pool is then read once and checked against those names,
 	// as far as the runs recorded before the read decide them.
@@ -327,15 +324,7 @@ func TestGuestDaemonSchedulingAndRetirement(t *testing.T) {
 	if remaining := lifecycle.Snapshots(childState, child); len(remaining) != 0 {
 		t.Fatalf("the member kept snapshots after its root retired: %v", remaining)
 	}
-	cancel()
-	select {
-	case runErr := <-done:
-		if runErr != nil {
-			t.Fatal(runErr)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("daemon did not shut down after guest test")
-	}
+	stop(t)
 	t.Logf("verified root scheduling, member exclusion, and subtree retirement on %s", source)
 }
 
@@ -402,9 +391,6 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	done := make(chan error, 1)
 	job := func(dataset string) string { return "local:" + dataset + ":" + target }
 	waiter := statuswait.New(t, runtime)
 	// awaitSibling holds each root's send, from its start, until the other
@@ -447,7 +433,7 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	// waits for the other to be held back on the lock. The gate is in place
 	// before the daemon runs, so no send passes it unobserved.
 	observed.setGate(awaitSibling(0, true))
-	go func() { done <- runtime.Run(ctx) }()
+	stop := serveDaemon(t, runtime)
 
 	// Each phase names the snapshots it transfers: the ones its snapshot jobs
 	// report creating. Its sends and transfer outcomes are those that carry
@@ -511,15 +497,7 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 		t.Fatalf("triggering a member did not name its root: %v", err)
 	}
 
-	cancel()
-	select {
-	case runErr := <-done:
-		if runErr != nil {
-			t.Fatal(runErr)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("daemon did not shut down after concurrency test")
-	}
+	stop(t)
 	t.Log("verified conservative destination setup, concurrent sibling roots, and members sent within their root's job")
 }
 
@@ -587,10 +565,7 @@ func TestGuestRemoteOutageReconnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	waiter := statuswait.New(t, runtime)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- runtime.Run(ctx) }()
+	stop := serveDaemon(t, runtime)
 	remoteJob := "remote:" + source + ":home"
 	snapshotJob := "snapshot:" + source
 	failure, afterFailure := waiter.Outcome(t, 30*time.Second, 0, remoteJob, "waiting-retry")
@@ -666,15 +641,7 @@ func TestGuestRemoteOutageReconnection(t *testing.T) {
 	if destinations := runtime.ControlStatus().Destinations; len(destinations) != 1 || destinations[0].Destination != "home" || !destinations[0].Remote || len(destinations[0].Missing) != 0 || destinations[0].Error != "" {
 		t.Fatalf("destination permissions after reconnecting = %+v, want home checked with nothing missing", destinations)
 	}
-	cancel()
-	select {
-	case runErr := <-done:
-		if runErr != nil {
-			t.Fatal(runErr)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("daemon did not stop after remote outage test")
-	}
+	stop(t)
 	t.Logf("remote outage retried and verified %s via %s", source, success.Target)
 }
 
@@ -728,10 +695,7 @@ func TestGuestDaemonReportsMissingDestinationPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	waiter := statuswait.New(t, runtime)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- runtime.Run(ctx) }()
+	stop := serveDaemon(t, runtime)
 
 	// The cursor createdSnapshot returns is past the snapshot job's
 	// succeeded; the wait reads that transition to learn the snapshot.
@@ -748,13 +712,5 @@ func TestGuestDaemonReportsMissingDestinationPermissions(t *testing.T) {
 	if got.Destination != container || got.Remote || got.Dataset != container || got.Account != "boomerangz" || !slices.Equal(got.Missing, []string{"rename"}) || got.Error != "" {
 		t.Fatalf("destination permissions = %+v, want rename missing for boomerangz on %s", got, container)
 	}
-	cancel()
-	select {
-	case runErr := <-done:
-		if runErr != nil {
-			t.Fatal(runErr)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("daemon did not stop")
-	}
+	stop(t)
 }
