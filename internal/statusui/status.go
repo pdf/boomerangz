@@ -2,6 +2,7 @@
 package statusui
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -360,4 +361,26 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) 
 		}
 	}
 	return nil
+}
+
+// Redraw replaces the previous frame on a terminal with frame in a single
+// write. Clearing the screen first and then writing the frame line by line
+// lets the terminal paint the blank screen between the two, which flickers
+// on every update. Instead the cursor returns home and each line is erased
+// as it is overwritten, then whatever the previous frame left below this one
+// is erased. Each line is erased before it is written rather than after,
+// because a line cut to exactly the terminal width leaves the cursor on its
+// last column, where erasing to the end of the line would remove that
+// column's character.
+func Redraw(writer io.Writer, frame []byte) error {
+	var screen bytes.Buffer
+	screen.Grow(len(frame) + 64)
+	screen.WriteString("\x1b[H")
+	for line := range bytes.Lines(frame) {
+		screen.WriteString("\x1b[2K")
+		screen.Write(line)
+	}
+	screen.WriteString("\x1b[J")
+	_, err := writer.Write(screen.Bytes())
+	return err
 }

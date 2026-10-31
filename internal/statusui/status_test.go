@@ -199,3 +199,31 @@ func TestTerminalAndJSONReportDestinationPermissionWarnings(t *testing.T) {
 		t.Fatalf("JSON before any check = %s", structured.String())
 	}
 }
+
+func TestRedrawOverwritesTheFrameInOneWrite(t *testing.T) {
+	t.Parallel()
+	var writes countingWriter
+	if err := Redraw(&writes, []byte("first\nsecond\n")); err != nil {
+		t.Fatal(err)
+	}
+	if writes.count != 1 {
+		t.Fatalf("writes=%d, want one write per frame", writes.count)
+	}
+	got := writes.String()
+	if strings.Contains(got, "\x1b[2J") {
+		t.Fatalf("frame clears the screen before drawing: %q", got)
+	}
+	if want := "\x1b[H\x1b[2Kfirst\n\x1b[2Ksecond\n\x1b[J"; got != want {
+		t.Fatalf("frame=%q, want %q", got, want)
+	}
+}
+
+type countingWriter struct {
+	bytes.Buffer
+	count int
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.count++
+	return w.Buffer.Write(p)
+}

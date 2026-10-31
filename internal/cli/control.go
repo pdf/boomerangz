@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -71,6 +72,7 @@ func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential
 		return err
 	}
 	tail := statusui.NewTail(watchTailLength)
+	var frame bytes.Buffer
 	for {
 		// A watch that fell behind ends with an error here rather than
 		// continuing with a gap, and the command exits non-zero.
@@ -83,14 +85,15 @@ func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential
 		}
 		if interactive {
 			tail.Add(response.GetTransitions())
-			if _, err := fmt.Fprint(out, "\x1b[H\x1b[2J"); err != nil {
-				return err
-			}
 			_, width = terminalWidth(out)
-			if err := statusui.Terminal(out, response.GetStatus(), width); err != nil {
+			frame.Reset()
+			if err := statusui.Terminal(&frame, response.GetStatus(), width); err != nil {
 				return err
 			}
-			if err := tail.Terminal(out, width); err != nil {
+			if err := tail.Terminal(&frame, width); err != nil {
+				return err
+			}
+			if err := statusui.Redraw(out, frame.Bytes()); err != nil {
 				return err
 			}
 		} else if err := statusui.WatchJSON(out, response); err != nil {
