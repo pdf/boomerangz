@@ -60,13 +60,17 @@ jobs:
           cache: true
       # The harness reuses a provisioned guest image for up to a week; the
       # cache carries it between runs, and the week in the key retires it.
-      - name: Name the guest image cache week
-        id: image-week
-        run: echo "week=$(date -u +%G-%V)" >>"$GITHUB_OUTPUT"
+      # The image only boots on hosts of the CPU class it was provisioned on,
+      # and runners vary, so the key is the harness's own image key.
+      - name: Name the guest image cache
+        id: image
+        run: |
+          set -euo pipefail
+          echo "key=integration-image-${{ matrix.target }}-$(test/integration/host/image-key.sh ${{ matrix.target }})-$(date -u +%G-%V)" >>"$GITHUB_OUTPUT"
       - uses: actions/cache@v6
         with:
           path: ~/.cache/boomerangz-integration
-          key: integration-image-${{ matrix.target }}-${{ hashFiles(format('test/integration/targets/{0}/config.sh', matrix.target), format('test/integration/targets/{0}/provision.sh', matrix.target)) }}-${{ steps.image-week.outputs.week }}
+          key: ${{ steps.image.outputs.key }}
       - name: Install host virtualization tools
         run: |
           set -euxo pipefail
