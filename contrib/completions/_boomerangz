@@ -18,6 +18,7 @@ _boomerangz_options() {
     'daemon ') reply=(-h --help --config --config-dir) ;;
     'status ') reply=(-h --help --config --config-dir --credential -w --watch --json) ;;
     'trigger ') reply=(-h --help --config --config-dir --credential) ;;
+    'migrate ') reply=(-h --help --config --config-dir --all --apply) ;;
     'version ') reply=(-h --help --json) ;;
     'pairing create') reply=(-h --help --config --config-dir --listener --client-cert --client-key --scope --expires-in) ;;
     'pairing import'|'pairing list'|'pairing revoke') reply=(-h --help --config --config-dir) ;;
@@ -146,14 +147,14 @@ _boomerangz_candidates() {
   fi
 
   if [[ -z $command ]]; then
-    reply=(config daemon dataset identity pairing status trigger version)
+    reply=(config daemon dataset identity migrate pairing status trigger version)
   elif [[ -z $subcommand ]]; then
     case $command in
       config) reply=(check reload show) ;;
       dataset) reply=(abort-receive adopt clean inspect list reseed) ;;
       identity) reply=(recover) ;;
       pairing) reply=(create import list revoke) ;;
-      trigger) _boomerangz_datasets ;;
+      trigger|migrate) _boomerangz_datasets ;;
     esac
   else
     case "$command $subcommand" in

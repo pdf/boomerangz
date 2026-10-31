@@ -32,6 +32,7 @@ type commandLine struct {
 	SSHShell sshShellCommand `cmd:"" name:"ssh-shell" hidden:"" help:"Serve the restricted replication protocol over SSH."`
 	Dataset  datasetCommand  `cmd:"" help:"Inspect and administer dataset lifecycle."`
 	Identity identityCommand `cmd:"" help:"Inspect and recover installation identity."`
+	Migrate  migrateCommand  `cmd:"" help:"Preview migration of source roots' state to the format this build reads."`
 }
 
 type commandEnvironment struct {
@@ -456,6 +457,25 @@ func (c *datasetCleanCommand) Run(env *commandEnvironment) error {
 		return err
 	}
 	return runClean(env.Context, env.Stdout, loaded.Config, executor, c.Datasets, c.Recursive, c.All, c.DestroyOwnedSnapshots, c.ForgetTargets, c.Apply)
+}
+
+type migrateCommand struct {
+	configOptions `embed:""`
+	Datasets      []string `arg:"" optional:"" help:"Exact source roots."`
+	All           bool     `help:"Select every dataset that keeps boomerangz state."`
+	Apply         bool     `help:"Apply the migration after revalidation; the daemon must be stopped."`
+}
+
+func (c *migrateCommand) Run(env *commandEnvironment) error {
+	loaded, err := c.load()
+	if err != nil {
+		return err
+	}
+	_, executor, err := datasetExecutor(env)
+	if err != nil {
+		return err
+	}
+	return runMigrate(env.Context, env.Stdout, loaded.Config, executor, c.Datasets, c.All, c.Apply)
 }
 
 type identityCommand struct {

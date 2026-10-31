@@ -1,5 +1,5 @@
 complete -c boomerangz -f
-complete -c boomerangz -n '__fish_use_subcommand' -a 'config daemon dataset identity pairing status trigger version'
+complete -c boomerangz -n '__fish_use_subcommand' -a 'config daemon dataset identity migrate pairing status trigger version'
 
 function __boomerangz_needs_subcommand
     set -l group $argv[1]
@@ -16,7 +16,7 @@ complete -c boomerangz -n '__boomerangz_needs_subcommand config check reload sho
 complete -c boomerangz -n '__boomerangz_needs_subcommand dataset abort-receive adopt clean inspect list reseed' -a 'abort-receive adopt clean inspect list reseed'
 complete -c boomerangz -n '__boomerangz_needs_subcommand identity recover' -a 'recover'
 complete -c boomerangz -n '__boomerangz_needs_subcommand pairing create import list revoke' -a 'create import list revoke'
-complete -c boomerangz -n '__fish_seen_subcommand_from trigger inspect adopt clean reseed abort-receive' -a '(__boomerangz_list_datasets)' -d 'ZFS dataset'
+complete -c boomerangz -n '__fish_seen_subcommand_from trigger migrate inspect adopt clean reseed abort-receive' -a '(__boomerangz_list_datasets)' -d 'ZFS dataset'
 complete -c boomerangz -l config -r -F
 complete -c boomerangz -l config-dir -r -F
 complete -c boomerangz -l socket -r -F

@@ -220,7 +220,9 @@ unreachable remote remains suspended until you rerun adoption with the remote
 available and review its identity.
 
 Adoption is exact-dataset only. Conflicting lineage or unresolved receive state
-blocks it.
+blocks it, and so does recovery state written by an older release: run
+`boomerangz migrate` on the dataset first, as in the
+[upgrade notes](/operations/upgrading).
 
 The same command promotes a replica, for instance after losing the source. A
 replica received with `replicate=on` or `props=on` arrives with the sending

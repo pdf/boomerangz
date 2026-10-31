@@ -128,6 +128,14 @@ when more than one candidate exists and
 .B --apply
 to apply.
 .TP
+.B migrate
+Preview moving each named source root's state, or with
+.B --all
+every dataset that keeps state, to the format this build reads. A root in an
+older format is refused by every other operation until it is migrated. Add
+.B --apply
+to apply after revalidation; the daemon must be stopped first.
+.TP
 .B config check
 Validate the primary configuration file, every drop-in, and the merged result.
 .TP

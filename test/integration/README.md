@@ -48,6 +48,7 @@ only worth reading if it is true.
 | Clean clears metadata and preserves snapshots | `TestGuestLifecycle/clean` |
 | `dataset adopt` and `dataset clean` over the CLI | `TestGuestLifecycle/cli-adopt-and-clean` (gated on `BOOMERANGZ_LIFECYCLE_GUEST_CLI`) |
 | Received-property layering, and which hidden values reach `State.Received` | `TestGuestReceivedPropertyLayers` |
+| A root replicated recursively, written back in state format v1, migrated by `migrate.Apply`, and replicated onward incrementally from the endpoint its migrated proof describes | `TestGuestStateMigration` |
 | A replica received with `-R` from one installation promoted by `dataset adopt` under another: the source's owner kept as masked provenance, its lineage continued, and the promoted root snapshotting and replicating onward | `TestGuestReplicaPromotion` |
 | A root claimed but not yet snapshotted: lineage resumed, foreign claim refused, and a member that sees the root's markers through inheritance gains no state of its own | `TestGuestInterruptedLineageInitialization` |
 

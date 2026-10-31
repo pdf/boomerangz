@@ -78,6 +78,9 @@ _boomerangz_options() {
         'trigger ')
             printf '%s' '-h --help --config --config-dir --credential'
             ;;
+        'migrate ')
+            printf '%s' '-h --help --config --config-dir --all --apply'
+            ;;
         'version ')
             printf '%s' '-h --help --json'
             ;;
@@ -204,7 +207,7 @@ _boomerangz() {
 
     if [[ -z $command ]]; then
         _boomerangz_complete_words \
-            'config daemon dataset identity pairing status trigger version' "$current"
+            'config daemon dataset identity migrate pairing status trigger version' "$current"
         return
     fi
     if [[ -z $subcommand ]]; then
@@ -213,7 +216,7 @@ _boomerangz() {
             dataset) _boomerangz_complete_words 'abort-receive adopt clean inspect list reseed' "$current" ;;
             identity) _boomerangz_complete_words 'recover' "$current" ;;
             pairing) _boomerangz_complete_words 'create import list revoke' "$current" ;;
-            trigger) _boomerangz_complete_datasets "$current" ;;
+            trigger|migrate) _boomerangz_complete_datasets "$current" ;;
             *) COMPREPLY=() ;;
         esac
         return
