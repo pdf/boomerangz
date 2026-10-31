@@ -19,7 +19,6 @@ func replicaFixture(t *testing.T) (string, lifecycle.Metadata, zfs.State) {
 		Properties: []zfs.Property{
 			{Dataset: name, Name: lifecycle.LineageProperty, Value: lineage, Source: zfs.SourceLocal},
 			{Dataset: name, Name: lifecycle.SnapshotProperty, Value: metadata.Snapshot, Source: zfs.SourceLocal},
-			{Dataset: name, Name: lifecycle.CreatedProperty, Value: metadata.Created.Format(time.RFC3339Nano), Source: zfs.SourceLocal},
 		},
 		Holds: make(map[string][]string), Clones: make(map[string][]string), ResumeTokens: make(map[string]string),
 	}

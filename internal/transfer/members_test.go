@@ -1082,7 +1082,7 @@ func TestUnresumableReceiveNamesTheAbortCommand(t *testing.T) {
 			continue
 		}
 		for _, source := range ref.Sources {
-			if err := pool.Release(t.Context(), ref.HoldName(), source.Dataset+"@"+source.Metadata.Name()); err != nil {
+			if err := pool.Release(t.Context(), ref.HoldName(), source.Dataset+"@"+ref.Metadata.Name()); err != nil {
 				t.Fatal(err)
 			}
 		}

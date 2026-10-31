@@ -178,7 +178,7 @@ func (s *Service) cleanPlan(ctx context.Context, dataset string, options CleanOp
 				snapshot := r.sourceSnapshot(source)
 				if slices.Contains(state.Holds[snapshot], r.hold()) {
 					owned, metadata, err := findOwned(state, source.Dataset, snapshot, lineage)
-					if err != nil || owned.GUID != source.GUID || metadata != source.Metadata {
+					if err != nil || owned.GUID != source.GUID || metadata != r.Metadata {
 						plan.Blockers = append(plan.Blockers, "held snapshot ownership changed: "+snapshot)
 					} else {
 						provedHolds[snapshot+"\x00"+r.hold()] = true

@@ -291,7 +291,7 @@ func TestBookmarkBaseRequiresRecordedTargetProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := lifecycle.Reference{Target: "local:backup/data", Dataset: request.Source, Metadata: metadata, Sources: []lifecycle.ReferenceSource{{Dataset: request.Source, GUID: base.GUID, Metadata: metadata}}}
+	ref := lifecycle.Reference{Target: "local:backup/data", Dataset: request.Source, Metadata: metadata, Sources: []lifecycle.ReferenceSource{{Dataset: request.Source, GUID: base.GUID}}}
 	view.Source.Objects[1] = zfs.Object{Name: ref.BookmarkName(), Type: "bookmark", GUID: base.GUID, CreateTXG: base.CreateTXG}
 	request.Policy.Incremental = "latest"
 	if _, err := Build(request, rootStream(view), fixtureInstallation); err == nil {

@@ -231,9 +231,8 @@ ZFS-native recovery/ownership state - there is no separate database.
 | --- | --- | --- |
 | `state:owner` | `lifecycle.RootAuthority` callers (adoption, first management) | Installation UUID that owns a source root ([internal/lifecycle/authority.go](internal/lifecycle/authority.go), `OwnerProperty`). |
 | `state:lineage` | Same as above | Per-root lineage UUID, shared by the root's owned snapshots ([internal/lifecycle/ownership.go](internal/lifecycle/ownership.go), `LineageProperty`). |
-| `state:snapshot` | `lifecycle.Metadata.Properties()` at snapshot creation | Per-snapshot UUID embedded on the snapshot itself, not the dataset. |
-| `state:created` | Same as above | RFC3339Nano creation timestamp, also embedded per snapshot. |
-| `state:reference:<target-id>:<stream-id>:<snapshot-uuid>` | `Service.ProtectSet` | JSON `Reference` proof for one stream's endpoint on one target: the stream's own snapshot, plus its descendants' for a `-R` stream, each held and later bookmarked ([internal/lifecycle/reference.go](internal/lifecycle/reference.go)). One per member stream, so members at different instants advance independently. |
+| `state:snapshot` | `lifecycle.Metadata.Properties()` at snapshot creation | Per-snapshot UUID embedded on the snapshot itself, not the dataset. The creation time is not stored: the snapshot name encodes it to the nanosecond, and `Ownership` reads it from there. |
+| `state:reference:<target-id>:<stream-id>:<snapshot-uuid>` | `Service.ProtectSet` | JSON `Reference` proof for one stream's endpoint on one target: the stream's own snapshot, plus its descendants' for a `-R` stream, each held and later bookmarked ([internal/lifecycle/reference.go](internal/lifecycle/reference.go)). One per member stream, so members at different instants advance independently. The snapshot metadata is recorded once, since every source is of the same instant; each source adds only its dataset and GUID. |
 | `state:target:<target-id>` | `transfer` binding logic | JSON `TargetBinding` recording a source's persistent identity for one configured destination ([internal/transfer/binding.go](internal/transfer/binding.go)). |
 | `state:target:<target-id>:suspended` | `transfer.SetTargetSuspended` | Marks a target unverified/suspended pending adoption revalidation. |
 | `state:inactive` | `Service.ReconcileInactive` | JSON `InactiveMarker` recording when an owned root first went inactive, for delayed retirement ([internal/lifecycle/inactive.go](internal/lifecycle/inactive.go)). |
@@ -249,17 +248,22 @@ Cross-cutting rules that hold across all of these:
   pruning, transfer, or recovery-state mutation for that root - this is how
   a moved pool (same properties, different host) fails closed instead of
   auto-adopting.
-- **Per-snapshot metadata (`state:lineage`, `state:snapshot`, `state:created`)
-  proves ownership of one exact snapshot**, independent of the root
-  markers. `Ownership` (ownership.go:74-109) requires all three to be
-  explicitly stored *on the snapshot object itself* (`local` or `received`
+- **Per-snapshot metadata (`state:lineage`, `state:snapshot`, and the
+  creation time in the snapshot name) proves ownership of one exact
+  snapshot**, independent of the root markers. `Ownership` (ownership.go)
+  requires both properties to be explicitly stored *on the snapshot object
+  itself* (`local` or `received`
   source - a received snapshot's own metadata is trusted once its parent
   root's authority checks out), matching lineage, and requires the snapshot
   name to be the exact deterministic encoding of that metadata
   (`Metadata.Name()`). A `boomerangz-`-prefixed name alone proves nothing;
   names and metadata must agree, or the snapshot is treated as foreign.
 - **Reference proofs (`state:reference:*`) gate hold/bookmark lifecycle,
-  not the transfer itself.** `Protect`/`ProtectSet` write the JSON proof
+  not the transfer itself.** A proof is one user property, and ZFS refuses a
+  value of 8192 bytes or more, so a proof grows with the number of datasets a
+  `-R` stream carries: `ProtectSet` refuses one over
+  `zfs.MaxUserPropertyValue` before writing anything, and
+  `Direct.SetProperties` refuses any oversized value rather than sending it. `Protect`/`ProtectSet` write the JSON proof
   *before* placing the corresponding hold (reference.go:125-243), so an
   interruption between the two leaves a reconstructable, idempotent retry
   rather than an orphaned hold. `Checkpoint`/`CheckpointSet` only advance a
@@ -435,6 +439,9 @@ treat the plan as historical intent, not a current map:
   the plan's package list.
 - `internal/testutil/commandtest` (named in the plan) does not exist; only
   `internal/testutil/zfstest` is present.
+- Section 5's per-snapshot metadata lists `state:created`. It is no longer
+  stored: the snapshot name already encodes the creation time, and ownership
+  requires the name to match the metadata anyway.
 - The CLI has grown a hidden `ssh-shell` command and `config reload` /
   human-readable `dataset list`/`dataset inspect` output beyond the plan's
   Section 11 initial CLI shape - both are described in the plan itself as

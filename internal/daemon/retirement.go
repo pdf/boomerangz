@@ -43,9 +43,9 @@ func (r *Runtime) retirementEndpoint(ctx context.Context, source string, effecti
 	return retirementEndpoint{}, fmt.Errorf("recorded target is not configured")
 }
 
-func mappedSnapshot(sourceRoot, mappedRoot string, member lifecycle.ReferenceSource) string {
+func mappedSnapshot(sourceRoot, mappedRoot string, reference lifecycle.Reference, member lifecycle.ReferenceSource) string {
 	suffix := strings.TrimPrefix(member.Dataset, sourceRoot)
-	return mappedRoot + suffix + "@" + member.Metadata.Name()
+	return mappedRoot + suffix + "@" + reference.Metadata.Name()
 }
 
 func verifyReplica(state zfs.State, name, lineage string, guid uint64, expected lifecycle.Metadata) error {
@@ -80,7 +80,7 @@ func ownedReplicas(state zfs.State, lineage string) ([]string, []string, error) 
 				continue
 			}
 			for _, property := range snapshot.Properties {
-				if property.Name == lifecycle.LineageProperty || property.Name == lifecycle.SnapshotProperty || property.Name == lifecycle.CreatedProperty {
+				if property.Name == lifecycle.LineageProperty || property.Name == lifecycle.SnapshotProperty {
 					return nil, nil, fmt.Errorf("ambiguous replica ownership metadata: %s", snapshot.Name)
 				}
 			}
@@ -110,8 +110,8 @@ func (r *Runtime) retireReference(ctx context.Context, source string, effective 
 	}
 	members := make(map[string]lifecycle.ReferenceSource)
 	for _, member := range reference.Sources {
-		name := mappedSnapshot(source, inspection.MappedDataset, member)
-		if err := verifyReplica(state, name, lineage, member.GUID, member.Metadata); err != nil {
+		name := mappedSnapshot(source, inspection.MappedDataset, reference, member)
+		if err := verifyReplica(state, name, lineage, member.GUID, reference.Metadata); err != nil {
 			return err
 		}
 		members[name] = member
@@ -128,7 +128,7 @@ func (r *Runtime) retireReference(ctx context.Context, source string, effective 
 			return inspectErr
 		}
 		if member, exists := members[name]; exists {
-			if err := verifyReplica(current, name, lineage, member.GUID, member.Metadata); err != nil {
+			if err := verifyReplica(current, name, lineage, member.GUID, reference.Metadata); err != nil {
 				return err
 			}
 		} else {

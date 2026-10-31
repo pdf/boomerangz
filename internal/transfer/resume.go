@@ -149,14 +149,14 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 		}
 		valid := true
 		for _, member := range ref.Sources {
-			name := member.Dataset + "@" + member.Metadata.Name()
+			name := member.Dataset + "@" + ref.Metadata.Name()
 			object, exists := sourceObjects[name]
 			if !exists || object.Type != "snapshot" || object.GUID != member.GUID || !slices.Contains(view.Source.Holds[name], ref.HoldName()) {
 				valid = false
 				break
 			}
 			metadata, ownershipErr := ownership(view.Source, object, lineage)
-			if ownershipErr != nil || !reflect.DeepEqual(metadata, member.Metadata) {
+			if ownershipErr != nil || !reflect.DeepEqual(metadata, ref.Metadata) {
 				valid = false
 				break
 			}
@@ -193,8 +193,8 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 				return plan, zero, fmt.Errorf("destination has a conflicting lineage")
 			}
 		}
-		metadata := member.Metadata
-		expected := Expected{Source: member.Dataset + "@" + member.Metadata.Name(), Destination: mappedDataset + "@" + member.Metadata.Name(), GUID: member.GUID, Metadata: &metadata}
+		metadata := ref.Metadata
+		expected := Expected{Source: member.Dataset + "@" + ref.Metadata.Name(), Destination: mappedDataset + "@" + ref.Metadata.Name(), GUID: member.GUID, Metadata: &metadata}
 		plan.Expected = append(plan.Expected, expected)
 		plan.Endpoints = append(plan.Endpoints, expected)
 		if member.Dataset == stream.Dataset {

@@ -79,7 +79,7 @@ func ValidateLineageEvidence(state zfs.State, root, lineage string) error {
 	for _, snapshot := range snapshotsIn(state, root) {
 		hasInternal := false
 		for _, row := range snapshot.Properties {
-			if row.Name == LineageProperty || row.Name == SnapshotProperty || row.Name == CreatedProperty {
+			if row.Name == LineageProperty || row.Name == SnapshotProperty {
 				hasInternal = true
 			}
 		}

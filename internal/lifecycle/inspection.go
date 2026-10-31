@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"slices"
 
 	"github.com/pdf/boomerangz/internal/zfs"
@@ -78,7 +77,7 @@ func (s *Service) ReleaseCompletedHold(ctx context.Context, dataset string, r Re
 	var held []ReferenceSource
 	for _, source := range r.sources() {
 		snapshot, metadata, findErr := findOwned(state, source.Dataset, r.sourceSnapshot(source), lineage)
-		if findErr != nil || snapshot.GUID != source.GUID || !reflect.DeepEqual(metadata, source.Metadata) {
+		if findErr != nil || snapshot.GUID != source.GUID || metadata != r.Metadata {
 			return fmt.Errorf("held snapshot proof changed")
 		}
 		found := false

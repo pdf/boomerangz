@@ -92,13 +92,12 @@ func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) 
 				{Dataset: "backup/data", Name: lifecycle.LineageProperty, Value: lineage, Source: zfs.SourceLocal},
 				{Dataset: owned, Name: lifecycle.LineageProperty, Value: lineage, Source: zfs.SourceLocal},
 				{Dataset: owned, Name: lifecycle.SnapshotProperty, Value: metadata.Snapshot, Source: zfs.SourceLocal},
-				{Dataset: owned, Name: lifecycle.CreatedProperty, Value: metadata.Created.Format(time.RFC3339Nano), Source: zfs.SourceLocal},
 			},
 		}},
 	}
 	runtime := &Runtime{backend: backend, installation: installation, config: config.Defaults()}
 	effective := policy.Effective{Local: []string{"backup/data"}, Discard: policy.DiscardOff}
-	reference := lifecycle.Reference{Target: canonical, Dataset: "tank/data", Metadata: metadata, Sources: []lifecycle.ReferenceSource{{Dataset: "tank/data", GUID: 20, Metadata: metadata}}}
+	reference := lifecycle.Reference{Target: canonical, Dataset: "tank/data", Metadata: metadata, Sources: []lifecycle.ReferenceSource{{Dataset: "tank/data", GUID: 20}}}
 	if err := runtime.retireReference(t.Context(), "tank/data", effective, sourceState, lineage, reference); err != nil {
 		t.Fatal(err)
 	}

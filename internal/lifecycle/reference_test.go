@@ -2,7 +2,9 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -294,5 +296,115 @@ func TestStreamProofsStayInsideTheirStream(t *testing.T) {
 	}
 	if len(b.writes) != writes {
 		t.Fatalf("refused protections wrote %v", b.writes[writes:])
+	}
+}
+
+// withChildren adds count child datasets of tank/data, each with a snapshot
+// carrying metadata, and returns those snapshots' names.
+func withChildren(b *memoryBackend, count int, metadata Metadata) []string {
+	var names []string
+	for i := range count {
+		dataset := fmt.Sprintf("tank/data/child-%03d", i)
+		snapshot := dataset + "@" + metadata.Name()
+		b.state.Objects = append(b.state.Objects,
+			zfs.Object{Name: dataset, Type: "filesystem", GUID: uint64(1000 + 2*i)},
+			zfs.Object{Name: snapshot, Type: "snapshot", GUID: uint64(1001 + 2*i)},
+		)
+		for key, value := range metadata.Properties() {
+			b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: snapshot, Name: key, Value: value, Source: zfs.SourceLocal})
+		}
+		names = append(names, snapshot)
+	}
+	return names
+}
+
+func rootSnapshotMetadata(t *testing.T, b *memoryBackend) (string, Metadata) {
+	t.Helper()
+	root := b.state.Objects[1].Name
+	for _, snapshot := range snapshotsIn(b.state, "tank/data") {
+		if snapshot.Name == root {
+			metadata, err := Ownership(snapshot, testLineage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return root, metadata
+		}
+	}
+	t.Fatal("root snapshot missing")
+	return "", Metadata{}
+}
+
+func TestReferenceProofStoresEachSourceOnlyByDatasetAndGUID(t *testing.T) {
+	t.Parallel()
+	b := backendWithSnapshots(t)
+	addTestAuthority(b)
+	root, metadata := rootSnapshotMetadata(t, b)
+	snapshots := append(withChildren(b, 2, metadata), root)
+	s, _ := NewService(b, testInstallation)
+	r, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", snapshots, "local:backup/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	for _, p := range b.state.Properties {
+		if p.Dataset == "tank/data" && p.Name == r.PropertyName() {
+			stored = p.Value
+		}
+	}
+	var record struct {
+		Metadata json.RawMessage              `json:"metadata"`
+		Sources  []map[string]json.RawMessage `json:"sources"`
+	}
+	if err := json.Unmarshal([]byte(stored), &record); err != nil {
+		t.Fatal(err)
+	}
+	if len(record.Metadata) == 0 || len(record.Sources) != 3 {
+		t.Fatalf("stored proof = %s", stored)
+	}
+	// The instant is said once; every source is of it.
+	for _, source := range record.Sources {
+		if len(source) != 2 || source["dataset"] == nil || source["guid"] == nil {
+			t.Fatalf("source carries more than its dataset and GUID: %s", stored)
+		}
+	}
+	state, _ := b.InspectState(t.Context(), "tank/data", false)
+	refs, err := References(state, "tank/data", testLineage)
+	if err != nil || len(refs) != 1 || !reflect.DeepEqual(refs[0], r) {
+		t.Fatalf("stored proof does not read back as written: %+v %v", refs, err)
+	}
+}
+
+func TestProtectSetRefusesSourcesOfDifferentInstants(t *testing.T) {
+	t.Parallel()
+	b := backendWithSnapshots(t)
+	addTestAuthority(b)
+	root, metadata := rootSnapshotMetadata(t, b)
+	other, err := NewMetadata(testLineage, metadata.Created.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := append(withChildren(b, 1, other), root)
+	s, _ := NewService(b, testInstallation)
+	if _, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", snapshots, "local:backup/data"); err == nil || !strings.Contains(err.Error(), "instant") {
+		t.Fatalf("mixed-instant proof accepted: %v", err)
+	}
+	if len(b.writes) != 0 {
+		t.Fatalf("refused proof wrote %v", b.writes)
+	}
+}
+
+func TestProtectSetRefusesProofOverThePropertyLimit(t *testing.T) {
+	t.Parallel()
+	b := backendWithSnapshots(t)
+	addTestAuthority(b)
+	root, metadata := rootSnapshotMetadata(t, b)
+	snapshots := append(withChildren(b, 200, metadata), root)
+	s, _ := NewService(b, testInstallation)
+	if _, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", snapshots, "local:backup/data"); err == nil || !strings.Contains(err.Error(), "property limit") {
+		t.Fatalf("oversized proof accepted: %v", err)
+	}
+	// Refused before the record or any hold, so nothing needs undoing.
+	if len(b.writes) != 0 {
+		t.Fatalf("refused proof wrote %v", b.writes)
 	}
 }

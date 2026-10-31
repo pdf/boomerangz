@@ -157,7 +157,7 @@ func TestCleanStopsOnUnexpectedMutation(t *testing.T) {
 
 func TestCleanTransitionNamesWhatDiffered(t *testing.T) {
 	t.Parallel()
-	property := zfs.Property{Dataset: "tank/data@a", Name: "org.boomerangz:state:created", Value: "2026", Source: zfs.SourceLocal}
+	property := zfs.Property{Dataset: "tank/data@a", Name: "org.boomerangz:state:snapshot", Value: "2026", Source: zfs.SourceLocal}
 	before := zfs.State{Objects: []zfs.Object{{Name: "tank/data@a", Type: "snapshot", GUID: 1}}, Properties: []zfs.Property{property}}
 	action := CleanAction{Operation: "inherit", Object: "tank/data@a", Property: property.Name}
 	after := zfs.State{Objects: before.Objects}
