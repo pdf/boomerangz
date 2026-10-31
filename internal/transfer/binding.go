@@ -3,6 +3,7 @@ package transfer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -22,11 +23,11 @@ const (
 // for a bootstrap, its nearest existing ancestor.
 //
 // A binding is checked by rebuilding it from configuration and the live
-// identity of its anchor and comparing the two, so only the identity is
-// stored (see bindingRecord). Transport, CanonicalTarget and DestinationRoot
-// are what configuration says about the target, and the property key hashes
-// CanonicalTarget; MappedDataset follows from the root and its discard
-// policy; Pool and RelativePath follow from Anchor.
+// identity of its anchor and comparing the two, so only the identity and the
+// mapped dataset it was made for are stored (see bindingRecord). Transport,
+// CanonicalTarget and DestinationRoot are what configuration says about the
+// target, and the property key hashes CanonicalTarget; Pool and RelativePath
+// follow from Anchor.
 type TargetBinding struct {
 	Version         int    `json:"version"`
 	Transport       string `json:"transport"`
@@ -40,14 +41,30 @@ type TargetBinding struct {
 	RelativePath    string `json:"relative_path"`
 }
 
-// bindingRecord is a TargetBinding's stored value. Anchor is stored only while
-// it is an ancestor of the mapped dataset: after the first receive the binding
-// moves to the replica itself, which the mapping already names.
+// bindingRecord is a TargetBinding's stored value. Mapped is the dataset the
+// binding was made for. Configuration names the mapped dataset too, but a
+// changed discard or destination moves that, and only the stored name tells
+// the replica's old place from the new one. Anchor is stored only while it is
+// an ancestor of the mapped dataset: after the first receive the binding moves
+// to the replica itself, which Mapped already names.
 type bindingRecord struct {
 	Version    int    `json:"version"`
 	PoolGUID   uint64 `json:"pool_guid"`
+	Mapped     string `json:"mapped"`
 	AnchorGUID uint64 `json:"anchor_guid"`
 	Anchor     string `json:"anchor,omitempty"`
+}
+
+// MappingChangedError reports a binding made for another mapped dataset than
+// the one configuration now names. Neither transfer nor reseed may proceed: a
+// replica, if there is one, is at Stored, and the binding cannot follow it to
+// Configured.
+type MappingChangedError struct {
+	Stored, Configured string
+}
+
+func (e *MappingChangedError) Error() string {
+	return fmt.Sprintf("target mapping changed from %s to %s since the binding was recorded; restore the previous mapping, or forget the target with boomerangz dataset clean --forget-target and let the next transfer seed it afresh", e.Stored, e.Configured)
 }
 
 // LocalTargetInspection is the adoption-time identity view of one configured
@@ -169,6 +186,10 @@ func InspectTarget(ctx context.Context, reader localIdentityReader, request Requ
 		return inspection, fmt.Errorf("destination has no existing ancestor")
 	}
 	stored, err := storedTargetBinding(source, request.Source, bindingTemplate(request, mapped, transport, canonical))
+	if changed := (*MappingChangedError)(nil); errors.As(err, &changed) {
+		inspection.Status = "mismatch"
+		return inspection, err
+	}
 	if err != nil {
 		inspection.Status = "invalid-binding"
 		return inspection, err
@@ -351,10 +372,16 @@ func storedTargetBinding(state zfs.State, root string, target TargetBinding) (*T
 		if record.Version != targetBindingVersion {
 			return nil, fmt.Errorf("target binding version %d is unsupported", record.Version)
 		}
+		if zfs.ValidateDataset(record.Mapped) != nil {
+			return nil, fmt.Errorf("invalid target binding mapping")
+		}
+		if record.Mapped != target.MappedDataset {
+			return nil, &MappingChangedError{Stored: record.Mapped, Configured: target.MappedDataset}
+		}
 		anchor := record.Anchor
 		if anchor == "" {
-			anchor = target.MappedDataset
-		} else if anchor == target.MappedDataset || zfs.ValidateDataset(anchor) != nil {
+			anchor = record.Mapped
+		} else if anchor == record.Mapped || zfs.ValidateDataset(anchor) != nil {
 			return nil, fmt.Errorf("invalid target binding anchor")
 		}
 		decoded, err := target.anchored(anchor, record.PoolGUID, record.AnchorGUID)
@@ -380,7 +407,7 @@ func encodeBinding(binding TargetBinding) (string, error) {
 	if err := validateBinding(binding); err != nil {
 		return "", err
 	}
-	record := bindingRecord{Version: binding.Version, PoolGUID: binding.PoolGUID, AnchorGUID: binding.AnchorGUID}
+	record := bindingRecord{Version: binding.Version, PoolGUID: binding.PoolGUID, Mapped: binding.MappedDataset, AnchorGUID: binding.AnchorGUID}
 	if binding.Anchor != binding.MappedDataset {
 		record.Anchor = binding.Anchor
 	}

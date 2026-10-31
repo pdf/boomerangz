@@ -22,7 +22,7 @@ again.
 A recovery proof, `org.boomerangz:state:reference:*`, no longer lists every
 snapshot it protects, so a recursive stream's proof no longer outgrows a ZFS
 property. A target binding, `org.boomerangz:state:target:*`, now stores only
-the destination's identity. With either left in the old form, every transfer,
+the destination's identity and the dataset it maps to. With either left in the old form, every transfer,
 clean and retirement of the root refuses with `invalid reference proof` or
 `invalid target binding`.
 
@@ -49,7 +49,7 @@ Check the result with:
 zfs get -H -o property,value -s local all tank/data | grep 'state:\(reference\|target\):'
 ```
 
-Each binding's value now reads like `{"version":2,"pool_guid":...,"anchor_guid":...}`,
+Each binding's value now reads like `{"version":2,"pool_guid":...,"mapped":"backup/archive","anchor_guid":...}`,
 each proof's like `{"created":"..."}`, and `boomerangz status` shows each
 target's last transfer verified.
 

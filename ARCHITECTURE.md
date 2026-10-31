@@ -233,7 +233,7 @@ ZFS-native recovery/ownership state - there is no separate database.
 | `state:lineage` | Same as above | Per-root lineage UUID, shared by the root's owned snapshots ([internal/lifecycle/ownership.go](internal/lifecycle/ownership.go), `LineageProperty`). |
 | `state:snapshot` | `lifecycle.Metadata.Properties()` at snapshot creation | Per-snapshot UUID embedded on the snapshot itself, not the dataset. The creation time is not stored: the snapshot name encodes it to the nanosecond, and `Ownership` reads it from there. |
 | `state:reference:<target-id>:<stream-id>:<snapshot-uuid>` | `Service.ProtectSet` | Recovery proof for one stream's endpoint on one target: the stream's own snapshot, plus its descendants' for a `-R` stream, each held and later bookmarked ([internal/lifecycle/reference.go](internal/lifecycle/reference.go)). One per member stream, so members at different instants advance independently. The value is fixed-size JSON `{stream, created, recursive}`: the stream relative to the root (omitted for the root's own), the snapshot's creation time (bookmarks carry only the UUID, so the snapshot name cannot be rebuilt without it), and whether the stream carries its subtree. Everything else is derived: the lineage is the root's, the target ID and snapshot UUID are in the key, and the endpoint's snapshots and GUIDs are read from ZFS by `Reference.Sources`. |
-| `state:target:<target-id>` | `transfer` binding logic | A source's persistent identity for one configured destination ([internal/transfer/binding.go](internal/transfer/binding.go)). The value is JSON `{version, pool_guid, anchor_guid, anchor}`, with `anchor` stored only while bootstrapping, when it names the mapped dataset's nearest existing ancestor; after the first receive the binding moves to the replica, which the mapping already names. The rest of the in-memory `TargetBinding` is what configuration says about the target and is rebuilt from it: the key hashes the canonical target, which also encodes the transport and destination root, the mapped dataset follows from the root and `discard`, and the pool and relative path follow from the anchor. |
+| `state:target:<target-id>` | `transfer` binding logic | A source's persistent identity for one configured destination ([internal/transfer/binding.go](internal/transfer/binding.go)). The value is JSON `{version, pool_guid, mapped, anchor_guid, anchor}`: `mapped` is the mapped dataset the binding was made for, and `anchor` is stored only while bootstrapping, when it names the mapped dataset's nearest existing ancestor; after the first receive the binding moves to the replica, which `mapped` already names. The rest of the in-memory `TargetBinding` is what configuration says about the target and is rebuilt from it: the key hashes the canonical target, which also encodes the transport and destination root, and the pool and relative path follow from the anchor. |
 | `state:target:<target-id>:suspended` | `transfer.SetTargetSuspended` | Marks a target unverified/suspended pending adoption revalidation. It stays separate from the binding because adoption suspends a remote it cannot reach, which may have no binding yet. |
 | `state:inactive` | `Service.ReconcileInactive` | JSON `InactiveMarker` recording when an owned root first went inactive, for delayed retirement ([internal/lifecycle/inactive.go](internal/lifecycle/inactive.go)). |
 
@@ -297,10 +297,16 @@ Cross-cutting rules that hold across all of these:
   configuration and the live identity of its anchor and compares the two by
   struct equality (`transfer.plan.Build`), and a same-named destination
   with a different GUID is blocked rather than silently treated as the same
-  target - the operator must explicitly reseed or adopt instead. A change
-  of mapping, such as a new `discard`, is not detected by the binding
-  itself: it moves the anchor to a dataset whose GUID does not match, or to
-  one that does not exist yet. Discovery's overlap detection finds a root's
+  target - the operator must explicitly reseed or adopt instead. The
+  binding also stores the mapped dataset it was made for, because
+  configuration alone cannot say where the replica is once the mapping
+  changes: a new `discard` or destination root recomputes the mapped
+  dataset, and a binding made for another one fails with
+  `transfer.MappingChangedError` in transfer, resume, reseed, inspection and
+  live target checks alike, during bootstrap as well as afterwards. The
+  operator restores the old mapping, or forgets the target with
+  `dataset clean --forget-target` so the next transfer seeds the new one.
+  Discovery's overlap detection finds a root's
   binding for a configured target by hashing that target's canonical
   identity (`discovery.RemoteDestination.Canonical` for remotes).
 - **On a source root, a received copy of internal state is provenance, not

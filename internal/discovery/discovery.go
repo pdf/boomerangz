@@ -828,10 +828,11 @@ func receivedLineage(entry Entry) string {
 }
 
 // storedBindings reads the target bindings stored locally on root, by the
-// target ID their key hashes. A binding records a destination's identity, not
-// where it is: the replica it proves is where the root's policy maps that
-// target now, so a configured target is matched by hashing its canonical
-// identity. A binding that does not parse proves nothing and is skipped.
+// target ID their key hashes, so a configured target is matched by hashing its
+// canonical identity. A binding made for a mapping the root's policy has since
+// changed still marks the target established here: transfers refuse it, and
+// the operator decides where the replica belongs. A binding that does not
+// parse proves nothing and is skipped.
 func storedBindings(root Entry) map[string]bool {
 	bindings := make(map[string]bool)
 	for _, row := range root.Stored {

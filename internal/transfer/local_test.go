@@ -509,6 +509,61 @@ func TestInspectTargetRetainsVerifiedBootstrapAnchor(t *testing.T) {
 	}
 }
 
+// A binding pins the mapped dataset it was made for. Configuration names the
+// mapped dataset too, but a changed discard moves it, and the replica stays
+// where the binding says.
+func TestChangedMappingIsRefused(t *testing.T) {
+	t.Parallel()
+	t.Run("replica", func(t *testing.T) {
+		backend, request := newLocalBackend(t)
+		engine, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := engine.Apply(t.Context(), request, nil)
+		if err != nil || !result.Verified {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+		request.Policy.Discard = policy.DiscardAll
+		var changed *MappingChangedError
+		if _, err := engine.Preview(t.Context(), request); !errors.As(err, &changed) || changed.Stored != result.Plan.Destination {
+			t.Fatalf("changed mapping planned: %v", err)
+		}
+		inspection, err := InspectTarget(t.Context(), backend, request, backend.source)
+		if !errors.As(err, &changed) || inspection.Status != "mismatch" {
+			t.Fatalf("inspection=%+v err=%v", inspection, err)
+		}
+		if _, err := VerifyTargetBinding(t.Context(), backend, backend.source, request); !errors.As(err, &changed) {
+			t.Fatalf("changed mapping verified: %v", err)
+		}
+	})
+	t.Run("bootstrap", func(t *testing.T) {
+		// Until the replica exists the binding is anchored on an ancestor, and
+		// the new mapped dataset is beneath that ancestor too.
+		request := Request{Source: "tank/projects/data", DestinationRoot: "backup", Policy: policy.Effective{Discard: policy.DiscardFirst}}
+		anchor := zfs.DatasetIdentity{Name: "backup", Type: zfs.Filesystem, GUID: 10, Pool: "backup", PoolGUID: 11}
+		binding, err := bindingFor(request, "backup/projects/data", anchor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := encodeBinding(binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source := zfs.State{Properties: []zfs.Property{{Dataset: request.Source, Name: targetBindingProperty(binding.CanonicalTarget), Value: encoded, Source: zfs.SourceLocal}}}
+		backend := &localBackend{
+			inventory:  []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem}},
+			identities: map[string]zfs.DatasetIdentity{"backup": anchor},
+		}
+		request.Policy.Discard = policy.DiscardAll
+		inspection, err := InspectTarget(t.Context(), backend, request, source)
+		var changed *MappingChangedError
+		if !errors.As(err, &changed) || inspection.Status != "mismatch" || changed.Stored != "backup/projects/data" || changed.Configured != "backup/data" {
+			t.Fatalf("bootstrap followed the changed mapping: inspection=%+v err=%v", inspection, err)
+		}
+	})
+}
+
 func TestApplyPromotesBindingAfterGUIDVerification(t *testing.T) {
 	t.Parallel()
 	backend, request := newLocalBackend(t)
@@ -701,10 +756,10 @@ func TestReceivedTargetStateIsProvenance(t *testing.T) {
 	}
 }
 
-// A binding stores only the destination's identity: everything else is what
-// configuration says about the target, and the comparison against a fresh
-// resolution is what checks it.
-func TestTargetBindingStoresOnlyIdentity(t *testing.T) {
+// A binding stores the destination's identity and the mapped dataset it was
+// made for: everything else is what configuration says about the target, and
+// the comparison against a fresh resolution is what checks it.
+func TestTargetBindingStoresIdentityAndMapping(t *testing.T) {
 	t.Parallel()
 	request := Request{Source: "tank/projects/data", DestinationRoot: "backup", Policy: policy.Effective{Discard: policy.DiscardFirst}}
 	target, err := bindingTarget(request)
@@ -715,8 +770,8 @@ func TestTargetBindingStoresOnlyIdentity(t *testing.T) {
 		anchor zfs.DatasetIdentity
 		stored string
 	}{
-		"bootstrap": {zfs.DatasetIdentity{Name: "backup", GUID: 10, Pool: "backup", PoolGUID: 11}, `{"version":2,"pool_guid":11,"anchor_guid":10,"anchor":"backup"}`},
-		"replica":   {zfs.DatasetIdentity{Name: "backup/projects/data", GUID: 12, Pool: "backup", PoolGUID: 11}, `{"version":2,"pool_guid":11,"anchor_guid":12}`},
+		"bootstrap": {zfs.DatasetIdentity{Name: "backup", GUID: 10, Pool: "backup", PoolGUID: 11}, `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":10,"anchor":"backup"}`},
+		"replica":   {zfs.DatasetIdentity{Name: "backup/projects/data", GUID: 12, Pool: "backup", PoolGUID: 11}, `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12}`},
 	} {
 		binding, err := bindingFor(request, target.MappedDataset, test.anchor)
 		if err != nil {
@@ -733,11 +788,13 @@ func TestTargetBindingStoresOnlyIdentity(t *testing.T) {
 		}
 	}
 	for name, value := range map[string]string{
-		"another version":   `{"version":1,"pool_guid":11,"anchor_guid":12}`,
-		"derivable field":   `{"version":2,"pool_guid":11,"anchor_guid":12,"mapped_dataset":"backup/projects/data"}`,
-		"anchor outside":    `{"version":2,"pool_guid":11,"anchor_guid":10,"anchor":"other"}`,
-		"replica as anchor": `{"version":2,"pool_guid":11,"anchor_guid":12,"anchor":"backup/projects/data"}`,
-		"trailing data":     `{"version":2,"pool_guid":11,"anchor_guid":12} {}`,
+		"another version":   `{"version":1,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12}`,
+		"derivable field":   `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12,"destination_root":"backup"}`,
+		"no mapping":        `{"version":2,"pool_guid":11,"anchor_guid":12}`,
+		"invalid mapping":   `{"version":2,"pool_guid":11,"mapped":"/backup","anchor_guid":12}`,
+		"anchor outside":    `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":10,"anchor":"other"}`,
+		"replica as anchor": `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12,"anchor":"backup/projects/data"}`,
+		"trailing data":     `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12} {}`,
 	} {
 		state := zfs.State{Properties: []zfs.Property{{Dataset: request.Source, Name: targetBindingProperty(target.CanonicalTarget), Value: value, Source: zfs.SourceLocal}}}
 		if stored, err := storedTargetBinding(state, request.Source, target); err == nil {

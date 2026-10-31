@@ -239,7 +239,7 @@ func (*policyBackend) GetStoredProperties(_ context.Context, datasets []string) 
 func resumableLocalTarget() (*policyBackend, string) {
 	canonical := "local:backup/data"
 	bindingProperty := policy.StateNamespace + "target:" + lifecycle.TargetID(canonical)
-	backend := &policyBackend{runtimeBackend{identity: zfs.DatasetIdentity{Name: "backup/data/data", Type: zfs.Filesystem, GUID: 91, Pool: "backup", PoolGUID: 90}, state: zfs.State{Properties: []zfs.Property{{Dataset: "tank/data", Name: bindingProperty, Value: `{"version":2,"pool_guid":90,"anchor_guid":91}`, Source: zfs.SourceLocal}}, ResumeTokens: map[string]string{"backup/data/data": "token"}}}}
+	backend := &policyBackend{runtimeBackend{identity: zfs.DatasetIdentity{Name: "backup/data/data", Type: zfs.Filesystem, GUID: 91, Pool: "backup", PoolGUID: 90}, state: zfs.State{Properties: []zfs.Property{{Dataset: "tank/data", Name: bindingProperty, Value: `{"version":2,"pool_guid":90,"mapped":"backup/data/data","anchor_guid":91}`, Source: zfs.SourceLocal}}, ResumeTokens: map[string]string{"backup/data/data": "token"}}}}
 	return backend, lifecycle.TargetID(canonical)
 }
 
