@@ -83,22 +83,8 @@ type Result struct {
 	Streams         []Result `json:"streams,omitempty"`
 }
 
-var sourcePermissions = []string{"bookmark", "destroy", "hold", "mount", "release", "send", "snapshot", "userprop"}
-
 func destinationPermissions(plan Plan) []string {
-	permissions := []string{"create", "destroy", "mount", "receive:append", "userprop"}
-	for property := range plan.Receive.Set {
-		if !strings.Contains(property, ":") {
-			permissions = append(permissions, property)
-		}
-	}
-	for _, property := range plan.Receive.Exclude {
-		if !strings.Contains(property, ":") {
-			permissions = append(permissions, property)
-		}
-	}
-	slices.Sort(permissions)
-	return slices.Compact(permissions)
+	return union(receivePermissions, propertyPermissions(plan.Receive.Set, plan.Receive.Exclude))
 }
 
 // DestinationUnavailableError reports that a remote destination has no
@@ -427,7 +413,7 @@ func (l *Local) checkPermissions(ctx context.Context, request Request, view View
 	if sent == "" {
 		sent = request.Source
 	}
-	if err := l.backend.CheckPermissions(ctx, sent, slices.Clone(sourcePermissions)); err != nil {
+	if err := l.backend.CheckPermissions(ctx, sent, slices.Clone(sendPermissions)); err != nil {
 		return fmt.Errorf("source permission preflight: %w", err)
 	}
 	anchor := request.DestinationRoot
@@ -967,7 +953,7 @@ func (l *Local) setAsidePlaceholder(ctx context.Context, request Request, stream
 		return fmt.Errorf("destination cannot replace placeholder %s with its replica", destination)
 	}
 	parent := destination[:strings.LastIndexByte(destination, '/')]
-	if err := l.target.CheckPermissions(ctx, parent, []string{"create", "destroy", "mount", "rename"}); err != nil {
+	if err := l.target.CheckPermissions(ctx, parent, slices.Clone(placeholderPermissions)); err != nil {
 		return fmt.Errorf("placeholder replacement permission preflight: %w", err)
 	}
 	return replicas.RenameDataset(ctx, destination, aside)

@@ -198,20 +198,20 @@ func (s *ReseedService) Apply(ctx context.Context, request Request) (ReseedPlan,
 	if err != nil {
 		return plan, err
 	}
-	if err := s.source.CheckPermissions(ctx, request.Source, []string{"destroy", "release", "userprop"}); err != nil {
+	if err := s.source.CheckPermissions(ctx, request.Source, slices.Clone(reseedSourcePermissions)); err != nil {
 		return plan, fmt.Errorf("source permission preflight: %w", err)
 	}
 	if plan.DestinationExists {
-		permissions := []string{"destroy", "mount"}
+		permissions := slices.Clone(reseedCleanupPermissions)
 		if len(plan.ResumeDatasets) > 0 {
-			permissions = append(permissions, "receive:append")
+			permissions = union(permissions, abortPermissions)
 		}
 		if err := s.destination.CheckPermissions(ctx, plan.Binding.MappedDataset, permissions); err != nil {
 			return plan, fmt.Errorf("destination cleanup permission preflight: %w", err)
 		}
 	}
 	if plan.SetAside != "" {
-		if err := s.destination.CheckPermissions(ctx, plan.SetAside, []string{"destroy", "mount"}); err != nil {
+		if err := s.destination.CheckPermissions(ctx, plan.SetAside, slices.Clone(reseedCleanupPermissions)); err != nil {
 			return plan, fmt.Errorf("set-aside placeholder cleanup permission preflight: %w", err)
 		}
 	}
@@ -308,7 +308,7 @@ func (s *ReseedService) ApplyAbort(ctx context.Context, request Request) (AbortP
 	}
 	plan := abortPlan(reseed)
 	for _, dataset := range plan.Receives {
-		if err := s.destination.CheckPermissions(ctx, dataset, []string{"destroy", "mount", "receive:append"}); err != nil {
+		if err := s.destination.CheckPermissions(ctx, dataset, slices.Clone(abortPermissions)); err != nil {
 			return plan, fmt.Errorf("abort permission preflight: %w", err)
 		}
 	}
@@ -331,23 +331,13 @@ func (s *ReseedService) ApplyAbort(ctx context.Context, request Request) (AbortP
 // reseedReceivePermissions covers the fresh receives that follow a reseed: the
 // root's own and each member stream's, whose receive overrides are their own.
 func reseedReceivePermissions(request Request) []string {
-	permissions := []string{"canmount", "create", "destroy", "mount", "receive:append", "userprop"}
+	permissions := union(receivePermissions, filesystemReceivePermissions)
 	policies := []policy.Effective{request.Policy}
 	for _, member := range request.Members {
 		policies = append(policies, member.Policy)
 	}
 	for _, p := range policies {
-		for property := range p.SetProperties {
-			if !strings.Contains(property, ":") {
-				permissions = append(permissions, property)
-			}
-		}
-		for _, property := range p.IgnoreProperties {
-			if !strings.Contains(property, ":") {
-				permissions = append(permissions, property)
-			}
-		}
+		permissions = union(permissions, propertyPermissions(p.SetProperties, p.IgnoreProperties))
 	}
-	slices.Sort(permissions)
-	return slices.Compact(permissions)
+	return permissions
 }
