@@ -321,10 +321,13 @@ func (s *Service) ProtectSet(ctx context.Context, dataset, stream string, snapsh
 		}
 	}
 	// A stored proof may span more datasets than this stream asked for, and
-	// all of their holds must be read before any is placed.
+	// all of their holds must be read before any is placed. One within what
+	// was read needs no second read.
 	scope := snapshotDatasets
-	if exists {
-		scope = sourceDatasets(r)
+	if wider := sourceDatasets(r); exists && slices.ContainsFunc(wider, func(name string) bool {
+		return name != dataset && !slices.Contains(snapshotDatasets, name)
+	}) {
+		scope = wider
 		if state, err = s.proofScope(ctx, dataset, scope); err != nil {
 			return Reference{}, err
 		}

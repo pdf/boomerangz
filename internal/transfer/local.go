@@ -384,17 +384,14 @@ func (l *Local) load(ctx context.Context, request Request, stream string) (View,
 	if err != nil {
 		return view, err
 	}
-	if anchor == "" {
+	if anchor.Name == "" {
 		if !l.sameHost {
 			return view, &DestinationUnavailableError{Root: request.DestinationRoot}
 		}
 		return view, fmt.Errorf("destination has no existing ancestor")
 	}
-	view.RootDestinationExists = anchor == mappedRoot
-	view.RootDestinationIdentity, err = l.target.InspectDatasetIdentity(ctx, anchor)
-	if err != nil {
-		return view, err
-	}
+	view.RootDestinationExists = anchor.Name == mappedRoot
+	view.RootDestinationIdentity = anchor
 	return view, checkHostLocal(ctx, l.backend, request, view.RootDestinationIdentity)
 }
 
@@ -827,7 +824,7 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 	mappedRoot := plan.TargetBinding.MappedDataset
 	// A placeholder is never an anchor: until the root's own replica replaces
 	// it, the binding stays on the nearest real ancestor.
-	rootPlaceholder, rootErr := placeholderAt(ctx, l.target, mappedRoot)
+	_, rootPlaceholder, rootErr := placeholderAt(ctx, l.target, mappedRoot)
 	if rootErr != nil {
 		return result, rootErr
 	}
@@ -951,7 +948,7 @@ func (l *Local) setAsidePlaceholder(ctx context.Context, request Request, stream
 	if !exists(destination) {
 		return nil
 	}
-	if placeholder, err := placeholderAt(ctx, l.target, destination); err != nil || !placeholder {
+	if _, placeholder, err := placeholderAt(ctx, l.target, destination); err != nil || !placeholder {
 		return err
 	}
 	// The busy check below needs any resume token beneath it too.

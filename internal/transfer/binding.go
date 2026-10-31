@@ -53,19 +53,20 @@ type localIdentityReader interface {
 	InspectState(context.Context, string, bool) (zfs.State, error)
 }
 
-// placeholderAt reports whether dataset is a placeholder. Its identity says
-// whether the marker is set, in one query; only a marked dataset is inspected
-// in full, since a state inspection costs commands per snapshot.
-func placeholderAt(ctx context.Context, reader localIdentityReader, dataset string) (bool, error) {
+// placeholderAt reports whether dataset is a placeholder, with the identity it
+// read to decide. The identity says whether the marker is set, in one query;
+// only a marked dataset is inspected in full, since a state inspection costs
+// commands per snapshot.
+func placeholderAt(ctx context.Context, reader localIdentityReader, dataset string) (zfs.DatasetIdentity, bool, error) {
 	identity, err := reader.InspectDatasetIdentity(ctx, dataset)
 	if err != nil || !identity.Placeholder {
-		return false, err
+		return identity, false, err
 	}
 	state, err := reader.InspectState(ctx, dataset, false)
 	if err != nil {
-		return false, err
+		return identity, false, err
 	}
-	return isPlaceholder(state, dataset), nil
+	return identity, isPlaceholder(state, dataset), nil
 }
 
 // isPlaceholder reports whether state shows dataset as a placeholder: marked
@@ -95,25 +96,25 @@ func isPlaceholder(state zfs.State, dataset string) bool {
 // binding on one would block the replica it stood in for from ever replacing
 // it. Only datasets inside the configured root can be placeholders, so nothing
 // above it is inspected.
-func nearestReal(ctx context.Context, reader localIdentityReader, name, configuredRoot string, inventory []zfs.Dataset) (string, error) {
+func nearestReal(ctx context.Context, reader localIdentityReader, name, configuredRoot string, inventory []zfs.Dataset) (zfs.DatasetIdentity, error) {
 	for candidate := nearestExisting(name, inventory); candidate != ""; {
 		if !inside(candidate, configuredRoot) {
-			return candidate, nil
+			return reader.InspectDatasetIdentity(ctx, candidate)
 		}
-		placeholder, err := placeholderAt(ctx, reader, candidate)
+		identity, placeholder, err := placeholderAt(ctx, reader, candidate)
 		if err != nil {
-			return "", err
+			return zfs.DatasetIdentity{}, err
 		}
 		if !placeholder {
-			return candidate, nil
+			return identity, nil
 		}
 		index := strings.LastIndexByte(candidate, '/')
 		if index < 0 {
-			return "", nil
+			return zfs.DatasetIdentity{}, nil
 		}
 		candidate = nearestExisting(candidate[:index], inventory)
 	}
-	return "", nil
+	return zfs.DatasetIdentity{}, nil
 }
 
 // InspectTarget resolves an unbound target through its nearest existing ancestor.
@@ -140,11 +141,12 @@ func InspectTarget(ctx context.Context, reader localIdentityReader, request Requ
 		inspection.Status = "unavailable"
 		return inspection, err
 	}
-	anchor, err := nearestReal(ctx, reader, mapped, request.DestinationRoot, inventory)
+	nearest, err := nearestReal(ctx, reader, mapped, request.DestinationRoot, inventory)
 	if err != nil {
 		inspection.Status = "unavailable"
 		return inspection, err
 	}
+	anchor := nearest.Name
 	if anchor == "" {
 		inspection.Status = "unavailable"
 		return inspection, fmt.Errorf("destination has no existing ancestor")
