@@ -53,6 +53,8 @@ type Direct struct {
 	runner         CommandRunner
 	poolRunner     CommandRunner
 	identityRunner CommandRunner
+	// batch overrides inspectionBatch, so tests can split a small inventory.
+	batch int
 }
 
 // NewDirect creates a direct executor for an explicit zfs executable path.

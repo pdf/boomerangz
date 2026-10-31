@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -26,20 +27,32 @@ func (r *stateRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 		if r.fail {
 			return nil, fmt.Errorf("hold query failed")
 		}
-		return []byte("tank/data@snap\tforeign-hold\t123\n"), nil
+		var out strings.Builder
+		for _, snapshot := range args[2:] {
+			if snapshot == "tank/data@snap" {
+				out.WriteString(snapshot + "\tforeign-hold\t123\n")
+			}
+		}
+		return []byte(out.String()), nil
 	case "get":
-		object := args[len(args)-1]
-		if (r.disappear || r.unstable) && object == "tank/data@snap" {
+		// get -H -p -o <columns> <keys> <object>...
+		keys, objects := args[5], args[6:]
+		if (r.disappear || r.unstable) && slices.Contains(objects, "tank/data@snap") {
 			r.disappear = false
 			if !r.unstable {
 				r.inventory = "tank/data\tfilesystem\t1\t123\t6\n"
 			}
 			return nil, fmt.Errorf("zfs get: exit status 1: cannot open 'tank/data@snap': dataset does not exist")
 		}
-		if args[len(args)-2] != "all" {
-			return []byte(object + "\torg.boomerangz:state:lineage\t-\thidden\t-\n"), nil
+		var out strings.Builder
+		for _, object := range objects {
+			if keys != "all" {
+				out.WriteString(object + "\torg.boomerangz:state:lineage\t-\thidden\t-\n")
+				continue
+			}
+			out.WriteString(object + "\torg.boomerangz:enabled\ton\t-\tlocal\n" + object + "\tcompression\tzstd\t-\tlocal\n")
 		}
-		return []byte(object + "\torg.boomerangz:enabled\ton\t-\tlocal\n" + object + "\tcompression\tzstd\t-\tlocal\n"), nil
+		return []byte(out.String()), nil
 	}
 	return nil, nil
 }
@@ -98,8 +111,10 @@ func TestInspectStateScopeAndHiddenMetadata(t *testing.T) {
 		t.Fatalf("unexpected state: %#v", state)
 	}
 	for _, args := range r.calls[1:] {
-		if strings.Contains(args[len(args)-1], "#") || args[len(args)-1] == "tank/data/child" {
-			t.Fatalf("queried excluded object: %v", args)
+		for _, arg := range args {
+			if strings.Contains(arg, "#") || arg == "tank/data/child" {
+				t.Fatalf("queried excluded object: %v", args)
+			}
 		}
 	}
 	r.fail = true
@@ -179,5 +194,108 @@ func TestRenameDatasetArguments(t *testing.T) {
 		if err := d.RenameDataset(t.Context(), pair[0], pair[1]); err == nil || r.args != nil {
 			t.Errorf("rename %s to %s accepted", pair[0], pair[1])
 		}
+	}
+}
+
+// recordedPool answers list, get and holds for a fixed set of objects, one or
+// many per query, the way zfs does: one row per property of each object named.
+type recordedPool struct {
+	inventory string
+	all       map[string]string // object -> its "get all" rows
+	state     map[string]string // object -> its fixed-key rows
+	holds     map[string]string // snapshot -> its hold rows
+	calls     [][]string
+}
+
+func (r *recordedPool) Run(_ context.Context, args ...string) ([]byte, error) {
+	r.calls = append(r.calls, slices.Clone(args))
+	var out strings.Builder
+	switch args[0] {
+	case "list":
+		return []byte(r.inventory), nil
+	case "get":
+		for _, object := range args[6:] {
+			if args[5] == "all" {
+				out.WriteString(r.all[object])
+			} else {
+				out.WriteString(r.state[object])
+			}
+		}
+	case "holds":
+		for _, snapshot := range args[2:] {
+			out.WriteString(r.holds[snapshot])
+		}
+	}
+	return []byte(out.String()), nil
+}
+
+func newRecordedPool() *recordedPool {
+	ns := propertyNamespace
+	return &recordedPool{
+		inventory: "tank/data\tfilesystem\t1\t100\t5\n" +
+			"tank/data@a\tsnapshot\t2\t101\t6\n" +
+			"tank/data@b\tsnapshot\t3\t102\t7\n" +
+			"tank/data@c\tsnapshot\t4\t103\t8\n" +
+			"tank/data#a\tbookmark\t2\t101\t6\n" +
+			"tank/data@d\tsnapshot\t5\t104\t9\n",
+		all: map[string]string{
+			"tank/data": "tank/data\t" + ns + "enabled\ton\t-\tlocal\n" +
+				"tank/data\t" + ns + "state:owner\towner\t-\tlocal\n" +
+				"tank/data\treceive_resume_token\t1-token\t-\t-\n" +
+				"tank/data\tcompression\tzstd\t-\tlocal\n",
+			"tank/data@a": "tank/data@a\t" + ns + "state:snapshot\tsnap-a\t-\tlocal\n" +
+				"tank/data@a\tclones\tpool/clone\t-\t-\n",
+			"tank/data@b": "tank/data@b\t" + ns + "state:snapshot\tsnap-b\tsnap-b\treceived\n",
+			"tank/data@c": "tank/data@c\t" + ns + "enabled\toff\t-\tlocal\n",
+			"tank/data@d": "",
+		},
+		state: map[string]string{
+			"tank/data":   "tank/data\t" + ns + "state:lineage\tline\t-\tlocal\n",
+			"tank/data@a": "tank/data@a\t" + ns + "state:lineage\t-\thidden-a\t-\n",
+			"tank/data@b": "tank/data@b\t" + ns + "state:snapshot\tsnap-b\tsnap-b\treceived\n",
+			"tank/data@c": "",
+			"tank/data@d": "tank/data@d\t" + ns + "state:created\t2026\t-\tlocal\n",
+		},
+		holds: map[string]string{
+			"tank/data@a": "tank/data@a\tz-hold\t123\ntank/data@a\ta-hold\t123\n",
+			"tank/data@c": "tank/data@c\tonly\t123\n",
+		},
+	}
+}
+
+func TestBatchedInspectionMatchesOneQueryPerObject(t *testing.T) {
+	t.Parallel()
+	perObject := &Direct{runner: newRecordedPool(), batch: 1}
+	want, err := perObject.InspectState(t.Context(), "tank/data", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two per batch splits the objects across batch boundaries; the default
+	// reads them all at once.
+	for _, batch := range []int{2, 0} {
+		pool := newRecordedPool()
+		got, err := (&Direct{runner: pool, batch: batch}).InspectState(t.Context(), "tank/data", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("batch %d: state differs from one query per object:\n got %#v\nwant %#v", batch, got, want)
+		}
+		if batch == 0 && len(pool.calls) != 4 {
+			t.Fatalf("one inspection ran %d commands, want list, two gets and holds: %v", len(pool.calls), pool.calls)
+		}
+	}
+	// The fixture exercises what the regrouping must preserve.
+	if want.ResumeTokens["tank/data"] != "1-token" || len(want.Clones["tank/data@a"]) != 1 || want.Received["tank/data@a"][propertyNamespace+"state:lineage"] != "hidden-a" || !slices.Equal(want.Holds["tank/data@a"], []string{"a-hold", "z-hold"}) {
+		t.Fatalf("fixture not exercised: %#v", want)
+	}
+}
+
+func TestBatchedInspectionRefusesARowForAnUnnamedObject(t *testing.T) {
+	t.Parallel()
+	pool := newRecordedPool()
+	pool.all["tank/data@b"] += "tank/data@elsewhere\tcompression\tlz4\t-\tlocal\n"
+	if _, err := (&Direct{runner: pool}).InspectState(t.Context(), "tank/data", false); err == nil || !strings.Contains(err.Error(), "outside exact object query") {
+		t.Fatalf("a row for an object the query did not name was accepted: %v", err)
 	}
 }
