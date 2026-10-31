@@ -101,7 +101,7 @@ func TestTailKeepsTheNewestTransitionsOldestFirst(t *testing.T) {
 	tail.Add([]*controlrpc.JobStatus{{Job: "snapshot:tank/a", State: "snapshotting", ChangedUnixNano: at.UnixNano()}, {Job: "snapshot:tank/a", State: "succeeded", ChangedUnixNano: at.UnixNano()}})
 	tail.Add(nil)
 	tail.Add([]*controlrpc.JobStatus{{Job: "inactive:tank/b:false", State: "retiring"}, {Job: "remote:tank/c:offsite", State: "waiting-retry", Reason: "connection refused by the remote peer"}})
-	if err := tail.Terminal(&output, 80); err != nil {
+	if err := tail.terminal(&output, 80, time.UTC); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
@@ -226,4 +226,40 @@ type countingWriter struct {
 func (w *countingWriter) Write(p []byte) (int, error) {
 	w.count++
 	return w.Buffer.Write(p)
+}
+
+func TestTerminalTimesAreInTheDisplayZone(t *testing.T) {
+	t.Parallel()
+	zone := time.FixedZone("AEST", 10*60*60)
+	observed := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	next := observed.Add(time.Hour)
+	snapshot := &controlrpc.StatusSnapshot{ObservedUnixNano: observed.UnixNano(), Datasets: []*controlrpc.DatasetStatus{{Name: "tank/data", Active: true, NextSnapshotUnixNano: next.UnixNano()}}}
+	var status bytes.Buffer
+	if err := terminal(&status, snapshot, 140, zone); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"2026-09-13T22:00:00+10:00", "2026-09-13T23:00:00+10:00"} {
+		if !strings.Contains(status.String(), want) {
+			t.Fatalf("status lacks %q: %q", want, status.String())
+		}
+	}
+	if strings.Contains(status.String(), "Z\n") || strings.Contains(status.String(), "T12:00:00") {
+		t.Fatalf("status shows UTC times: %q", status.String())
+	}
+	tail := NewTail(1)
+	tail.Add([]*controlrpc.JobStatus{{Job: "snapshot:tank/data", State: "succeeded", ChangedUnixNano: observed.UnixNano()}})
+	var transitions bytes.Buffer
+	if err := tail.terminal(&transitions, 140, zone); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(transitions.String(), "2026-09-13T22:00:00+10:00") {
+		t.Fatalf("transitions=%q, want the local time", transitions.String())
+	}
+	var structured bytes.Buffer
+	if err := JSON(&structured, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(structured.String(), `"observed":"2026-09-13T12:00:00Z"`) {
+		t.Fatalf("JSON=%s, want UTC", structured.String())
+	}
 }

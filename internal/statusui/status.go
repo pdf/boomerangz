@@ -95,8 +95,13 @@ func (t *Tail) Add(transitions []*controlrpc.JobStatus) {
 }
 
 // Terminal writes the held transitions under a heading, oldest first, each
-// line cut to width. It writes nothing when none are held.
+// line cut to width, with times in the local zone. It writes nothing when
+// none are held.
 func (t *Tail) Terminal(writer io.Writer, width int) error {
+	return t.terminal(writer, width, time.Local)
+}
+
+func (t *Tail) terminal(writer io.Writer, width int, zone *time.Location) error {
 	if len(t.events) == 0 {
 		return nil
 	}
@@ -111,7 +116,7 @@ func (t *Tail) Terminal(writer io.Writer, width int) error {
 	for _, event := range t.events {
 		at := "-"
 		if event.GetChangedUnixNano() != 0 {
-			at = time.Unix(0, event.GetChangedUnixNano()).UTC().Format(time.RFC3339)
+			at = time.Unix(0, event.GetChangedUnixNano()).In(zone).Format(time.RFC3339)
 		}
 		detail := identitySummary(event)
 		if reason := event.GetReason(); reason != "" {
@@ -252,13 +257,18 @@ func displayJobName(name string) string {
 	return name
 }
 
-// Terminal writes a compact status display that degrades at narrow widths.
+// Terminal writes a compact status display that degrades at narrow widths,
+// with times in the local zone. Structured output stays in UTC.
 func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) error {
+	return terminal(writer, snapshot, width, time.Local)
+}
+
+func terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int, zone *time.Location) error {
 	view := normalized(snapshot)
 	if width <= 0 {
 		width = 80
 	}
-	if _, err := fmt.Fprintf(writer, "boomerangz  dataset generation %d  config generation %d  %s\n", view.Generation, view.ConfigGeneration, view.Observed.Format(time.RFC3339)); err != nil {
+	if _, err := fmt.Fprintf(writer, "boomerangz  dataset generation %d  config generation %d  %s\n", view.Generation, view.ConfigGeneration, view.Observed.In(zone).Format(time.RFC3339)); err != nil {
 		return err
 	}
 	if err := writePermissionWarnings(writer, view.Destinations); err != nil {
@@ -282,7 +292,7 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) 
 				state = "active"
 			}
 			if dataset.GetNextSnapshotUnixNano() != 0 {
-				next = time.Unix(0, dataset.GetNextSnapshotUnixNano()).UTC().Format(time.RFC3339)
+				next = time.Unix(0, dataset.GetNextSnapshotUnixNano()).In(zone).Format(time.RFC3339)
 			}
 			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\n", dataset.GetName(), state, next); err != nil {
 				return err
