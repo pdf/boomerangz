@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -82,6 +84,87 @@ func TestDatasetListNamesMembersAndExclusions(t *testing.T) {
 	}
 }
 
+func TestDatasetListFiltersByStatus(t *testing.T) {
+	t.Parallel()
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		args = append([]string{"dataset", "--config", filepath.Join("testdata", "empty.toml"), "--config-dir", t.TempDir()}, args...)
+		if err := runWithReader(t.Context(), args, &output, io.Discard, BuildInfo{}, memberReader{}); err != nil {
+			t.Fatal(err)
+		}
+		return output.String()
+	}
+	rows := func(output string) []string {
+		var rows []string
+		for line := range strings.SplitSeq(output, "\n") {
+			if fields := strings.Fields(line); len(fields) == 2 && fields[0] != "STATUS" {
+				rows = append(rows, fields[0]+" "+fields[1])
+			}
+		}
+		return rows
+	}
+	// backup and archive are where tank/home and its member place their
+	// replicas; tank is inactive and hidden by default.
+	byDefault := run("list")
+	if got, want := rows(byDefault), []string{"target archive", "target backup", "active tank/home", "excluded tank/home/cache", "member tank/home/docs"}; !slices.Equal(got, want) {
+		t.Errorf("default rows = %q, want %q", got, want)
+	}
+	if !strings.Contains(byDefault, "1 inactive dataset hidden; show it with: boomerangz dataset list --status all") {
+		t.Errorf("default list does not say inactive datasets were hidden:\n%s", byDefault)
+	}
+	all := run("list", "--status", "all")
+	if got := rows(all); len(got) != 6 || !slices.Contains(got, "inactive tank") || strings.Contains(all, "hidden") {
+		t.Errorf("--status all:\n%s", all)
+	}
+	if got, want := rows(run("list", "--status", "target,inactive")), []string{"target archive", "target backup", "inactive tank"}; !slices.Equal(got, want) {
+		t.Errorf("--status target,inactive rows = %q, want %q", got, want)
+	}
+	var entries []struct {
+		Dataset struct {
+			Name string `json:"name"`
+		} `json:"dataset"`
+		Replica discovery.Replica `json:"replica"`
+	}
+	if err := json.Unmarshal([]byte(run("list", "--json", "--status", "target")), &entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || entries[1].Dataset.Name != "backup" || entries[1].Replica != (discovery.Replica{Source: "tank/home", Destination: "backup"}) {
+		t.Errorf("--json --status target = %+v", entries)
+	}
+}
+
+// inactiveReader holds only datasets nothing manages.
+type inactiveReader struct{}
+
+func (inactiveReader) ListDatasets(context.Context) ([]zfs.Dataset, error) {
+	return []zfs.Dataset{{Name: "tank", Type: zfs.Filesystem, EncryptionRoot: "-"}, {Name: "tank/data", Type: zfs.Filesystem, EncryptionRoot: "-"}}, nil
+}
+
+func (inactiveReader) GetActivationProperties(context.Context) ([]zfs.Property, error) {
+	return nil, nil
+}
+
+func (inactiveReader) GetStoredProperties(context.Context, []string) ([]zfs.Property, error) {
+	return nil, nil
+}
+
+func TestDatasetListMarksReplicasBeneathConfiguredReplicationRoots(t *testing.T) {
+	t.Parallel()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(configPath, []byte("[ssh_shell]\nreplication_roots = [\"tank\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	args := []string{"dataset", "--config", configPath, "--config-dir", t.TempDir(), "list"}
+	if err := runWithReader(t.Context(), args, &output, io.Discard, BuildInfo{}, inactiveReader{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "target  tank/data\n") || !strings.Contains(output.String(), "1 inactive dataset hidden") {
+		t.Errorf("tank/data beneath the replication root is not a target:\n%s", output.String())
+	}
+}
+
 // collidingReader holds two actor roots whose replicas would both land at
 // backup/home, neither established there.
 type collidingReader struct{}
@@ -148,7 +231,7 @@ func TestDatasetOutputShowsBlockedTargets(t *testing.T) {
 	}
 	// Both roots stay active; only their shared target is blocked.
 	list := run("list")
-	for _, want := range []string{"active    tank/a/home  backup", "active    tank/b/home  backup", "BLOCKED TARGETS", "Inspect blocked targets"} {
+	for _, want := range []string{"active  tank/a/home  backup", "active  tank/b/home  backup", "BLOCKED TARGETS", "Inspect blocked targets"} {
 		if !strings.Contains(list, want) {
 			t.Errorf("list output lacks %q:\n%s", want, list)
 		}

@@ -47,7 +47,7 @@ func TestDatasetHumanOutput(t *testing.T) {
 		command []string
 		want    []string
 	}{
-		{"list", []string{"list"}, []string{"STATUS", "active    tank/data", "invalid   tank/bad", "dataset inspect <dataset>"}},
+		{"list", []string{"list"}, []string{"STATUS", "active   tank/data", "invalid  tank/bad", "dataset inspect <dataset>"}},
 		{"inspect", []string{"inspect", "tank/bad"}, []string{"Dataset: tank/bad", "Activation: active", "Policy: invalid", "Remote destinations: missing", "remote = missing (set on tank/bad)", "Errors:", `unknown remote "missing"`}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

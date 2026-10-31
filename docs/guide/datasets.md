@@ -21,14 +21,34 @@ These commands are read-only and produce human-readable output by default.
 | `active` | an actor root: enabled, with no enabled ancestor |
 | `member` | inside a root's subtree and managed by that root |
 | `excluded` | inside a root's subtree but left out of it |
-| `inactive` | not enabled and not inside any root |
+| `target` | a replica Boomerangz receives into, or part of one |
+| `inactive` | not enabled, not inside any root, and not a replica |
 | `invalid` | its policy has errors; inspect it for the reported errors |
 
 A root with a destination blocked by a collision stays `active`; `dataset list`
 names the blocked destination beside it.
 
+A dataset reads as `target` when an actor root on this host places its replica
+there on a local destination, when it carries a source root's lineage received
+with a stream that sent properties, or when it lies beneath one of this host's
+`replication_roots`; anything beneath such a dataset is part of the same
+replica. `dataset inspect` says which of these marks it. A replica on another
+host, or one received without properties beneath a root this host is not
+configured to receive into, still reads as `inactive`.
+
+`dataset list` leaves inactive datasets out, and says how many it hid. Show
+only the statuses you want with `--status`, repeated or comma-separated, and
+every dataset with `--status all`:
+
+```sh
+boomerangz dataset list --status target
+boomerangz dataset list --status active,member
+boomerangz dataset list --status all
+```
+
 `dataset inspect` shows activation and validation status, the actor root the
-dataset belongs to and, for a root, its members and blocked destinations,
+dataset belongs to, what marks it as a replica and, for a root, its members
+and blocked destinations,
 together with the effective policy, property provenance, warnings, and
 errors.
 

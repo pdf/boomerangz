@@ -32,4 +32,5 @@ complete -c boomerangz -l client-key -r -F
 complete -c boomerangz -l scope -r -a 'status trigger replicate prune admin'
 complete -c boomerangz -l expires-in -r
 complete -c boomerangz -l owner -r
+complete -c boomerangz -n '__fish_seen_subcommand_from dataset; and __fish_seen_subcommand_from list' -l status -r -a 'all active member excluded target inactive invalid' -d 'Show only this status'
 complete -c boomerangz -n '__fish_seen_subcommand_from status version; or begin; __fish_seen_subcommand_from dataset; and __fish_seen_subcommand_from list inspect; end' -l json -d 'Emit JSON'

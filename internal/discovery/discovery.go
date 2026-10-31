@@ -53,6 +53,25 @@ type Entry struct {
 	// replica there would overlap another replica or an actor root. Only
 	// those targets stop: snapshots, pruning and every other target go on.
 	Blocked []BlockedTarget `json:"blocked,omitempty"`
+	// Replica is set on a dataset that is, or lies within, a replica
+	// boomerangz receives into, rather than a source. It describes where the
+	// dataset came from, not what it does: one that is also an actor root or
+	// member is still that.
+	Replica Replica `json:"replica,omitzero"`
+}
+
+// Replica says what marks a dataset as a replica. Any of its fields may be
+// empty, but not all of them.
+type Replica struct {
+	// Source is the actor root on this host whose local destination places
+	// its replica here.
+	Source string `json:"source,omitempty"`
+	// Destination is the local destination root or configured replication
+	// root the replica lies beneath.
+	Destination string `json:"destination,omitempty"`
+	// Lineage is the source root's lineage, received with a stream that
+	// carried properties.
+	Lineage string `json:"lineage,omitempty"`
 }
 
 // BlockedTarget is one target an actor root may not send to, and why.
@@ -150,6 +169,10 @@ type Options struct {
 	// missing from it is still a valid name, but its replicas cannot be
 	// checked for overlap with others.
 	Destinations map[string]RemoteDestination
+	// ReplicationRoots are the datasets this host receives remote sources'
+	// replicas beneath. They only mark replicas, so a scanner that has no use
+	// for Entry.Replica may leave them unset.
+	ReplicationRoots []string
 }
 
 // RemoteDestination is where a configured remote receives: the namespace of
@@ -375,7 +398,9 @@ func (s *Scanner) Scan(ctx context.Context, retained []string) (*Generation, err
 		}
 	}
 	markRoots(names, entries)
-	markCollisions(names, entries, s.destinations)
+	replicas, roots := plannedReplicas(names, entries, s.destinations)
+	markCollisions(entries, replicas, roots)
+	markReplicas(names, entries, replicas, s.options.ReplicationRoots)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -643,25 +668,10 @@ func overlaps(a, b string) bool {
 	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
-// markCollisions blocks each actor root's target whose replica would overlap
-// another replica in the same destination namespace, or would land inside an
-// actor root on this host.
-//
-// A root owns its replica's whole subtree: its members are received beneath
-// it, and a reseed destroys it recursively. Two replicas where one contains
-// the other - two roots, or one root's two targets - are therefore never
-// safe: the first sign would be a lineage or GUID failure after a stream had
-// already run, and a reseed of one would destroy the other. A local replica
-// inside a root's source is no safer: it would inherit that root's activation
-// and be snapshotted as one of its members.
-//
-// Only the target is blocked, never the root: its snapshots, pruning and other
-// targets have nothing to do with where one replica lands. A replica the root
-// has already established there, by a stored binding, keeps its target and the
-// newcomer that would overlap it is blocked, so a mistake in new configuration
-// cannot stop a working replica. Without that evidence, or with it on both
-// sides, both are blocked.
-func markCollisions(names []string, entries map[string]Entry, remotes map[string]RemoteDestination) {
+// plannedReplicas lists where each actor root's replicas land, for every local
+// destination and every remote whose destination is known, with the actor
+// roots themselves.
+func plannedReplicas(names []string, entries map[string]Entry, remotes map[string]RemoteDestination) ([]replica, []string) {
 	var replicas []replica
 	var roots []string
 	for _, name := range names {
@@ -705,6 +715,28 @@ func markCollisions(names []string, entries map[string]Entry, remotes map[string
 			}
 		}
 	}
+	return replicas, roots
+}
+
+// markCollisions blocks each actor root's target whose replica would overlap
+// another replica in the same destination namespace, or would land inside an
+// actor root on this host.
+//
+// A root owns its replica's whole subtree: its members are received beneath
+// it, and a reseed destroys it recursively. Two replicas where one contains
+// the other - two roots, or one root's two targets - are therefore never
+// safe: the first sign would be a lineage or GUID failure after a stream had
+// already run, and a reseed of one would destroy the other. A local replica
+// inside a root's source is no safer: it would inherit that root's activation
+// and be snapshotted as one of its members.
+//
+// Only the target is blocked, never the root: its snapshots, pruning and other
+// targets have nothing to do with where one replica lands. A replica the root
+// has already established there, by a stored binding, keeps its target and the
+// newcomer that would overlap it is blocked, so a mistake in new configuration
+// cannot stop a working replica. Without that evidence, or with it on both
+// sides, both are blocked.
+func markCollisions(entries map[string]Entry, replicas []replica, roots []string) {
 	block := func(r replica, reason string) {
 		entry := entries[r.root]
 		if !slices.ContainsFunc(entry.Blocked, func(b BlockedTarget) bool { return b.Target == r.name && b.Remote == r.remote }) {
@@ -736,6 +768,63 @@ func markCollisions(names []string, entries map[string]Entry, remotes map[string
 			}
 		}
 	}
+}
+
+// markReplicas marks the datasets that are replicas boomerangz receives into:
+// one where an actor root on this host places its replica on a local
+// destination, one carrying a source root's received lineage, and one beneath
+// a root this host receives remote sources' replicas into. Everything beneath
+// a replica is part of it.
+//
+// A received lineage is only present when the stream carried properties, and
+// a remote source's replica is only recognised by its replication root when
+// this host's configuration names it; the other marks need neither.
+func markReplicas(names []string, entries map[string]Entry, replicas []replica, replicationRoots []string) {
+	for _, name := range names {
+		entry := entries[name]
+		marked := entries[entry.Parent].Replica
+		// A blocked target receives nothing, so what lies there is not its
+		// replica.
+		if marked.Source == "" {
+			for _, r := range replicas {
+				if r.namespace == "local" && r.mapped == name && entries[r.root].ErrBlocked(r.name, false) == nil {
+					marked.Source, marked.Destination = r.root, r.name
+					break
+				}
+			}
+		}
+		if lineage := receivedLineage(entry); lineage != "" {
+			marked.Lineage = lineage
+		}
+		if marked.Destination == "" {
+			for _, root := range replicationRoots {
+				if strings.HasPrefix(name, root+"/") {
+					marked.Destination = root
+					break
+				}
+			}
+		}
+		entry.Replica = marked
+		entries[name] = entry
+	}
+}
+
+// receivedLineage is the lineage a dataset received from its source root. A
+// dataset owned here is a source, whatever it once received.
+func receivedLineage(entry Entry) string {
+	var lineage string
+	for _, row := range entry.Stored {
+		if row.Dataset != entry.Dataset.Name {
+			continue
+		}
+		switch {
+		case row.Name == policy.StateNamespace+"owner" && row.Source == zfs.SourceLocal:
+			return ""
+		case row.Name == policy.StateNamespace+"lineage" && row.Source == zfs.SourceReceived:
+			lineage = row.Value
+		}
+	}
+	return lineage
 }
 
 // storedBinding is the part of a root's stored target binding that says where
