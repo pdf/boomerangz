@@ -47,6 +47,7 @@ func TestIdentityRecoveryPreviewAndApply(t *testing.T) {
 	executor := recoveryExecutor{properties: []zfs.Property{
 		{Dataset: "tank", Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal},
 		{Dataset: "tank", Name: lifecycle.OwnerProperty, Value: owner, Source: zfs.SourceLocal},
+		{Dataset: "tank", Name: lifecycle.VersionProperty, Value: "2", Source: zfs.SourceLocal},
 		{Dataset: "tank", Name: lifecycle.LineageProperty, Value: lineage, Source: zfs.SourceLocal},
 	}}
 	cfg := config.Defaults()

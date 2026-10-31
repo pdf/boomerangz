@@ -69,6 +69,9 @@ func RootAuthority(state zfs.State, root, installation string) (string, error) {
 	if hidden := state.Received[root][LineageProperty]; hidden != "" && hidden != values[LineageProperty] {
 		return "", fmt.Errorf("conflicting received lineage on %s", root)
 	}
+	if err := CurrentState(state, root); err != nil {
+		return "", err
+	}
 	return values[LineageProperty], nil
 }
 

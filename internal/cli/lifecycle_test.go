@@ -121,6 +121,7 @@ func TestAdoptionReviewsLocalTargetWithoutSecondFlag(t *testing.T) {
 		{Dataset: "tank", Name: policy.Namespace + "local", Value: "backup/data", Source: zfs.SourceLocal},
 		{Dataset: "tank", Name: lifecycle.LineageProperty, Value: lineage, Source: zfs.SourceLocal},
 		{Dataset: "tank", Name: lifecycle.OwnerProperty, Value: oldOwner, Source: zfs.SourceLocal},
+		{Dataset: "tank", Name: lifecycle.VersionProperty, Value: "2", Source: zfs.SourceLocal},
 	}}
 	cfg := config.Defaults()
 	cfg.Paths.IdentityDir = filepath.Join(t.TempDir(), "identity")

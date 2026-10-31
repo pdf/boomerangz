@@ -18,7 +18,7 @@ const fixtureInstallation = "22222222-2222-4222-8222-222222222222"
 func testFixture(t *testing.T) (Request, View) {
 	t.Helper()
 	source := zfs.Dataset{Name: "tank/data", Type: zfs.Filesystem, EncryptionRoot: "-"}
-	properties := []zfs.Property{{Dataset: source.Name, Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal}, {Dataset: source.Name, Name: policy.Namespace + "local", Value: "backup/data", Source: zfs.SourceLocal}, {Dataset: source.Name, Name: lifecycle.LineageProperty, Value: fixtureLineage, Source: zfs.SourceLocal}, {Dataset: source.Name, Name: lifecycle.OwnerProperty, Value: fixtureInstallation, Source: zfs.SourceLocal}}
+	properties := []zfs.Property{{Dataset: source.Name, Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal}, {Dataset: source.Name, Name: policy.Namespace + "local", Value: "backup/data", Source: zfs.SourceLocal}, {Dataset: source.Name, Name: lifecycle.LineageProperty, Value: fixtureLineage, Source: zfs.SourceLocal}, {Dataset: source.Name, Name: lifecycle.OwnerProperty, Value: fixtureInstallation, Source: zfs.SourceLocal}, {Dataset: source.Name, Name: lifecycle.VersionProperty, Value: "2", Source: zfs.SourceLocal}}
 	view := View{Inventory: []zfs.Dataset{{Name: "tank", Type: zfs.Filesystem}, source, {Name: "backup", Type: zfs.Filesystem}}, Source: zfs.State{Objects: []zfs.Object{{Name: source.Name, Type: "filesystem", GUID: 1, CreateTXG: 1}}, Properties: properties}, DestinationIdentity: zfs.DatasetIdentity{Name: "backup", Type: zfs.Filesystem, GUID: 10, Pool: "backup", PoolGUID: 11}}
 	for _, txg := range []uint64{2, 4} {
 		metadata, err := lifecycle.NewMetadata(fixtureLineage, time.Date(2026, 9, 6, 12, int(txg), 0, 0, time.UTC))

@@ -5,6 +5,7 @@ package lifecycle_test
 import (
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -68,7 +69,8 @@ func TestGuestInterruptedLineageInitialization(t *testing.T) {
 		}
 		command(t, "create", "-u", dataset)
 		command(t, "set", policy.Namespace+"enabled=on",
-			lifecycle.LineageProperty+"="+lineage, lifecycle.OwnerProperty+"="+owner, dataset)
+			lifecycle.LineageProperty+"="+lineage, lifecycle.OwnerProperty+"="+owner,
+			lifecycle.VersionProperty+"="+strconv.Itoa(lifecycle.CurrentVersion), dataset)
 		return lineage
 	}
 	// Every root the phases below build hangs off one tree, so cleanup is
