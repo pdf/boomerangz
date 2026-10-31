@@ -770,8 +770,8 @@ func TestTargetBindingStoresIdentityAndMapping(t *testing.T) {
 		anchor zfs.DatasetIdentity
 		stored string
 	}{
-		"bootstrap": {zfs.DatasetIdentity{Name: "backup", GUID: 10, Pool: "backup", PoolGUID: 11}, `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":10,"anchor":"backup"}`},
-		"replica":   {zfs.DatasetIdentity{Name: "backup/projects/data", GUID: 12, Pool: "backup", PoolGUID: 11}, `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12}`},
+		"bootstrap": {zfs.DatasetIdentity{Name: "backup", GUID: 10, Pool: "backup", PoolGUID: 11}, `{"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":10,"anchor":"backup"}`},
+		"replica":   {zfs.DatasetIdentity{Name: "backup/projects/data", GUID: 12, Pool: "backup", PoolGUID: 11}, `{"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12}`},
 	} {
 		binding, err := bindingFor(request, target.MappedDataset, test.anchor)
 		if err != nil {
@@ -788,13 +788,13 @@ func TestTargetBindingStoresIdentityAndMapping(t *testing.T) {
 		}
 	}
 	for name, value := range map[string]string{
-		"another version":   `{"version":1,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12}`,
-		"derivable field":   `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12,"destination_root":"backup"}`,
-		"no mapping":        `{"version":2,"pool_guid":11,"anchor_guid":12}`,
-		"invalid mapping":   `{"version":2,"pool_guid":11,"mapped":"/backup","anchor_guid":12}`,
-		"anchor outside":    `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":10,"anchor":"other"}`,
-		"replica as anchor": `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12,"anchor":"backup/projects/data"}`,
-		"trailing data":     `{"version":2,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12} {}`,
+		"versioned record":  `{"version":1,"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12}`,
+		"derivable field":   `{"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12,"destination_root":"backup"}`,
+		"no mapping":        `{"pool_guid":11,"anchor_guid":12}`,
+		"invalid mapping":   `{"pool_guid":11,"mapped":"/backup","anchor_guid":12}`,
+		"anchor outside":    `{"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":10,"anchor":"other"}`,
+		"replica as anchor": `{"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12,"anchor":"backup/projects/data"}`,
+		"trailing data":     `{"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12} {}`,
 	} {
 		state := zfs.State{Properties: []zfs.Property{{Dataset: request.Source, Name: targetBindingProperty(target.CanonicalTarget), Value: value, Source: zfs.SourceLocal}}}
 		if stored, err := storedTargetBinding(state, request.Source, target); err == nil {

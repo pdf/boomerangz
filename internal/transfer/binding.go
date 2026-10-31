@@ -12,10 +12,7 @@ import (
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
-const (
-	targetBindingVersion = 2
-	targetBindingPrefix  = lifecycle.TargetStatePrefix
-)
+const targetBindingPrefix = lifecycle.TargetStatePrefix
 
 // TargetBinding is the persistent source-side identity of one configured
 // destination. Anchor identifies either the existing destination dataset or,
@@ -28,7 +25,6 @@ const (
 // target, and the property key hashes CanonicalTarget; Pool and RelativePath
 // follow from Anchor.
 type TargetBinding struct {
-	Version         int    `json:"version"`
 	Transport       string `json:"transport"`
 	CanonicalTarget string `json:"canonical_target"`
 	DestinationRoot string `json:"destination_root"`
@@ -45,9 +41,10 @@ type TargetBinding struct {
 // changed discard or destination moves that, and only the stored name tells
 // the replica's old place from the new one. Anchor is stored only while it is
 // an ancestor of the mapped dataset: after the first receive the binding moves
-// to the replica itself, which Mapped already names.
+// to the replica itself, which Mapped already names. The record carries no
+// version of its own: it is in the format of the root it is stored on
+// (lifecycle.VersionProperty).
 type bindingRecord struct {
-	Version    int    `json:"version"`
 	PoolGUID   uint64 `json:"pool_guid"`
 	Mapped     string `json:"mapped"`
 	AnchorGUID uint64 `json:"anchor_guid"`
@@ -318,7 +315,7 @@ func bindingForTarget(request Request, mapped string, identity zfs.DatasetIdenti
 // bindingTemplate is what configuration says about a target: the part of a
 // binding that is never stored, which a stored record is completed from.
 func bindingTemplate(request Request, mapped, transport, canonical string) TargetBinding {
-	return TargetBinding{Version: targetBindingVersion, Transport: transport, CanonicalTarget: canonical, DestinationRoot: request.DestinationRoot, MappedDataset: mapped}
+	return TargetBinding{Transport: transport, CanonicalTarget: canonical, DestinationRoot: request.DestinationRoot, MappedDataset: mapped}
 }
 
 // bindingTarget is bindingTemplate for request's own root and target.
@@ -368,9 +365,6 @@ func storedTargetBinding(state zfs.State, root string, target TargetBinding) (*T
 		if err := decoder.Decode(&record); err != nil || decoder.More() {
 			return nil, fmt.Errorf("invalid target binding")
 		}
-		if record.Version != targetBindingVersion {
-			return nil, fmt.Errorf("target binding version %d is unsupported", record.Version)
-		}
 		if zfs.ValidateDataset(record.Mapped) != nil {
 			return nil, fmt.Errorf("invalid target binding mapping")
 		}
@@ -393,7 +387,7 @@ func storedTargetBinding(state zfs.State, root string, target TargetBinding) (*T
 }
 
 func validateBinding(binding TargetBinding) error {
-	if binding.Version != targetBindingVersion || (binding.Transport != "local" && binding.Transport != "ssh" && binding.Transport != "native") || binding.CanonicalTarget == "" || binding.DestinationRoot == "" || binding.MappedDataset == "" || binding.Pool == "" || binding.PoolGUID == 0 || binding.Anchor == "" || binding.AnchorGUID == 0 {
+	if (binding.Transport != "local" && binding.Transport != "ssh" && binding.Transport != "native") || binding.CanonicalTarget == "" || binding.DestinationRoot == "" || binding.MappedDataset == "" || binding.Pool == "" || binding.PoolGUID == 0 || binding.Anchor == "" || binding.AnchorGUID == 0 {
 		return fmt.Errorf("target binding is incomplete or unsupported")
 	}
 	if targetBindingProperty(binding.CanonicalTarget) == targetBindingPrefix {
@@ -406,7 +400,7 @@ func encodeBinding(binding TargetBinding) (string, error) {
 	if err := validateBinding(binding); err != nil {
 		return "", err
 	}
-	record := bindingRecord{Version: binding.Version, PoolGUID: binding.PoolGUID, Mapped: binding.MappedDataset, AnchorGUID: binding.AnchorGUID}
+	record := bindingRecord{PoolGUID: binding.PoolGUID, Mapped: binding.MappedDataset, AnchorGUID: binding.AnchorGUID}
 	if binding.Anchor != binding.MappedDataset {
 		record.Anchor = binding.Anchor
 	}
