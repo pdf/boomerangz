@@ -422,6 +422,12 @@ func (s *Service) ProtectSet(ctx context.Context, dataset, stream string, snapsh
 			}
 		}
 	}
+	unheld := slices.DeleteFunc(slices.Clone(snapshots), func(snapshot string) bool { return slices.Contains(state.Holds[snapshot], r.hold()) })
+	// A proof already stored and held needs no write, so there is nothing for
+	// the re-read below to guard.
+	if exists && len(unheld) == 0 {
+		return r, nil
+	}
 	if err := s.proofUnchanged(ctx, dataset, snapshotDatasets, "", state); err != nil {
 		return Reference{}, err
 	}
@@ -438,11 +444,9 @@ func (s *Service) ProtectSet(ctx context.Context, dataset, stream string, snapsh
 			return Reference{}, err
 		}
 	}
-	for _, snapshot := range snapshots {
-		if !slices.Contains(state.Holds[snapshot], r.hold()) {
-			if err := backend.Hold(ctx, r.hold(), snapshot); err != nil {
-				return Reference{}, err
-			}
+	for _, snapshot := range unheld {
+		if err := backend.Hold(ctx, r.hold(), snapshot); err != nil {
+			return Reference{}, err
 		}
 	}
 	return r, nil
