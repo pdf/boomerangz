@@ -52,7 +52,7 @@ _boomerangz_complete_reseed_targets() {
 _boomerangz_option_takes_value() {
     case $1 in
         --config|--config-dir|--socket|--credential|--listener|\
-            --client-cert|--client-key|--scope|--expires-in|--owner)
+            --client-cert|--client-key|--scope|--expires-in|--owner|--status)
             return 0
             ;;
     esac
@@ -86,7 +86,10 @@ _boomerangz_options() {
         'pairing import'|'pairing list'|'pairing revoke')
             printf '%s' '-h --help --config --config-dir'
             ;;
-        'dataset list'|'dataset inspect')
+        'dataset list')
+            printf '%s' '-h --help --config --config-dir --status --json'
+            ;;
+        'dataset inspect')
             printf '%s' '-h --help --config --config-dir --json'
             ;;
         'dataset adopt'|'dataset reseed'|'dataset abort-receive')
@@ -127,6 +130,15 @@ _boomerangz() {
             done
             return
             ;;
+        --status=*)
+            local status_prefix=${current%=*}=
+            local status_value=${current#*=}
+            _boomerangz_complete_words 'all active member excluded target inactive invalid' "$status_value"
+            for i in "${!COMPREPLY[@]}"; do
+                COMPREPLY[i]=${status_prefix}${COMPREPLY[i]}
+            done
+            return
+            ;;
     esac
 
     if _boomerangz_option_takes_value "$previous"; then
@@ -136,6 +148,9 @@ _boomerangz() {
                 ;;
             --scope)
                 _boomerangz_complete_words 'status trigger replicate prune admin' "$current"
+                ;;
+            --status)
+                _boomerangz_complete_words 'all active member excluded target inactive invalid' "$current"
                 ;;
             *)
                 COMPREPLY=()

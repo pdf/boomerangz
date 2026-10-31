@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -328,7 +329,11 @@ func scanDatasets(env *commandEnvironment, options configOptions, inspect []stri
 	for name := range loaded.Config.Remotes {
 		remotes = append(remotes, name)
 	}
-	scanner, err := discovery.New(reader, discovery.Options{Remotes: remotes, Destinations: daemon.RemoteDestinations(loaded.Config.Remotes, loaded.Config.Paths.CredentialsDir)})
+	replicationRoots := slices.Clone(loaded.Config.SSHShell.ReplicationRoots)
+	for _, listener := range loaded.Config.Listeners {
+		replicationRoots = append(replicationRoots, listener.ReplicationRoots...)
+	}
+	scanner, err := discovery.New(reader, discovery.Options{Remotes: remotes, Destinations: daemon.RemoteDestinations(loaded.Config.Remotes, loaded.Config.Paths.CredentialsDir), ReplicationRoots: replicationRoots})
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +341,8 @@ func scanDatasets(env *commandEnvironment, options configOptions, inspect []stri
 }
 
 type datasetListCommand struct {
-	JSON bool `help:"Emit JSON."`
+	Statuses []string `name:"status" enum:"all,active,member,excluded,target,inactive,invalid" help:"Show only datasets with this status; repeat as needed. Allowed: ${enum}. Default: every status but inactive."`
+	JSON     bool     `help:"Emit JSON."`
 }
 
 func (c *datasetListCommand) Run(env *commandEnvironment) error {
@@ -344,12 +350,13 @@ func (c *datasetListCommand) Run(env *commandEnvironment) error {
 	if err != nil {
 		return err
 	}
+	entries, hidden := filterDatasets(generation.Entries(), c.Statuses)
 	if !c.JSON {
-		return writeDatasetList(env.Stdout, generation.Entries())
+		return writeDatasetList(env.Stdout, entries, hidden)
 	}
 	encoder := json.NewEncoder(env.Stdout)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(generation.Entries())
+	return encoder.Encode(entries)
 }
 
 type datasetInspectCommand struct {

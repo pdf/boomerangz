@@ -43,17 +43,33 @@ for an actor root,
 or
 .B excluded
 within a root,
+.B target
+for a replica received into,
 .BR inactive ,
 or
 .BR invalid ,
 with any of a root's destinations blocked by a collision listed beside it.
-Use
+Inactive datasets are hidden unless asked for. Use
+.B --status
+.I STATUS
+to show only datasets with that status, one of
+.BR all ,
+.BR active ,
+.BR member ,
+.BR excluded ,
+.BR target ,
+.BR inactive ,
+or
+.BR invalid ;
+repeat it or give a comma-separated list, and use
+.B all
+to show every dataset. Use
 .B --json
 for structured output.
 .TP
 .B dataset inspect DATASET
-Inspect one dataset's resolved policy, property provenance, and the actor root
-it belongs to or, for a root, its members and any destinations blocked by a
+Inspect one dataset's resolved policy, property provenance, what marks it as a
+replica, and the actor root it belongs to or, for a root, its members and any destinations blocked by a
 collision. Use
 .B --json
 for structured output.

@@ -12,9 +12,34 @@ import (
 	"github.com/pdf/boomerangz/internal/policy"
 )
 
-func writeDatasetList(writer io.Writer, entries []discovery.Entry) error {
+// filterDatasets keeps the entries whose status is among statuses, "all"
+// keeping every one. With no statuses it keeps all but inactive datasets and
+// reports how many it hid.
+func filterDatasets(entries []discovery.Entry, statuses []string) ([]discovery.Entry, int) {
+	if slices.Contains(statuses, "all") {
+		return entries, 0
+	}
+	keep := func(status string) bool { return slices.Contains(statuses, status) }
+	if len(statuses) == 0 {
+		keep = func(status string) bool { return status != "inactive" }
+	}
+	total := len(entries)
+	filtered := slices.DeleteFunc(entries, func(entry discovery.Entry) bool { return !keep(datasetStatus(entry)) })
+	if len(statuses) != 0 {
+		return filtered, 0
+	}
+	return filtered, total - len(filtered)
+}
+
+// writeDatasetList renders entries as a table. hidden counts the inactive
+// datasets the default filter left out, so the table can say how to see them.
+func writeDatasetList(writer io.Writer, entries []discovery.Entry, hidden int) error {
 	if len(entries) == 0 {
-		_, err := io.WriteString(writer, "No datasets found.\n")
+		message := "No datasets found.\n"
+		if hidden > 0 {
+			message = fmt.Sprintf("No datasets found other than %d inactive; show them with: boomerangz dataset list --status all\n", hidden)
+		}
+		_, err := io.WriteString(writer, message)
 		return err
 	}
 	var output strings.Builder
@@ -45,6 +70,12 @@ func writeDatasetList(writer io.Writer, entries []discovery.Entry) error {
 		output.WriteString("\nInspect invalid datasets with: boomerangz dataset inspect <dataset>\n")
 	case blocked:
 		output.WriteString("\nInspect blocked targets with: boomerangz dataset inspect <dataset>\n")
+	}
+	switch {
+	case hidden == 1:
+		output.WriteString("\n1 inactive dataset hidden; show it with: boomerangz dataset list --status all\n")
+	case hidden > 1:
+		_, _ = fmt.Fprintf(&output, "\n%d inactive datasets hidden; show them with: boomerangz dataset list --status all\n", hidden)
 	}
 	_, err := io.WriteString(writer, output.String())
 	return err
@@ -77,6 +108,9 @@ func datasetStatus(entry discovery.Entry) string {
 	if entry.Inspected && entry.Policy.Enabled {
 		return "active"
 	}
+	if entry.Replica != (discovery.Replica{}) {
+		return "target"
+	}
 	return "inactive"
 }
 
@@ -89,6 +123,9 @@ func writeDatasetInspection(writer io.Writer, entry discovery.Entry) error {
 	line("Activation", activationStatus(entry))
 	line("Policy", validStatus(entry.Policy))
 	line("Actor root", actorRoot(entry))
+	if entry.Replica != (discovery.Replica{}) {
+		line("Replica", replicaOf(entry.Replica))
+	}
 	if len(entry.Members) > 0 {
 		line("Members", strings.Join(entry.Members, ", "))
 	}
@@ -154,6 +191,21 @@ func actorRoot(entry discovery.Entry) string {
 		return "this dataset"
 	}
 	return "none"
+}
+
+// replicaOf describes what marks a dataset as a replica.
+func replicaOf(replica discovery.Replica) string {
+	var marks []string
+	switch {
+	case replica.Source != "":
+		marks = append(marks, "of "+replica.Source+" on local destination "+replica.Destination)
+	case replica.Destination != "":
+		marks = append(marks, "beneath replication root "+replica.Destination)
+	}
+	if replica.Lineage != "" {
+		marks = append(marks, "received lineage "+replica.Lineage)
+	}
+	return strings.Join(marks, "; ")
 }
 
 func validStatus(effective policy.Effective) string {

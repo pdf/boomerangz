@@ -724,3 +724,78 @@ func TestRemoteOnThisHostIsCheckedAgainstLocalDatasets(t *testing.T) {
 	requireCollision(t, g, "tank/data", "near", true, "tank/x/data")
 	requireCollision(t, g, "tank/x/data", "backup/near", false, "tank/data")
 }
+
+func TestReplicasAreMarked(t *testing.T) {
+	t.Parallel()
+	const lineage = "22222222-2222-4222-8222-222222222222"
+	received := func(dataset, key, value string) zfs.Property {
+		return zfs.Property{Dataset: dataset, Name: policy.StateNamespace + key, Value: value, Source: zfs.SourceReceived}
+	}
+	f := &fakeReader{properties: []zfs.Property{
+		// tank/home sends itself to backup and its member docs to archive,
+		// both mapped under discard=first, so docs lands beneath the root's
+		// place on archive even though the root does not send there.
+		local("tank/home", "enabled", "on"),
+		local("tank/home", "local", "backup"),
+		local("tank/home", "discard", "first"),
+		local("tank/home/docs", "local", "archive"),
+		// tank/a and tank/b would both land on blocked/x, so nothing there
+		// is either one's replica.
+		local("tank/a/x", "enabled", "on"),
+		local("tank/a/x", "local", "blocked"),
+		local("tank/a/x", "discard", "all"),
+		local("tank/b/x", "enabled", "on"),
+		local("tank/b/x", "local", "blocked"),
+		local("tank/b/x", "discard", "all"),
+	}}
+	for _, name := range []string{
+		"tank", "tank/home", "tank/home/docs", "tank/a", "tank/a/x", "tank/b", "tank/b/x",
+		"backup", "backup/home", "backup/home/docs", "archive", "archive/home", "archive/home/docs",
+		"blocked", "blocked/x",
+		"pool", "pool/recv", "pool/recv/host", "pool/recv/host/data",
+		"pool/copy", "pool/copy/child", "pool/promoted", "pool/plain",
+	} {
+		f.datasets = append(f.datasets, zfs.Dataset{Name: name, Type: zfs.Filesystem, EncryptionRoot: "-"})
+	}
+	reader := &lifecycleFakeReader{fakeReader: f, lifecycle: []zfs.Property{
+		received("pool/copy", "lineage", lineage),
+		received("pool/copy", "owner", "11111111-1111-4111-8111-111111111111"),
+		// Owned here since, so a source whatever it once received.
+		received("pool/promoted", "lineage", lineage),
+		{Dataset: "pool/promoted", Name: policy.StateNamespace + "owner", Value: "33333333-3333-4333-8333-333333333333", Source: zfs.SourceLocal},
+	}}
+	reader.properties = append(reader.properties, reader.lifecycle...)
+	s, err := New(reader, Options{ReplicationRoots: []string{"pool/recv"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.Scan(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]Replica{
+		"backup/home":         {Source: "tank/home", Destination: "backup"},
+		"backup/home/docs":    {Source: "tank/home", Destination: "backup"},
+		"archive/home":        {Source: "tank/home", Destination: "archive"},
+		"archive/home/docs":   {Source: "tank/home", Destination: "archive"},
+		"pool/recv/host":      {Destination: "pool/recv"},
+		"pool/recv/host/data": {Destination: "pool/recv"},
+		"pool/copy":           {Lineage: lineage},
+		"pool/copy/child":     {Lineage: lineage},
+		// Not replicas: destination and replication roots themselves, a
+		// blocked target, the sources, a dataset owned here, and one
+		// nothing marks.
+		"backup":        {},
+		"archive":       {},
+		"blocked/x":     {},
+		"pool/recv":     {},
+		"tank/home":     {},
+		"tank/a/x":      {},
+		"pool/promoted": {},
+		"pool/plain":    {},
+	} {
+		if entry, _ := g.Inspect(name); entry.Replica != want {
+			t.Errorf("%s: replica %+v, want %+v", name, entry.Replica, want)
+		}
+	}
+}
