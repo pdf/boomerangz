@@ -27,6 +27,15 @@ type localBackend struct {
 	checks      map[string][]string
 	checkErr    error
 	afterSet    func()
+	// poolGUID distinguishes another host's backup pool; zero is this host's.
+	poolGUID uint64
+}
+
+func (b *localBackend) pool() uint64 {
+	if b.poolGUID != 0 {
+		return b.poolGUID
+	}
+	return 11
 }
 
 func cloneState(state zfs.State) (zfs.State, error) {
@@ -68,10 +77,10 @@ func (b *localBackend) InspectDatasetIdentity(_ context.Context, dataset string)
 	}
 	switch dataset {
 	case "backup":
-		return zfs.DatasetIdentity{Name: dataset, Type: zfs.Filesystem, GUID: 10, Pool: "backup", PoolGUID: 11}, nil
+		return zfs.DatasetIdentity{Name: dataset, Type: zfs.Filesystem, GUID: 10, Pool: "backup", PoolGUID: b.pool()}, nil
 	case "backup/data":
 		if b.destExists {
-			return zfs.DatasetIdentity{Name: dataset, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: 11}, nil
+			return zfs.DatasetIdentity{Name: dataset, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: b.pool()}, nil
 		}
 	}
 	return zfs.DatasetIdentity{}, fmt.Errorf("identity absent")
@@ -299,7 +308,7 @@ func TestApplyResumeSelectsEndpointProofAheadOfHeldIncrementalBase(t *testing.T)
 func TestRemoteApplyKeepsSourceAndDestinationExecutorsSeparate(t *testing.T) {
 	t.Parallel()
 	source, request := newLocalBackend(t)
-	destination := &localBackend{inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem, EncryptionRoot: "-"}}}
+	destination := &localBackend{poolGUID: 12, inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem, EncryptionRoot: "-"}}}
 	request.Transport = "ssh"
 	request.RemoteName = "home"
 	request.CanonicalTarget = "ssh://replicator@backup.example.net:22/backup/data"
@@ -417,7 +426,7 @@ func TestApplyMarksDatasetChangeDuringPreparationRetryable(t *testing.T) {
 func TestApplyChecksBothEndpointsBeforeMutation(t *testing.T) {
 	t.Parallel()
 	source, request := newLocalBackend(t)
-	destination := &localBackend{inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem, EncryptionRoot: "-"}}, checkErr: errors.New("missing receive permission")}
+	destination := &localBackend{poolGUID: 12, inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem, EncryptionRoot: "-"}}, checkErr: errors.New("missing receive permission")}
 	request.Transport = "ssh"
 	request.RemoteName = "home"
 	request.CanonicalTarget = "ssh://replicator@backup.example.net:22/backup/data"

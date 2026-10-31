@@ -37,6 +37,9 @@ type remoteApplier struct {
 	client       remoteClient
 	installation string
 	lifecycle    *lifecycle.Service
+	// hostLocal is told when the remote turns out to receive into one of this
+	// host's own pools.
+	hostLocal func()
 }
 
 func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, report transfer.Reporter) (transfer.Result, error) {
@@ -49,6 +52,10 @@ func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, repo
 		return transfer.Result{}, errors.Join(err, endpoint.close())
 	}
 	result, applyErr := engine.Apply(ctx, request, report)
+	var loopback *transfer.HostLocalError
+	if errors.As(applyErr, &loopback) && a.hostLocal != nil {
+		a.hostLocal()
+	}
 	return result, errors.Join(applyErr, endpoint.close())
 }
 
@@ -88,13 +95,16 @@ type Runtime struct {
 	now          func() time.Time
 	reloadMu     sync.Mutex
 
-	mu               sync.Mutex
-	known            map[string]bool
-	active           map[string]bool
-	recursive        map[string]bool
-	policies         map[string]policy.Effective
-	generation       *discovery.Generation
-	roads            map[string]roadState
+	mu         sync.Mutex
+	known      map[string]bool
+	active     map[string]bool
+	recursive  map[string]bool
+	policies   map[string]policy.Effective
+	generation *discovery.Generation
+	roads      map[string]roadState
+	// hostLocal names the remotes found to receive into this host's own
+	// pools. It is learned from transfers and forgotten when remotes change.
+	hostLocal        map[string]bool
 	retireFailures   map[string]int
 	delayed          map[string]time.Time
 	dirty            map[string]bool
@@ -144,7 +154,7 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 		remoteNames = append(remoteNames, name)
 	}
 	slices.Sort(remoteNames)
-	scanner, err := discovery.New(source, discovery.Options{Remotes: remoteNames, Destinations: remoteDestinations(clients)})
+	scanner, err := discovery.New(source, discovery.Options{Remotes: remoteNames, Destinations: remoteDestinations(clients, nil)})
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +186,7 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 		local: local, remote: remote, localStream: stream, pending: &transfer.PendingSet{},
 		remotes: clients, logger: logger, lifecycle: lifecycleService, status: status, locks: sharedLocks, now: time.Now, known: make(map[string]bool), active: make(map[string]bool),
 		recursive: make(map[string]bool), policies: make(map[string]policy.Effective),
-		roads: make(map[string]roadState), retireFailures: make(map[string]int), delayed: make(map[string]time.Time), dirty: make(map[string]bool), configGeneration: 1,
+		roads: make(map[string]roadState), hostLocal: make(map[string]bool), retireFailures: make(map[string]int), delayed: make(map[string]time.Time), dirty: make(map[string]bool), configGeneration: 1,
 	}
 	runtime.safety = newSafety(gate, source, clients, liveConfig.Remotes)
 	for _, pool := range []*Pool{management, local, remote} {
@@ -284,7 +294,13 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	_ = r.management.Resize(effective.Daemon.EffectiveManagementWorkers())
 	_ = r.local.Resize(effective.Daemon.LocalTransferWorkers)
 	_ = r.remote.Resize(effective.Daemon.RemoteTransferWorkers)
-	_ = r.scanner.Reconfigure(effective.Daemon.ReconcileInterval.Duration, prepared.remotes, remoteDestinations(prepared.clients))
+	r.mu.Lock()
+	if prepared.refreshRemotes {
+		r.hostLocal = make(map[string]bool)
+	}
+	hostLocal := maps.Clone(r.hostLocal)
+	r.mu.Unlock()
+	_ = r.scanner.Reconfigure(effective.Daemon.ReconcileInterval.Duration, prepared.remotes, remoteDestinations(prepared.clients, hostLocal))
 	// Queued remote work, and each remote's recovery coordinator with its
 	// retry state, is bound to the client it was built with. A reload that
 	// leaves every remote as it was keeps both; one that changes a remote
@@ -1267,7 +1283,7 @@ func (r *Runtime) road(dataset, remote string, effective policy.Effective, membe
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if existing, found := r.roads[key]; found {
-		if reflect.DeepEqual(existing.request.Policy, effective) && reflect.DeepEqual(existing.request.Members, members) {
+		if reflect.DeepEqual(existing.request.Policy, effective) && reflect.DeepEqual(existing.request.Members, members) && existing.request.HostLocal == r.hostLocal[remote] {
 			return existing, nil
 		}
 		delete(r.roads, key)
@@ -1277,14 +1293,33 @@ func (r *Runtime) road(dataset, remote string, effective policy.Effective, membe
 		return roadState{}, fmt.Errorf("remote %s is not configured", remote)
 	}
 	client := r.remotes[remote]
-	request := transfer.Request{Source: dataset, DestinationRoot: setting.Root, Policy: effective.Clone(), Members: slices.Clone(members), Transport: client.Transport(), RemoteName: remote, CanonicalTarget: client.CanonicalTarget()}
-	coordinator, err := transfer.NewRoadwarrior(remoteApplier{source: r.backend, client: client, installation: r.installation, lifecycle: r.lifecycle}, request, r.pending, transfer.DefaultRetryPolicy(), r.now, rand.Float64)
+	request := transfer.Request{Source: dataset, DestinationRoot: setting.Root, Policy: effective.Clone(), Members: slices.Clone(members), Transport: client.Transport(), RemoteName: remote, CanonicalTarget: client.CanonicalTarget(), HostLocal: r.hostLocal[remote]}
+	applier := remoteApplier{source: r.backend, client: client, installation: r.installation, lifecycle: r.lifecycle, hostLocal: func() { r.learnHostLocal(remote, client) }}
+	coordinator, err := transfer.NewRoadwarrior(applier, request, r.pending, transfer.DefaultRetryPolicy(), r.now, rand.Float64)
 	if err != nil {
 		return roadState{}, err
 	}
 	state := roadState{coordinator: coordinator, request: request}
 	r.roads[key] = state
 	return state, nil
+}
+
+// learnHostLocal records that remote receives into one of this host's own
+// pools and rescans with its replicas in the local namespace. A root whose
+// replica there would overlap this host's datasets becomes invalid; any other
+// is retried with the request marked as validated. Knowledge is dropped if the
+// remote has since been replaced.
+func (r *Runtime) learnHostLocal(remote string, client remoteClient) {
+	r.mu.Lock()
+	if r.remotes[remote] != client || r.hostLocal[remote] {
+		r.mu.Unlock()
+		return
+	}
+	r.hostLocal[remote] = true
+	destinations := remoteDestinations(r.remotes, r.hostLocal)
+	r.mu.Unlock()
+	r.logger.Info("remote receives into this host's own pools; revalidating its replicas as local", "remote", remote)
+	r.scanner.SetDestinations(destinations)
 }
 
 func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effective, created []string) bool {

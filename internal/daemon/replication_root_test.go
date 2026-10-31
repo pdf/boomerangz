@@ -92,10 +92,11 @@ func TestReplicationRootPrunesEveryDescendant(t *testing.T) {
 	if !runtime.enqueueSnapshot(Schedule{Dataset: reportSource, Policy: effective, Members: members, Due: []string{reportSource, child}}) {
 		t.Fatal("snapshot job was not accepted")
 	}
-	if outcome := runOf(t, subscription, "snapshot:"+reportSource); outcome[len(outcome)-1].State != "succeeded" {
+	runs := runsOf(t, subscription, "snapshot:"+reportSource, "prune:"+reportSource)
+	if outcome := runs["snapshot:"+reportSource]; outcome[len(outcome)-1].State != "succeeded" {
 		t.Fatalf("snapshot run = %+v", outcome)
 	}
-	prune := runOf(t, subscription, "prune:"+reportSource)
+	prune := runs["prune:"+reportSource]
 	if prune[len(prune)-1].State != "succeeded" {
 		t.Fatalf("prune run = %+v", prune)
 	}

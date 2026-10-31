@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/daemon"
@@ -18,7 +19,31 @@ import (
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
-func runReseed(ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, dataset, target string, apply bool) (resultErr error) {
+func runReseed(ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, dataset, target string, apply bool) error {
+	return runTargetOperation(ctx, out, cfg, reader, executor, dataset, target, apply, func(service *transfer.ReseedService, request transfer.Request) (any, error) {
+		if apply {
+			return service.Apply(ctx, request)
+		}
+		return service.Plan(ctx, request)
+	})
+}
+
+// runAbortReceive previews, or applies, discarding the interrupted receives one
+// target holds for an actor root's streams: the explicit way out when resuming
+// one keeps failing.
+func runAbortReceive(ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, dataset, target string, apply bool) error {
+	return runTargetOperation(ctx, out, cfg, reader, executor, dataset, target, apply, func(service *transfer.ReseedService, request transfer.Request) (any, error) {
+		if apply {
+			return service.ApplyAbort(ctx, request)
+		}
+		return service.PlanAbort(ctx, request)
+	})
+}
+
+// runTargetOperation resolves one configured target of an actor root, under
+// the lifecycle lock when applying, and prints what operation returns. A remote
+// found to receive into this host's own pools is revalidated as local first.
+func runTargetOperation(ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, dataset, target string, apply bool, operation func(*transfer.ReseedService, transfer.Request) (any, error)) (resultErr error) {
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return err
 	}
@@ -43,7 +68,8 @@ func runReseed(ctx context.Context, out io.Writer, cfg config.Config, reader dis
 	for name := range cfg.Remotes {
 		remoteNames = append(remoteNames, name)
 	}
-	scanner, err := discovery.New(reader, discovery.Options{Remotes: remoteNames, Destinations: daemon.RemoteDestinations(cfg.Remotes, cfg.Paths.CredentialsDir)})
+	destinations := daemon.RemoteDestinations(cfg.Remotes, cfg.Paths.CredentialsDir)
+	scanner, err := discovery.New(reader, discovery.Options{Remotes: remoteNames, Destinations: destinations})
 	if err != nil {
 		return err
 	}
@@ -99,11 +125,26 @@ func runReseed(ctx context.Context, out io.Writer, cfg config.Config, reader dis
 	if err != nil {
 		return err
 	}
-	var plan transfer.ReseedPlan
-	if apply {
-		plan, err = service.Apply(ctx, request)
-	} else {
-		plan, err = service.Plan(ctx, request)
+	plan, err := operation(service, request)
+	var loopback *transfer.HostLocalError
+	if errors.As(err, &loopback) {
+		// The remote receives into one of this host's own pools: rescan with
+		// its replicas in the local namespace, and go on only if the root
+		// remains valid there.
+		destination := destinations[target]
+		destination.Namespace = "local"
+		destinations[target] = destination
+		scanner.SetDestinations(destinations)
+		rescanned, scanErr := scanner.Scan(ctx, []string{dataset})
+		if scanErr != nil {
+			return scanErr
+		}
+		revalidated, _ := rescanned.Inspect(dataset)
+		if !revalidated.Policy.Valid() {
+			return fmt.Errorf("%w: %s", loopback, strings.Join(revalidated.Policy.Errors, "; "))
+		}
+		request.HostLocal = true
+		plan, err = operation(service, request)
 	}
 	encoder := json.NewEncoder(out)
 	encoder.SetIndent("", "  ")

@@ -291,3 +291,47 @@ func validateUserProperty(name string) error {
 	}
 	return nil
 }
+
+// MergeStates combines inspections of distinct datasets into one state. A
+// shallow inspection lists the dataset's direct children too, so an object or
+// property two inspections both report is kept once.
+func MergeStates(states ...State) State {
+	var merged State
+	for _, state := range states {
+		for _, object := range state.Objects {
+			if !slices.Contains(merged.Objects, object) {
+				merged.Objects = append(merged.Objects, object)
+			}
+		}
+		for _, property := range state.Properties {
+			if !slices.Contains(merged.Properties, property) {
+				merged.Properties = append(merged.Properties, property)
+			}
+		}
+		for name, value := range state.Received {
+			if merged.Received == nil {
+				merged.Received = make(map[string]map[string]string)
+			}
+			merged.Received[name] = value
+		}
+		for name, value := range state.ResumeTokens {
+			if merged.ResumeTokens == nil {
+				merged.ResumeTokens = make(map[string]string)
+			}
+			merged.ResumeTokens[name] = value
+		}
+		for name, value := range state.Clones {
+			if merged.Clones == nil {
+				merged.Clones = make(map[string][]string)
+			}
+			merged.Clones[name] = value
+		}
+		for name, value := range state.Holds {
+			if merged.Holds == nil {
+				merged.Holds = make(map[string][]string)
+			}
+			merged.Holds[name] = value
+		}
+	}
+	return merged
+}

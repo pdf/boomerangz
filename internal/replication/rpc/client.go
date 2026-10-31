@@ -69,7 +69,7 @@ func (e *clientExecutor) InspectDatasetIdentity(ctx context.Context, dataset str
 	if err != nil {
 		return zfs.DatasetIdentity{}, e.client.mapError(err)
 	}
-	return zfs.DatasetIdentity{Name: response.GetName(), Type: zfs.DatasetType(response.GetType()), GUID: response.GetGuid(), Pool: response.GetPool(), PoolGUID: response.GetPoolGuid()}, nil
+	return zfs.DatasetIdentity{Name: response.GetName(), Type: zfs.DatasetType(response.GetType()), GUID: response.GetGuid(), Pool: response.GetPool(), PoolGUID: response.GetPoolGuid(), Placeholder: response.GetPlaceholder()}, nil
 }
 
 func (e *clientExecutor) InspectState(ctx context.Context, dataset string, recursive bool) (zfs.State, error) {

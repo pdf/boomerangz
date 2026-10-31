@@ -179,7 +179,10 @@ func TestGuestDaemonNativeReplication(t *testing.T) {
 	cfg.Remotes["backup"] = config.RemoteConfig{Transport: "native", Credential: credential, Root: destinationRoot}
 	_, waiter := runDaemon(t, cfg, &scopedDaemonBackend{Direct: direct, root: source})
 
-	success, _ := waiter.Outcome(t, 3*time.Minute, 0, "remote:"+source+":backup", "succeeded")
+	// The guest is both hosts, so the remote receives into this host's own
+	// pool: the first attempt is refused and retried once the daemon has
+	// revalidated the remote's replicas as local.
+	success, _ := waiter.Outcome(t, 3*time.Minute, 0, "remote:"+source+":backup", "succeeded", "waiting-retry")
 	if !strings.HasPrefix(success.Target, "native://") || !strings.HasSuffix(success.Target, "/"+destinationRoot) {
 		t.Fatalf("native transfer did not record a canonical native target: %q", success.Target)
 	}

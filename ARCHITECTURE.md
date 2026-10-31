@@ -27,7 +27,7 @@ over Unix sockets and optional TCP.
   parser and dispatches to the matched command's `Run(env *commandEnvironment)`.
 - [internal/cli/commands.go](internal/cli/commands.go) - the full command
   tree (`daemon`, `status`, `trigger`, `pairing {create,import,list,revoke}`,
-  `ssh-shell` (hidden), `dataset {list,inspect,adopt,reseed,clean}`,
+  `ssh-shell` (hidden), `dataset {list,inspect,adopt,reseed,abort-receive,clean}`,
   `identity recover`, `config {check,show,reload}`, `version`). This is the
   fastest place to see the whole CLI surface at a glance.
 - `boomerangz daemon` (`daemonCommand.Run`) is the long-running service:
@@ -75,7 +75,9 @@ Roughly bottom-up, in dependency order:
   `local.go` (`Local` executor: `Preview`/`Apply`), `binding.go` (verifies a
   source is bound to the correct destination, not just a same-named one),
   `resume.go` (interrupted-receive resume), `reseed.go` (destructive
-  full-resync path), `recovery.go` (`PendingSet` coalescing and the
+  full-resync path, and aborting interrupted receives), `hostlocal.go`
+  (refusing a remote that receives into this host's own pools until it is
+  validated as local), `recovery.go` (`PendingSet` coalescing and the
   `Roadwarrior` reconnect/retry loop for flaky remotes).
 - **replication** - transport implementations sharing one gRPC service
   contract (`proto/boomerangz/replication/v1/remote.proto`):

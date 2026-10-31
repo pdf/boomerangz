@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -115,7 +116,10 @@ func (p *treePool) InspectDatasetIdentity(_ context.Context, name string) (zfs.D
 		return zfs.DatasetIdentity{}, fmt.Errorf("dataset does not exist: %s", name)
 	}
 	pool, _, _ := strings.Cut(name, "/")
-	return zfs.DatasetIdentity{Name: name, Type: zfs.Filesystem, GUID: object.GUID, Pool: pool, PoolGUID: uint64(len(pool)) + 1000}, nil
+	placeholder := slices.ContainsFunc(p.props, func(row zfs.Property) bool {
+		return row.Dataset == name && row.Name == zfs.PlaceholderProperty && row.Source == zfs.SourceLocal && row.Value == "on"
+	})
+	return zfs.DatasetIdentity{Name: name, Type: zfs.Filesystem, GUID: object.GUID, Pool: pool, PoolGUID: uint64(len(pool)) + 1000, Placeholder: placeholder}, nil
 }
 
 func (p *treePool) GetStoredProperties(_ context.Context, names []string) ([]zfs.Property, error) {
@@ -292,10 +296,19 @@ func (p *treePool) DestroyDataset(_ context.Context, name string, recursive bool
 	return nil
 }
 
+// AbortReceive discards dataset's partial receive as zfs receive -A does: an
+// interrupted incremental keeps its dataset, while an interrupted full receive
+// takes with it the dataset it was creating, which holds no snapshot yet.
 func (p *treePool) AbortReceive(_ context.Context, dataset string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.tokens, dataset)
+	if slices.ContainsFunc(p.objects, func(object zfs.Object) bool { return datasetOf(object.Name) == dataset && object.Name != dataset }) {
+		return nil
+	}
+	p.datasets = slices.DeleteFunc(p.datasets, func(d zfs.Dataset) bool { return d.Name == dataset })
+	p.objects = slices.DeleteFunc(p.objects, func(object zfs.Object) bool { return object.Name == dataset })
+	p.props = slices.DeleteFunc(p.props, func(property zfs.Property) bool { return property.Dataset == dataset })
 	return nil
 }
 
@@ -931,5 +944,155 @@ func TestReseedDestroysASetAsideRootPlaceholder(t *testing.T) {
 		if stream.Plan.Mode != "full" {
 			t.Errorf("%s resumed stale history as %q after a reseed", stream.Plan.Source, stream.Plan.Mode)
 		}
+	}
+}
+
+func TestRecursiveStreamRefusesAPerMemberReplica(t *testing.T) {
+	t.Parallel()
+	pool, request, service := treeRoot(t, "member", "hole!", "hole/deep+")
+	start := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	snapshotAt(t, service, request, start, "tank/home", "tank/home/member", "tank/home/hole/deep")
+	engine, err := NewLocal(pool, treeStream{pool: pool}, treeInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, applyErr := engine.Apply(t.Context(), request, nil); applyErr != nil || !result.Verified {
+		t.Fatalf("result=%+v err=%v", result, applyErr)
+	}
+	// The hole was never sent, so a send -R stream has no common base for it;
+	// the switch must say a reseed is needed rather than fail mid-protection.
+	recursive := Request{Source: request.Source, DestinationRoot: request.DestinationRoot, Policy: request.Policy.Clone()}
+	recursive.Policy.Send.Replicate = true
+	later := snapshotAt(t, service, recursive, start.Add(time.Hour), "tank/home", "tank/home/member", "tank/home/hole", "tank/home/hole/deep")
+	before := referencesOn(t, pool)
+	_, err = engine.Apply(t.Context(), recursive, nil)
+	if err == nil || !strings.Contains(err.Error(), "reseed") {
+		t.Fatalf("err=%v, want a reseed instruction", err)
+	}
+	if _, found := pool.object("backup/home@" + later); found {
+		t.Fatal("the refused stream was received")
+	}
+	if after := referencesOn(t, pool); !reflect.DeepEqual(after, before) {
+		t.Fatalf("the refusal changed the proofs: %+v, was %+v", after, before)
+	}
+}
+
+func TestRemoteMemberNeedsTheConfiguredRootUnderDiscardOff(t *testing.T) {
+	t.Parallel()
+	// Only the member sends to the remote. Under discard=off the root's
+	// replica is the remote's configured root, which the remote never creates
+	// as a receive parent, so the member's bootstrap must say to create it
+	// rather than fail on the remote's scope refusal.
+	pool, request, service := treeRoot(t, "member")
+	rootPolicy := request.Policy.Clone()
+	rootPolicy.Discard, rootPolicy.Local = policy.DiscardOff, nil
+	memberPolicy := rootPolicy.Clone()
+	memberPolicy.Remote = []string{"offsite"}
+	remote := Request{
+		Source: "tank/home", DestinationRoot: "backup/offsite", Policy: rootPolicy,
+		Members:   []Member{{Dataset: "tank/home/member", Policy: memberPolicy}},
+		Transport: "ssh", RemoteName: "offsite", CanonicalTarget: "ssh://replicator@offsite.example.net:22/backup/offsite",
+		// The fake serves both ends; the remote is taken as validated.
+		HostLocal: true,
+	}
+	snapshotAt(t, service, remote, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), "tank/home/member")
+	engine, err := NewRemote(pool, pool, treeStream{pool: pool}, treeInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Apply(t.Context(), remote, nil)
+	if err == nil || !strings.Contains(err.Error(), "create it on the remote") {
+		t.Fatalf("err=%v, want an instruction to create the configured root", err)
+	}
+	if pool.exists("backup/offsite") {
+		t.Fatal("the remote's configured root was created")
+	}
+	pool.create("backup/offsite")
+	result, err := engine.Apply(t.Context(), remote, nil)
+	if err != nil || !result.Verified || !pool.exists("backup/offsite/member") {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+// interruptedMember leaves tank/home/slow's receive interrupted on backup.
+func interruptedMember(t *testing.T) (*treePool, Request) {
+	t.Helper()
+	pool, request, service := treeRoot(t, "slow")
+	snapshotAt(t, service, request, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), "tank/home", "tank/home/slow")
+	failing, err := NewLocal(pool, treeStream{pool: pool, failing: map[string]bool{"tank/home/slow": true}}, treeInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := failing.Apply(t.Context(), request, nil); err == nil {
+		t.Fatal("injected member failure succeeded")
+	}
+	if pool.tokens["backup/home/slow"] == "" {
+		t.Fatal("fixture: the failed member left no resume token")
+	}
+	return pool, request
+}
+
+func TestAbortDiscardsOnlyTheInterruptedReceives(t *testing.T) {
+	t.Parallel()
+	pool, request := interruptedMember(t)
+	before := referencesOn(t, pool)
+	service, err := NewReseedService(pool, pool, treeInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := service.PlanAbort(t.Context(), request)
+	if err != nil || preview.Applied || !slices.Equal(preview.Receives, []string{"backup/home/slow"}) {
+		t.Fatalf("preview=%+v err=%v", preview, err)
+	}
+	if pool.tokens["backup/home/slow"] == "" {
+		t.Fatal("the preview discarded the receive")
+	}
+	applied, err := service.ApplyAbort(t.Context(), request)
+	if err != nil || !applied.Applied {
+		t.Fatalf("abort=%+v err=%v", applied, err)
+	}
+	if pool.tokens["backup/home/slow"] != "" {
+		t.Fatal("the interrupted receive survived")
+	}
+	// The replica, the binding and every proof stay.
+	if !pool.exists("backup/home") || bindingAnchor(t, pool, "backup") != "backup/home" {
+		t.Fatal("the abort touched more than the interrupted receive")
+	}
+	if after := referencesOn(t, pool); !reflect.DeepEqual(after, before) {
+		t.Fatalf("the abort changed the proofs: %+v, was %+v", after, before)
+	}
+	// The next transfer sends the member afresh rather than resuming.
+	engine, err := NewLocal(pool, treeStream{pool: pool}, treeInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Apply(t.Context(), request, nil)
+	if err != nil || !result.Verified || len(result.Streams) != 2 || result.Streams[1].Resumed {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestUnresumableReceiveNamesTheAbortCommand(t *testing.T) {
+	t.Parallel()
+	pool, request := interruptedMember(t)
+	// Without the hold its proof relies on, the resume cannot be validated,
+	// and nothing a transfer does on its own would clear the token.
+	for _, ref := range referencesOn(t, pool) {
+		if ref.Dataset != "tank/home/slow" {
+			continue
+		}
+		for _, source := range ref.Sources {
+			if err := pool.Release(t.Context(), ref.HoldName(), source.Dataset+"@"+source.Metadata.Name()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	engine, err := NewLocal(pool, treeStream{pool: pool}, treeInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Apply(t.Context(), request, nil)
+	if err == nil || !strings.Contains(err.Error(), "boomerangz dataset abort-receive tank/home backup") {
+		t.Fatalf("err=%v, want the abort command", err)
 	}
 }

@@ -28,6 +28,10 @@ type DatasetIdentity struct {
 	GUID     uint64
 	Pool     string
 	PoolGUID uint64
+	// Placeholder reports PlaceholderProperty set locally on the dataset: a
+	// receive parent boomerangz created and has not yet replaced. It is read
+	// in the same query, so ruling a placeholder out costs nothing extra.
+	Placeholder bool
 }
 
 // PropertySource records whether a property is locally set or received.

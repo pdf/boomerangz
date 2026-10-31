@@ -117,6 +117,9 @@ func (s *ReseedService) plan(ctx context.Context, request Request) (ReseedPlan, 
 	if err != nil {
 		return plan, err
 	}
+	if err := checkHostLocal(ctx, s.source, request, identity); err != nil {
+		return plan, err
+	}
 	if binding != nil {
 		if identityDataset == binding.Anchor && !sameBoundIdentity(*binding, identity) {
 			return plan, fmt.Errorf("destination anchor identity differs from persistent binding")
@@ -258,6 +261,67 @@ func (s *ReseedService) Apply(ctx context.Context, request Request) (ReseedPlan,
 	if plan.BindingStored {
 		if err := s.source.InheritProperty(ctx, request.Source, targetBindingProperty(plan.Target)); err != nil {
 			return plan, fmt.Errorf("remove target binding: %w", err)
+		}
+	}
+	plan.Applied = true
+	return plan, nil
+}
+
+// AbortPlan describes discarding the interrupted receives one target holds for
+// an actor root's streams. It is the operator's way out when resuming a stream
+// keeps failing, which transfers never resolve on their own: nothing else on
+// the destination is touched, the binding and every proof stay, and the next
+// transfer plans afresh from what the destination still holds.
+type AbortPlan struct {
+	Dataset  string   `json:"dataset"`
+	Target   string   `json:"target"`
+	Receives []string `json:"receives"`
+	Warning  string   `json:"warning"`
+	Applied  bool     `json:"applied"`
+}
+
+func abortPlan(plan ReseedPlan) AbortPlan {
+	return AbortPlan{
+		Dataset:  plan.Dataset,
+		Target:   plan.Target,
+		Receives: slices.Clone(plan.ResumeDatasets),
+		Warning:  "applying this plan discards the partially received data of each listed receive; the next transfer sends it again",
+	}
+}
+
+// PlanAbort returns a read-only, revalidated description of an abort. The
+// target is resolved and checked exactly as for a reseed.
+func (s *ReseedService) PlanAbort(ctx context.Context, request Request) (AbortPlan, error) {
+	plan, err := s.plan(ctx, request)
+	if err != nil {
+		return AbortPlan{}, err
+	}
+	return abortPlan(plan), nil
+}
+
+// ApplyAbort revalidates and discards exactly the previewed receives, deepest
+// first.
+func (s *ReseedService) ApplyAbort(ctx context.Context, request Request) (AbortPlan, error) {
+	reseed, err := s.plan(ctx, request)
+	if err != nil {
+		return AbortPlan{}, err
+	}
+	plan := abortPlan(reseed)
+	for _, dataset := range plan.Receives {
+		if err := s.destination.CheckPermissions(ctx, dataset, []string{"destroy", "mount", "receive:append"}); err != nil {
+			return plan, fmt.Errorf("abort permission preflight: %w", err)
+		}
+	}
+	fresh, err := s.plan(ctx, request)
+	if err != nil {
+		return plan, err
+	}
+	if !reflect.DeepEqual(plan, abortPlan(fresh)) {
+		return plan, fmt.Errorf("receive state changed during preflight; retry preview")
+	}
+	for i := len(plan.Receives) - 1; i >= 0; i-- {
+		if err := s.destination.AbortReceive(ctx, plan.Receives[i]); err != nil {
+			return plan, fmt.Errorf("abort receive on %s: %w", plan.Receives[i], err)
 		}
 	}
 	plan.Applied = true

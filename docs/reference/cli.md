@@ -51,6 +51,7 @@ continuing with changes missing. See
 | `boomerangz dataset inspect DATASET` | Print readable effective policy, provenance, activation, the actor root it belongs to or a root's members, warnings, and errors for one exact dataset. Add `--json` for structured output. |
 | `boomerangz dataset adopt DATASET` | Preview adoption of an actor root; `--apply` performs the revalidated plan. A member is refused with its root named. |
 | `boomerangz dataset reseed DATASET TARGET` | Preview destruction and fresh seeding of one actor root's replica on a local destination root or named remote that the root or any member sends to, resetting every member on it; `--apply` performs the revalidated plan. A member is refused with its root named. |
+| `boomerangz dataset abort-receive DATASET TARGET` | Preview discarding the interrupted receives that a local destination root or named remote holds for one actor root and its members; `--apply` performs the revalidated plan. The replica, its snapshots, the binding and the source's replication history stay. A member is refused with its root named. |
 | `boomerangz dataset clean [DATASET...]` | Preview decommissioning. Use `--recursive`, `--all`, `--destroy-owned-snapshots`, and `--apply` as needed. |
 | `boomerangz identity recover` | Preview recovery. `--owner UUID` resolves multiple candidates; `--apply` performs the revalidated plan. |
 

@@ -110,6 +110,13 @@ minutes because its root is. The receive path mapping (`discard`) and the wire
 format (`replicate`) belong to the root: a member that sets either gets a
 warning and follows its root.
 
+A member's replica lands beneath its root's, which under the default
+`discard=off` is a remote's configured root itself. A remote never creates its
+configured root except by receiving the root's own replica, so a member that
+sends to a remote its root does not use needs that configured root to exist
+already. Until it does, the member's transfer stops and says to create it on
+the remote or to add the remote to the root.
+
 Operate on the root, not on a member. `dataset adopt`, `dataset reseed` and
 `trigger` refuse a member or excluded dataset and name its root. A reseed of
 the root resets every member's replica and recovery state on that target at
@@ -156,6 +163,14 @@ destination inside an active root is refused the same way, because the
 received replicas would become that root's members. Two remotes collide when
 they reach the same host's pools, whatever account they connect as.
 
+A remote that turns out to receive into one of this host's own pools - an SSH
+remote addressed back at this machine, say - is recognised by its pool's GUID
+the first time it is reached, before anything is received. Its replicas are
+then checked like a local destination's, against this host's actor roots and
+local replicas, and the transfer goes ahead only if nothing overlaps.
+`dataset list` and `dataset inspect` do not connect to remotes, so they cannot
+show this case; the daemon reports it, and so does `dataset reseed`.
+
 ## Recursive replication
 
 ```sh
@@ -174,6 +189,15 @@ replication can also carry snapshots not created by Boomerangz, and receive
 behavior can remove destination snapshots that are absent from the source
 package. Enable it only after reviewing the complete hierarchy and testing the
 destination mapping.
+
+Turning `replicate=on` for a root that already replicated member by member needs
+a [reseed](/operations/recovery#reseed-a-target) of each of its targets: holes
+and excluded datasets were never sent, so the recursive package has no common
+base to continue from. The transfer says so before changing anything. Turning
+`replicate` off again needs nothing: every member's replica already shares a
+snapshot with its source, and each continues incrementally on its own stream.
+Replicas of datasets that are no longer members stay on the destination
+untouched.
 
 ## Deactivate a dataset
 

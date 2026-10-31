@@ -90,6 +90,7 @@ type referenceBackend interface {
 	Bookmark(context.Context, string, string) error
 	DestroyBookmark(context.Context, string) error
 	InheritProperty(context.Context, string, string) error
+	ListDatasets(context.Context) ([]zfs.Dataset, error)
 }
 
 func referenceRecords(state zfs.State, dataset, lineage string) ([]Reference, error) {
@@ -149,6 +150,86 @@ func findOwned(state zfs.State, dataset, name, lineage string) (Snapshot, Metada
 	return Snapshot{}, Metadata{}, fmt.Errorf("source snapshot not found")
 }
 
+// covers reports whether prior already proves every source wanted names, with
+// identical GUIDs and metadata. A stream that sent its whole subtree with
+// send -R proves the root's own snapshot among the rest, so a root stream that
+// later sends members one at a time inherits that proof rather than
+// contradicting it.
+func covers(prior, wanted Reference) bool {
+	if prior.Target != wanted.Target || prior.Dataset != wanted.Dataset || prior.Metadata != wanted.Metadata {
+		return false
+	}
+	for _, source := range wanted.Sources {
+		if !slices.Contains(prior.Sources, source) {
+			return false
+		}
+	}
+	return true
+}
+
+// proofScope inspects what a recovery proof involves: the actor root, which
+// holds authority and every proof, and each dataset its snapshots are on that
+// still exists. Nothing else beneath the root bears on a proof, and reading the
+// whole subtree would cost every member's snapshots for each stream a root
+// sends. A dataset that is gone contributes nothing, so a proof for it can
+// still be released.
+func (s *Service) proofScope(ctx context.Context, root string, datasets []string) (zfs.State, error) {
+	state, err := s.backend.InspectState(ctx, root, false)
+	if err != nil {
+		return zfs.State{}, err
+	}
+	var wanted []string
+	for _, dataset := range datasets {
+		if dataset != root && !slices.Contains(wanted, dataset) {
+			wanted = append(wanted, dataset)
+		}
+	}
+	if len(wanted) == 0 {
+		return state, nil
+	}
+	lister, ok := s.backend.(referenceBackend)
+	if !ok {
+		return zfs.State{}, fmt.Errorf("reference operations unavailable")
+	}
+	inventory, err := lister.ListDatasets(ctx)
+	if err != nil {
+		return zfs.State{}, err
+	}
+	slices.Sort(wanted)
+	for _, dataset := range wanted {
+		if !slices.ContainsFunc(inventory, func(d zfs.Dataset) bool { return d.Name == dataset }) {
+			continue
+		}
+		member, err := s.backend.InspectState(ctx, dataset, false)
+		if err != nil {
+			return zfs.State{}, err
+		}
+		state = zfs.MergeStates(state, member)
+	}
+	return state, nil
+}
+
+// proofUnchanged re-reads proofScope and requires it to equal expected.
+func (s *Service) proofUnchanged(ctx context.Context, root string, datasets []string, expected zfs.State) error {
+	current, err := s.proofScope(ctx, root, datasets)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(expected, current) {
+		return &StateChangedError{}
+	}
+	return nil
+}
+
+// sourceDatasets names the datasets a proof's snapshots are on.
+func sourceDatasets(r Reference) []string {
+	var datasets []string
+	for _, source := range r.sources() {
+		datasets = append(datasets, source.Dataset)
+	}
+	return datasets
+}
+
 func containsReference(refs []Reference, wanted Reference) bool {
 	return slices.ContainsFunc(refs, func(candidate Reference) bool { return reflect.DeepEqual(candidate, wanted) })
 }
@@ -183,7 +264,12 @@ func (s *Service) ProtectSet(ctx context.Context, dataset, stream string, snapsh
 	if len(snapshots) == 0 {
 		return Reference{}, fmt.Errorf("at least one source snapshot is required")
 	}
-	state, err := s.backend.InspectState(ctx, dataset, true)
+	var snapshotDatasets []string
+	for _, snapshot := range snapshots {
+		name, _, _ := strings.Cut(snapshot, "@")
+		snapshotDatasets = append(snapshotDatasets, name)
+	}
+	state, err := s.proofScope(ctx, dataset, snapshotDatasets)
 	if err != nil {
 		return Reference{}, err
 	}
@@ -226,10 +312,27 @@ func (s *Service) ProtectSet(ctx context.Context, dataset, stream string, snapsh
 	exists := false
 	for _, prior := range refs {
 		if prior.property() == r.property() {
-			if !reflect.DeepEqual(prior, r) {
+			if !reflect.DeepEqual(prior, r) && !covers(prior, r) {
 				return Reference{}, fmt.Errorf("conflicting reference proof")
 			}
-			exists = true
+			// The stored proof stands, including when it covers a whole
+			// send -R subtree and this stream now asks for part of it.
+			r, exists = prior, true
+		}
+	}
+	// A stored proof may span more datasets than this stream asked for, and
+	// all of their holds must be read before any is placed.
+	scope := snapshotDatasets
+	if exists {
+		scope = sourceDatasets(r)
+		if state, err = s.proofScope(ctx, dataset, scope); err != nil {
+			return Reference{}, err
+		}
+		if refs, err = referenceRecords(state, dataset, lineage); err != nil {
+			return Reference{}, err
+		}
+		if !containsReference(refs, r) {
+			return Reference{}, &StateChangedError{}
 		}
 	}
 	if state.Received[dataset][r.property()] != "" {
@@ -242,7 +345,7 @@ func (s *Service) ProtectSet(ctx context.Context, dataset, stream string, snapsh
 			}
 		}
 	}
-	if err := s.unchanged(ctx, dataset, true, state); err != nil {
+	if err := s.proofUnchanged(ctx, dataset, scope, state); err != nil {
 		return Reference{}, err
 	}
 	if !exists {
@@ -288,7 +391,7 @@ func (s *Service) CheckpointSet(ctx context.Context, dataset string, r Reference
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return err
 	}
-	state, err := s.backend.InspectState(ctx, dataset, true)
+	state, err := s.proofScope(ctx, dataset, sourceDatasets(r))
 	if err != nil {
 		return err
 	}
@@ -309,16 +412,6 @@ func (s *Service) CheckpointSet(ctx context.Context, dataset string, r Reference
 	missing := make([]ReferenceSource, 0, len(r.sources()))
 	for _, source := range r.sources() {
 		snapshotName := r.sourceSnapshot(source)
-		if verifiedGUIDs[snapshotName] == 0 || verifiedGUIDs[snapshotName] != source.GUID {
-			return fmt.Errorf("destination snapshot GUID does not match source: %s", snapshotName)
-		}
-		owned, metadata, findErr := findOwned(state, source.Dataset, snapshotName, lineage)
-		if findErr != nil {
-			return findErr
-		}
-		if owned.GUID != source.GUID || metadata != source.Metadata || !slices.Contains(owned.Holds, r.hold()) {
-			return fmt.Errorf("source GUID or protecting hold changed")
-		}
 		found := false
 		for _, object := range state.Objects {
 			if object.Name == r.sourceBookmark(source) {
@@ -328,6 +421,23 @@ func (s *Service) CheckpointSet(ctx context.Context, dataset string, r Reference
 				found = true
 			}
 		}
+		verified, supplied := verifiedGUIDs[snapshotName]
+		if supplied && verified != source.GUID {
+			return fmt.Errorf("destination snapshot GUID does not match source: %s", snapshotName)
+		}
+		// A checkpoint bookmark exists only once an earlier transfer verified
+		// that source, so a stream inheriting a wider proof need not verify
+		// again the sources it did not send.
+		if !found && (!supplied || verified == 0) {
+			return fmt.Errorf("destination snapshot GUID does not match source: %s", snapshotName)
+		}
+		owned, metadata, findErr := findOwned(state, source.Dataset, snapshotName, lineage)
+		if findErr != nil {
+			return findErr
+		}
+		if owned.GUID != source.GUID || metadata != source.Metadata || !slices.Contains(owned.Holds, r.hold()) {
+			return fmt.Errorf("source GUID or protecting hold changed")
+		}
 		if !found {
 			missing = append(missing, source)
 		}
@@ -335,7 +445,7 @@ func (s *Service) CheckpointSet(ctx context.Context, dataset string, r Reference
 	if len(missing) == 0 {
 		return nil
 	}
-	if err := s.unchanged(ctx, dataset, true, state); err != nil {
+	if err := s.proofUnchanged(ctx, dataset, sourceDatasets(r), state); err != nil {
 		return err
 	}
 	for _, source := range missing {
@@ -361,7 +471,7 @@ func (s *Service) ReleaseReference(ctx context.Context, dataset string, r Refere
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return err
 	}
-	state, err := s.backend.InspectState(ctx, dataset, true)
+	state, err := s.proofScope(ctx, dataset, sourceDatasets(r))
 	if err != nil {
 		return err
 	}
@@ -403,7 +513,7 @@ func (s *Service) ReleaseReference(ctx context.Context, dataset string, r Refere
 		}
 		found = append(found, item)
 	}
-	if err := s.unchanged(ctx, dataset, true, state); err != nil {
+	if err := s.proofUnchanged(ctx, dataset, sourceDatasets(r), state); err != nil {
 		return err
 	}
 	for _, item := range found {

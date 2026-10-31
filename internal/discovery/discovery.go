@@ -210,6 +210,15 @@ func (s *Scanner) Reconfigure(interval time.Duration, remotes []string, destinat
 	return nil
 }
 
+// SetDestinations replaces where each remote receives and requests a scan, so
+// replicas are revalidated at once; the interval and remote set are unchanged.
+func (s *Scanner) SetDestinations(destinations map[string]RemoteDestination) {
+	s.mu.Lock()
+	s.destinations = maps.Clone(destinations)
+	s.mu.Unlock()
+	s.Request()
+}
+
 // Current returns the last complete generation, or nil before the first success.
 func (s *Scanner) Current() *Generation { return s.current.Load() }
 

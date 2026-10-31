@@ -89,7 +89,7 @@ _boomerangz_options() {
         'dataset list'|'dataset inspect')
             printf '%s' '-h --help --config --config-dir --json'
             ;;
-        'dataset adopt'|'dataset reseed')
+        'dataset adopt'|'dataset reseed'|'dataset abort-receive')
             printf '%s' '-h --help --config --config-dir --apply'
             ;;
         'dataset clean')
@@ -194,7 +194,7 @@ _boomerangz() {
     if [[ -z $subcommand ]]; then
         case $command in
             config) _boomerangz_complete_words 'check reload show' "$current" ;;
-            dataset) _boomerangz_complete_words 'adopt clean inspect list reseed' "$current" ;;
+            dataset) _boomerangz_complete_words 'abort-receive adopt clean inspect list reseed' "$current" ;;
             identity) _boomerangz_complete_words 'recover' "$current" ;;
             pairing) _boomerangz_complete_words 'create import list revoke' "$current" ;;
             trigger) _boomerangz_complete_datasets "$current" ;;
@@ -207,7 +207,7 @@ _boomerangz() {
         'dataset inspect'|'dataset adopt')
             (( positional_count == 0 )) && _boomerangz_complete_datasets "$current" || COMPREPLY=()
             ;;
-        'dataset reseed')
+        'dataset reseed'|'dataset abort-receive')
             if (( positional_count == 0 )); then
                 _boomerangz_complete_datasets "$current"
             elif (( positional_count == 1 )); then

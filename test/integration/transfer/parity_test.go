@@ -253,6 +253,8 @@ func TestGuestTransportParity(t *testing.T) {
 			Transport:       target.transport,
 			RemoteName:      target.remote,
 			CanonicalTarget: target.canonical,
+			// The guest is both hosts; its remotes reach this host's pool.
+			HostLocal: target.transport != "local",
 		}
 	}
 

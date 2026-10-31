@@ -57,7 +57,7 @@ func (s *Service) ReleaseCompletedHold(ctx context.Context, dataset string, r Re
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return err
 	}
-	state, err := s.backend.InspectState(ctx, dataset, true)
+	state, err := s.proofScope(ctx, dataset, sourceDatasets(r))
 	if err != nil {
 		return err
 	}
@@ -97,7 +97,7 @@ func (s *Service) ReleaseCompletedHold(ctx context.Context, dataset string, r Re
 	if len(held) == 0 {
 		return nil
 	}
-	if err := s.unchanged(ctx, dataset, true, state); err != nil {
+	if err := s.proofUnchanged(ctx, dataset, sourceDatasets(r), state); err != nil {
 		return err
 	}
 	for _, source := range held {

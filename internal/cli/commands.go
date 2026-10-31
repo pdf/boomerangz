@@ -288,11 +288,12 @@ func (c *sshShellCommand) Run(env *commandEnvironment) error {
 
 type datasetCommand struct {
 	configOptions `embed:""`
-	List          datasetListCommand    `cmd:"" help:"List datasets and their management status."`
-	Inspect       datasetInspectCommand `cmd:"" help:"Inspect effective policy and property sources."`
-	Adopt         datasetAdoptCommand   `cmd:"" help:"Preview transfer of an existing lineage to this installation."`
-	Reseed        datasetReseedCommand  `cmd:"" help:"Preview destructive reset of one configured replication target."`
-	Clean         datasetCleanCommand   `cmd:"" help:"Preview explicit local decommissioning; preserve snapshots by default."`
+	List          datasetListCommand         `cmd:"" help:"List datasets and their management status."`
+	Inspect       datasetInspectCommand      `cmd:"" help:"Inspect effective policy and property sources."`
+	Adopt         datasetAdoptCommand        `cmd:"" help:"Preview transfer of an existing lineage to this installation."`
+	Reseed        datasetReseedCommand       `cmd:"" help:"Preview destructive reset of one configured replication target."`
+	AbortReceive  datasetAbortReceiveCommand `cmd:"" name:"abort-receive" help:"Preview discarding interrupted receives on one configured replication target."`
+	Clean         datasetCleanCommand        `cmd:"" help:"Preview explicit local decommissioning; preserve snapshots by default."`
 }
 
 func datasetExecutor(env *commandEnvironment) (discovery.Reader, zfs.Executor, error) {
@@ -394,6 +395,24 @@ func (c *datasetReseedCommand) Run(env *commandEnvironment) error {
 		return err
 	}
 	return runReseed(env.Context, env.Stdout, loaded.Config, reader, executor, c.Dataset, c.Target, c.Apply)
+}
+
+type datasetAbortReceiveCommand struct {
+	Dataset string `arg:"" required:"" help:"Exact managed source dataset name."`
+	Target  string `arg:"" required:"" help:"Configured local destination root or remote name."`
+	Apply   bool   `help:"Discard the interrupted receives after revalidation."`
+}
+
+func (c *datasetAbortReceiveCommand) Run(env *commandEnvironment) error {
+	loaded, err := env.Root.Dataset.load()
+	if err != nil {
+		return err
+	}
+	reader, executor, err := datasetExecutor(env)
+	if err != nil {
+		return err
+	}
+	return runAbortReceive(env.Context, env.Stdout, loaded.Config, reader, executor, c.Dataset, c.Target, c.Apply)
 }
 
 func (c *datasetAdoptCommand) Run(env *commandEnvironment) error {

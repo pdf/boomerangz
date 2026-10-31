@@ -441,4 +441,13 @@ func TestRemoteDestinationsFollowEachRemotesBinding(t *testing.T) {
 	if _, found := destinations["paired"]; found {
 		t.Fatalf("a remote without a readable credential was given a destination: %+v", destinations["paired"])
 	}
+	// A remote found to receive into this host's own pools shares the local
+	// namespace, whatever address it is reached by.
+	clients, err := buildRemoteClients(map[string]config.RemoteConfig{"home": settings["home"]}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loopback := remoteDestinations(clients, map[string]bool{"home": true}); loopback["home"] != (discovery.RemoteDestination{Namespace: "local", Root: "pool/backup"}) {
+		t.Fatalf("loopback destination = %+v", loopback["home"])
+	}
 }

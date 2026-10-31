@@ -115,7 +115,7 @@ func (s *Server) InspectDatasetIdentity(ctx context.Context, request *InspectDat
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	return &InspectDatasetIdentityResponse{Name: identity.Name, Type: string(identity.Type), Guid: identity.GUID, Pool: identity.Pool, PoolGuid: identity.PoolGUID}, nil
+	return &InspectDatasetIdentityResponse{Name: identity.Name, Type: string(identity.Type), Guid: identity.GUID, Pool: identity.Pool, PoolGuid: identity.PoolGUID, Placeholder: identity.Placeholder}, nil
 }
 
 // InspectState returns bounded receive and verification state.

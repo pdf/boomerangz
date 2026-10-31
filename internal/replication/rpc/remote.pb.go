@@ -294,12 +294,14 @@ func (x *InspectDatasetIdentityRequest) GetDataset() string {
 }
 
 type InspectDatasetIdentityResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
-	Guid          uint64                 `protobuf:"varint,3,opt,name=guid,proto3" json:"guid,omitempty"`
-	Pool          string                 `protobuf:"bytes,4,opt,name=pool,proto3" json:"pool,omitempty"`
-	PoolGuid      uint64                 `protobuf:"varint,5,opt,name=pool_guid,json=poolGuid,proto3" json:"pool_guid,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Name     string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Type     string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	Guid     uint64                 `protobuf:"varint,3,opt,name=guid,proto3" json:"guid,omitempty"`
+	Pool     string                 `protobuf:"bytes,4,opt,name=pool,proto3" json:"pool,omitempty"`
+	PoolGuid uint64                 `protobuf:"varint,5,opt,name=pool_guid,json=poolGuid,proto3" json:"pool_guid,omitempty"`
+	// Set when the dataset carries the placeholder marker locally.
+	Placeholder   bool `protobuf:"varint,6,opt,name=placeholder,proto3" json:"placeholder,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -367,6 +369,13 @@ func (x *InspectDatasetIdentityResponse) GetPoolGuid() uint64 {
 		return x.PoolGuid
 	}
 	return 0
+}
+
+func (x *InspectDatasetIdentityResponse) GetPlaceholder() bool {
+	if x != nil {
+		return x.Placeholder
+	}
+	return false
 }
 
 type InspectStateRequest struct {
@@ -1596,13 +1605,14 @@ const file_boomerangz_replication_v1_remote_proto_rawDesc = "" +
 	"\x14ListDatasetsResponse\x12>\n" +
 	"\bdatasets\x18\x01 \x03(\v2\".boomerangz.replication.v1.DatasetR\bdatasets\"9\n" +
 	"\x1dInspectDatasetIdentityRequest\x12\x18\n" +
-	"\adataset\x18\x01 \x01(\tR\adataset\"\x8d\x01\n" +
+	"\adataset\x18\x01 \x01(\tR\adataset\"\xaf\x01\n" +
 	"\x1eInspectDatasetIdentityResponse\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x12\n" +
 	"\x04guid\x18\x03 \x01(\x04R\x04guid\x12\x12\n" +
 	"\x04pool\x18\x04 \x01(\tR\x04pool\x12\x1b\n" +
-	"\tpool_guid\x18\x05 \x01(\x04R\bpoolGuid\"M\n" +
+	"\tpool_guid\x18\x05 \x01(\x04R\bpoolGuid\x12 \n" +
+	"\vplaceholder\x18\x06 \x01(\bR\vplaceholder\"M\n" +
 	"\x13InspectStateRequest\x12\x18\n" +
 	"\adataset\x18\x01 \x01(\tR\adataset\x12\x1c\n" +
 	"\trecursive\x18\x02 \x01(\bR\trecursive\"\x7f\n" +

@@ -31,6 +31,11 @@ type Request struct {
 	Transport       string
 	RemoteName      string
 	CanonicalTarget string
+	// HostLocal records that the caller validated this remote's replicas
+	// against this host's own datasets, because the remote's destination pool
+	// is one of this host's pools. Without it such a remote is refused with a
+	// HostLocalError before anything is received or destroyed.
+	HostLocal bool
 }
 
 // Member is one dataset an actor root sends to a target as its own stream.
@@ -423,6 +428,21 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		}
 		plan.TargetBinding = *storedBinding
 	}
+	// A send -R stream is incremental only from a replica of the whole
+	// subtree. Proofs for member streams mean this target was last replicated
+	// one stream per member, so its holes and excluded datasets were never
+	// sent and the recursive stream has no common base to start from.
+	if p.Send.Replicate {
+		refs, err := lifecycle.References(view.Source, request.Source, lineage)
+		if err != nil {
+			return plan, err
+		}
+		for _, r := range refs {
+			if r.Target == plan.TargetBinding.CanonicalTarget && r.Dataset != request.Source {
+				return plan, fmt.Errorf("target was last replicated one stream per member, and replicate=on needs a replica of the whole subtree; run boomerangz dataset reseed for this source and target")
+			}
+		}
+	}
 	var endpoint zfs.Object
 	for _, o := range view.Source.Objects {
 		if o.Type != "snapshot" || datasetOf(o.Name) != stream.Dataset {
@@ -515,9 +535,12 @@ func Build(request Request, view View, installation string) (Plan, error) {
 		plan.Mode = "full"
 		// Missing receive parents are created from a base that must exist:
 		// the configured root, or its parent when the root's replica is the
-		// configured root itself.
+		// configured root itself. A remote never creates its configured root
+		// as a receive parent, so there only the root's own stream may
+		// receive it; a member's stream needs it to exist already.
 		parent := request.DestinationRoot
-		if p.Discard == policy.DiscardOff {
+		remoteMember := requestTransport(request) != "local" && stream.Dataset != request.Source
+		if p.Discard == policy.DiscardOff && !remoteMember {
 			index := strings.LastIndexByte(parent, '/')
 			if index < 0 {
 				return plan, fmt.Errorf("cannot bootstrap into an absent pool root")
@@ -525,6 +548,9 @@ func Build(request Request, view View, installation string) (Plan, error) {
 			parent = parent[:index]
 		}
 		if _, exists := destinationDatasets[parent]; !exists {
+			if p.Discard == policy.DiscardOff && remoteMember {
+				return plan, fmt.Errorf("remote %s has no configured root %s, which %s's stream receives beneath and only %s's own stream would create; create it on the remote, or send %s to this remote too", request.RemoteName, parent, stream.Dataset, request.Source, request.Source)
+			}
 			return plan, fmt.Errorf("receive parent %s does not exist", parent)
 		}
 	} else {

@@ -16,16 +16,30 @@ type fakeRunner struct {
 
 func TestInspectDatasetIdentity(t *testing.T) {
 	t.Parallel()
-	dataset := &fakeRunner{output: []byte("tank/data\tfilesystem\t42\n")}
-	pool := &fakeRunner{output: []byte("tank\tguid\t99\n")}
-	direct := &Direct{runner: dataset, poolRunner: pool}
-	identity, err := direct.InspectDatasetIdentity(t.Context(), "tank/data")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := DatasetIdentity{Name: "tank/data", Type: Filesystem, GUID: 42, Pool: "tank", PoolGUID: 99}
-	if !reflect.DeepEqual(identity, want) {
-		t.Fatalf("identity=%#v want=%#v", identity, want)
+	for _, tc := range []struct {
+		name        string
+		marker      string
+		placeholder bool
+	}{
+		{"unset", "-\t-", false},
+		{"local", "on\tlocal", true},
+		// Replicas received beneath a placeholder inherit its marker.
+		{"inherited", "on\tinherited from tank", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dataset := &fakeRunner{output: []byte("tank/data\ttype\tfilesystem\t-\ntank/data\tguid\t42\t-\ntank/data\t" + PlaceholderProperty + "\t" + tc.marker + "\n")}
+			pool := &fakeRunner{output: []byte("tank\tguid\t99\n")}
+			direct := &Direct{runner: dataset, poolRunner: pool}
+			identity, err := direct.InspectDatasetIdentity(t.Context(), "tank/data")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := DatasetIdentity{Name: "tank/data", Type: Filesystem, GUID: 42, Pool: "tank", PoolGUID: 99, Placeholder: tc.placeholder}
+			if !reflect.DeepEqual(identity, want) {
+				t.Fatalf("identity=%#v want=%#v", identity, want)
+			}
+		})
 	}
 }
 

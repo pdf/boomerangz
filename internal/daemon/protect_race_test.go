@@ -57,7 +57,8 @@ func (r *racingZFS) raced() int {
 func TestProtectingANewSnapshotSurvivesAConcurrentSourceChange(t *testing.T) {
 	t.Parallel()
 	source, _ := newReportPool(t)
-	racing := &racingZFS{memoryZFS: source, recursive: true}
+	// Protection reads the root and the proof's own datasets, not recursively.
+	racing := &racingZFS{memoryZFS: source}
 	runtime, err := NewWithLocalStream(config.Defaults(), racing, reportInstallation, slog.New(slog.NewTextHandler(io.Discard, nil)), memoryStream{source: source, destination: source})
 	if err != nil {
 		t.Fatal(err)

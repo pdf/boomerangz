@@ -48,6 +48,8 @@ message InspectDatasetIdentityResponse {
   uint64 guid = 3;
   string pool = 4;
   uint64 pool_guid = 5;
+  // Set when the dataset carries the placeholder marker locally.
+  bool placeholder = 6;
 }
 
 message InspectStateRequest {

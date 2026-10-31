@@ -13,10 +13,10 @@ function __boomerangz_list_datasets
 end
 
 complete -c boomerangz -n '__boomerangz_needs_subcommand config check reload show' -a 'check reload show'
-complete -c boomerangz -n '__boomerangz_needs_subcommand dataset adopt clean inspect list reseed' -a 'adopt clean inspect list reseed'
+complete -c boomerangz -n '__boomerangz_needs_subcommand dataset abort-receive adopt clean inspect list reseed' -a 'abort-receive adopt clean inspect list reseed'
 complete -c boomerangz -n '__boomerangz_needs_subcommand identity recover' -a 'recover'
 complete -c boomerangz -n '__boomerangz_needs_subcommand pairing create import list revoke' -a 'create import list revoke'
-complete -c boomerangz -n '__fish_seen_subcommand_from trigger inspect adopt clean reseed' -a '(__boomerangz_list_datasets)' -d 'ZFS dataset'
+complete -c boomerangz -n '__fish_seen_subcommand_from trigger inspect adopt clean reseed abort-receive' -a '(__boomerangz_list_datasets)' -d 'ZFS dataset'
 complete -c boomerangz -l config -r -F
 complete -c boomerangz -l config-dir -r -F
 complete -c boomerangz -l socket -r -F

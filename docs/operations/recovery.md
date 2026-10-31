@@ -18,6 +18,32 @@ Do not manually delete snapshots that appear retained during an interruption.
 They may be needed to continue replication without retransmitting the complete
 dataset.
 
+## Discard an interrupted receive
+
+An interrupted receive is resumed on the next transfer, and a transfer never
+discards one on its own. If resuming keeps failing - the transfer error says
+the interrupted receive cannot be resumed - discard it explicitly. Stop the
+daemon, then preview:
+
+```sh
+sudo systemctl stop boomerangz.service
+sudo -u boomerangz -H boomerangz dataset abort-receive tank/data backup/archive
+```
+
+The preview lists every receive on that target that would be discarded, across
+the root and all of its members. Apply it:
+
+```sh
+sudo -u boomerangz -H boomerangz dataset abort-receive tank/data backup/archive --apply
+sudo systemctl start boomerangz.service
+```
+
+Only the partially received data is discarded. The replica, its snapshots, the
+target binding and the source's replication history all stay, so the next
+transfer plans from what the destination already holds and sends the discarded
+part again. The destination needs the `destroy`, `mount` and `receive:append`
+permissions on the affected datasets.
+
 ## Reseed a target
 
 Use a reseed when Boomerangz reports that an existing destination has no common

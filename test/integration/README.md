@@ -78,6 +78,8 @@ resolves policy from `ListDatasets` output rather than a literal.
 | A hole included again: its replica replaces the placeholder with real renames, the member beneath moved intact with its history, no placeholder left behind | `TestGuestRootActorScope/a-hole-becomes-a-member` |
 | Reseed of a root resetting every member's proof and binding, and the next transfer re-bootstrapping every member - the incident root actor scope was designed against | `TestGuestRootActorScope/reseed-resets-every-member` |
 | Recursive `replicate` with `discard=first` and `discard=all` mapping | `TestGuestLocalTransfer/recursive-mapping` |
+| `replicate=on` turned on for a root that replicated member by member: refused before anything changes with a reseed instruction, and the reseed bootstrapping one recursive stream | `TestGuestReplicateModeSwitch/per-member-to-replicate-needs-a-reseed` |
+| `replicate` turned off again: every member continuing incrementally on its own stream from the recursive replica, with no reseed | `TestGuestReplicateModeSwitch/replicate-to-per-member` |
 | Linux `canmount=noauto` ancestor preparation under an ordinary receive root | `TestGuestLocalTransfer/linux-ancestor-preparation` |
 | Resume after an interrupted receive, for both incremental modes | `TestGuestInterruptedTransferRecovery` |
 | A destination exhausted mid-receive, the source recovery state it retains, and the retry once room returns | `TestGuestDestinationExhaustion` |
@@ -88,6 +90,7 @@ resolves policy from `ListDatasets` output rather than a literal.
 | Behaviour | Owned by |
 | --- | --- |
 | Full bootstrap over `ssh` direct, `ssh-shell` and `native`, with transport recorded in the target binding | `TestGuestSSHTransfer` |
+| A remote that receives into this host's own pool refused before anything is received, until the caller has validated it as local | `TestGuestSSHTransfer` |
 | Full bootstrap, `-i` vs `-I` with a foreign intermediate, receive overrides and namespace isolation, bookmark base after the source snapshot is pruned, resume after an interrupted receive, unrelated-destination refusal, and reseed recovery through the transport's `zfs.ReseedExecutor` - each run over `local`, `ssh-direct`, `ssh-shell` and `native` | `TestGuestTransportParity/<transport>` |
 | Recursive `replicate` with `discard=first` and `discard=all` over each transport: the received subtree, the intermediate receive ancestor prepared remotely, the sibling bases a recursive incremental gathers, and a foreign snapshot on the recursive destination refused | `TestGuestTransportParity/<transport>/recursive-mapping` |
 | Member streams over each transport under `discard=all`: each member at its root-relative path, the hole's placeholder created remotely, a member advancing alone, and the hole's placeholder replaced through the transport's rename once it is included | `TestGuestTransportParity/<transport>/member-streams` |
@@ -123,6 +126,7 @@ failure attributable to the transport instead of to the test.
 | `dataset list` status classification from real pool state, a descendant reading as a member of its root | `TestGuestDatasetCLI/list` |
 | `dataset inspect` provenance: local authority on the source, and receive isolation plus received state on the replica | `TestGuestDatasetCLI/inspect-source`, `TestGuestDatasetCLI/inspect-received` |
 | `dataset reseed` resolving a configured target, destroying the replica, and leaving the source sendable | `TestGuestDatasetCLI/reseed` |
+| `dataset abort-receive` listing a real interrupted receive, discarding exactly it with `zfs receive -A`, and leaving the source sendable | `TestGuestAbortReceiveCLI` |
 | `identity recover` against owner and lineage markers a real snapshot wrote | `TestGuestIdentityRecoverCLI` |
 | A daemon refused when another process already holds the control socket | `TestGuestDaemonSocketContention/live-socket-refused` |
 | A second daemon under one configuration refused by the lifecycle lock, without displacing the first | `TestGuestDaemonSocketContention/lock-refuses-second-daemon` |

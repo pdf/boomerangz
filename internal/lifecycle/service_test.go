@@ -106,6 +106,10 @@ func (b *memoryBackend) Hold(_ context.Context, tag, snapshot string) error {
 	if b.state.Holds == nil {
 		b.state.Holds = map[string][]string{}
 	}
+	// zfs hold refuses a tag the snapshot already carries.
+	if slices.Contains(b.state.Holds[snapshot], tag) {
+		return fmt.Errorf("cannot hold snapshot '%s': tag already exists on this dataset", snapshot)
+	}
 	b.state.Holds[snapshot] = append(b.state.Holds[snapshot], tag)
 	b.writes = append(b.writes, "hold "+snapshot)
 	return nil
@@ -115,6 +119,16 @@ func (b *memoryBackend) Release(_ context.Context, tag, snapshot string) error {
 	b.writes = append(b.writes, "release "+snapshot)
 	return nil
 }
+func (b *memoryBackend) ListDatasets(context.Context) ([]zfs.Dataset, error) {
+	var datasets []zfs.Dataset
+	for _, object := range b.state.Objects {
+		if object.Type == "filesystem" || object.Type == "volume" {
+			datasets = append(datasets, zfs.Dataset{Name: object.Name, Type: zfs.DatasetType(object.Type), EncryptionRoot: "-"})
+		}
+	}
+	return datasets, nil
+}
+
 func (b *memoryBackend) Bookmark(_ context.Context, snapshot, bookmark string) error {
 	for _, o := range b.state.Objects {
 		if o.Name == snapshot {

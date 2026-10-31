@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -88,6 +89,96 @@ func TestReplicationStreamUsesOneProofForItsSubtree(t *testing.T) {
 	}
 	if len(b.state.Holds[rootSnapshot])+len(b.state.Holds[childSnapshot]) != 0 {
 		t.Fatal("recursive holds not released")
+	}
+}
+
+func TestRootStreamInheritsItsSubtreeProof(t *testing.T) {
+	t.Parallel()
+	b := backendWithSnapshots(t)
+	addTestAuthority(b)
+	rootSnapshot := b.state.Objects[1].Name
+	var metadata Metadata
+	for _, snapshot := range snapshotsIn(b.state, "tank/data") {
+		if snapshot.Name == rootSnapshot {
+			var err error
+			if metadata, err = Ownership(snapshot, testLineage); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	childSnapshot := "tank/data/child@" + metadata.Name()
+	b.state.Objects = append(b.state.Objects,
+		zfs.Object{Name: "tank/data/child", Type: "filesystem", GUID: 20},
+		zfs.Object{Name: childSnapshot, Type: "snapshot", GUID: 21},
+	)
+	for key, value := range metadata.Properties() {
+		b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: childSnapshot, Name: key, Value: value, Source: zfs.SourceLocal})
+	}
+	s, _ := NewService(b, testInstallation)
+	const target = "local:backup/data"
+	// A send -R stream proved and checkpointed the whole subtree.
+	recursive, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", []string{childSnapshot, rootSnapshot}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CheckpointSet(t.Context(), "tank/data", recursive, map[string]uint64{rootSnapshot: recursive.Sources[0].GUID, childSnapshot: 21}); err != nil {
+		t.Fatal(err)
+	}
+	// While the subtree's holds stand, the root's own stream must see the
+	// child's too rather than placing it again.
+	if _, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", []string{rootSnapshot}, target); err != nil {
+		t.Fatalf("a covered proof with its holds in place was refused: %v", err)
+	}
+	if err := s.ReleaseCompletedHold(t.Context(), "tank/data", recursive); err != nil {
+		t.Fatal(err)
+	}
+	// After replicate=off the root's own stream asks for the root alone at
+	// the same instant. The stored proof covers it and stands unchanged.
+	own, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", []string{rootSnapshot}, target)
+	if err != nil {
+		t.Fatalf("a covered proof was refused: %v", err)
+	}
+	if !reflect.DeepEqual(own, recursive) {
+		t.Fatalf("proof = %+v, want the stored %+v", own, recursive)
+	}
+	// Only the root's snapshot was sent; the child's was verified before.
+	if err := s.CheckpointSet(t.Context(), "tank/data", own, map[string]uint64{rootSnapshot: own.Sources[0].GUID}); err != nil {
+		t.Fatalf("checkpoint of the inherited proof: %v", err)
+	}
+	if err := s.CheckpointSet(t.Context(), "tank/data", own, map[string]uint64{rootSnapshot: own.Sources[0].GUID + 1}); err == nil {
+		t.Fatal("a mismatched verified GUID was accepted")
+	}
+}
+
+func TestNarrowerProofDoesNotCoverAWiderStream(t *testing.T) {
+	t.Parallel()
+	b := backendWithSnapshots(t)
+	addTestAuthority(b)
+	rootSnapshot := b.state.Objects[1].Name
+	var metadata Metadata
+	for _, snapshot := range snapshotsIn(b.state, "tank/data") {
+		if snapshot.Name == rootSnapshot {
+			var err error
+			if metadata, err = Ownership(snapshot, testLineage); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	childSnapshot := "tank/data/child@" + metadata.Name()
+	b.state.Objects = append(b.state.Objects,
+		zfs.Object{Name: "tank/data/child", Type: "filesystem", GUID: 20},
+		zfs.Object{Name: childSnapshot, Type: "snapshot", GUID: 21},
+	)
+	for key, value := range metadata.Properties() {
+		b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: childSnapshot, Name: key, Value: value, Source: zfs.SourceLocal})
+	}
+	s, _ := NewService(b, testInstallation)
+	if _, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", []string{rootSnapshot}, "local:backup/data"); err != nil {
+		t.Fatal(err)
+	}
+	// The root alone was proved; nothing proves the child reached the target.
+	if _, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", []string{childSnapshot, rootSnapshot}, "local:backup/data"); err == nil {
+		t.Fatal("a proof of the root alone was taken to cover its subtree")
 	}
 }
 

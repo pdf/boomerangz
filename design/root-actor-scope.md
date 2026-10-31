@@ -383,15 +383,59 @@ never mistaken for its replica (9.2).
 
 `Apply` takes the resume path whenever a stream's destination holds a token,
 and a `BuildResume` failure is returned with no fallback, so the error repeats
-for as long as the token exists. Giving it a recovery means aborting the
-token, which contradicts `Apply`'s contract that failures retain references
-and any receive token with no implicit reseed or abort. That is a policy
-decision, not a cleanup. Its reach is now one member's stream rather than the
-root's whole transfer.
+for as long as the token exists. Its reach is now one member's stream rather
+than the root's whole transfer.
+
+Resolved by keeping `Apply`'s contract - failures retain references and any
+receive token, with no implicit reseed or abort - and giving the operator an
+explicit way out. `dataset abort-receive DATASET TARGET` resolves and checks
+the target exactly as a reseed does, then discards only the interrupted
+receives (`zfs receive -A`), deepest first. The replica, its snapshots, the
+binding and every proof stay; the next transfer plans from what the
+destination holds. A resume that cannot be built says to run it.
 
 ### 9.5 Member-only targets on a root replicated to the configured root
 
 Under `discard=off` the root's replica is the configured destination root
 itself. If only a member sends to a remote target, nothing creates that root,
-and SSH and native destinations refuse to create their configured root. The
-transfer fails with that refusal; the remote root has to be created by hand.
+and SSH and native destinations refuse to create their configured root.
+
+Resolved as a precondition rather than refused as a configuration. Under
+`discard=first` and `discard=all` a remote's configured root must always exist
+already, so requiring it here is consistent, and the configuration works once
+it does; `discard=off` is the default, so rejecting it in discovery would
+refuse common setups. Planning a member's full stream to a remote now requires
+the configured root itself rather than its parent, and says to create it or to
+send the root there too, instead of failing on the remote's scope refusal.
+If the root later starts sending there, the hand-made root is not a
+placeholder and is never replaced: the root's stream reports no common base
+and asks for a reseed.
+
+### 9.6 Switching `replicate` on an existing replica
+
+Per-member to `replicate=on` cannot continue: holes and excluded datasets were
+never sent, so a `send -R` incremental has no base for them, and the root's
+per-member proof at a shared instant covers the root alone where the
+recursive proof covers the subtree. Planning refuses before anything changes
+when member-stream proofs exist for the target, and asks for a reseed.
+
+`replicate=on` back to per-member continues without one. Every member's
+replica shares its latest snapshot with its source, so each member stream finds
+an incremental base. A stored proof that covers the requested one - same
+stream, instant and target, its sources a superset with identical entries -
+stands rather than conflicting, and a checkpoint need not re-verify sources
+whose checkpoint bookmark already exists, since a bookmark exists only once a
+transfer verified them. Replicas of datasets that are no longer members stay
+on the destination untouched.
+
+### 9.7 A remote that is this host
+
+Discovery groups remotes by address, so an SSH remote addressed back at this
+host shared no namespace with local replicas or actor roots. The transfer and
+reseed paths now compare the remote destination's pool GUID with this host's
+pools before any change, and refuse with `HostLocalError` until the request
+records that its replicas were validated as local. The daemon learns such a
+remote, rescans with its replicas in the local namespace - so every collision
+rule applies, including against actor roots - and retries; `dataset reseed`
+and `dataset abort-receive` rescan the same way. `dataset list` and `dataset
+inspect` do not connect to remotes and cannot see this case.

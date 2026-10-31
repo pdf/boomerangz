@@ -92,11 +92,16 @@ func sameRemoteClients(a, b map[string]remoteClient) bool {
 }
 
 // remoteDestinations reports where each remote client receives, for
-// discovery's replica overlap checks.
-func remoteDestinations(clients map[string]remoteClient) map[string]discovery.RemoteDestination {
+// discovery's replica overlap checks. A remote found to receive into one of
+// this host's own pools shares the local namespace, so its replicas are checked
+// against this host's actor roots and local replicas.
+func remoteDestinations(clients map[string]remoteClient, hostLocal map[string]bool) map[string]discovery.RemoteDestination {
 	destinations := make(map[string]discovery.RemoteDestination, len(clients))
 	for name, client := range clients {
 		if destination, err := discovery.RemoteDestinationOf(client.CanonicalTarget()); err == nil {
+			if hostLocal[name] {
+				destination.Namespace = "local"
+			}
 			destinations[name] = destination
 		}
 	}
@@ -116,7 +121,7 @@ func RemoteDestinations(settings map[string]config.RemoteConfig, credentialsDir 
 			clients[name] = built[name]
 		}
 	}
-	return remoteDestinations(clients)
+	return remoteDestinations(clients, nil)
 }
 
 func buildRemoteClients(settings map[string]config.RemoteConfig, credentialsDir string) (map[string]remoteClient, error) {

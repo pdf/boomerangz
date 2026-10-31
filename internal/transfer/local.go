@@ -240,40 +240,6 @@ func NewRemoteWithService(source Backend, destination zfs.Executor, stream Strea
 	return &Local{backend: source, target: destination, stream: stream, lifecycle: service, installation: installation}, nil
 }
 
-// mergeStates combines inspections of distinct datasets into one state.
-func mergeStates(states ...zfs.State) zfs.State {
-	var merged zfs.State
-	for _, state := range states {
-		merged.Objects = append(merged.Objects, state.Objects...)
-		merged.Properties = append(merged.Properties, state.Properties...)
-		for name, value := range state.Received {
-			if merged.Received == nil {
-				merged.Received = make(map[string]map[string]string)
-			}
-			merged.Received[name] = value
-		}
-		for name, value := range state.ResumeTokens {
-			if merged.ResumeTokens == nil {
-				merged.ResumeTokens = make(map[string]string)
-			}
-			merged.ResumeTokens[name] = value
-		}
-		for name, value := range state.Clones {
-			if merged.Clones == nil {
-				merged.Clones = make(map[string][]string)
-			}
-			merged.Clones[name] = value
-		}
-		for name, value := range state.Holds {
-			if merged.Holds == nil {
-				merged.Holds = make(map[string][]string)
-			}
-			merged.Holds[name] = value
-		}
-	}
-	return merged
-}
-
 // ownTokens keeps only the resume tokens that belong to a stream received at
 // destination. A recursive stream owns every token beneath its destination; any
 // other stream owns only its own, since a token on a descendant belongs to that
@@ -302,6 +268,28 @@ func nearestExisting(name string, inventory []zfs.Dataset) string {
 		}
 	}
 	return nearest
+}
+
+// refuseHostLocal applies checkHostLocal to the destination's configured
+// root, or its nearest existing ancestor. A destination with none is left to
+// load, which reports it unavailable.
+func (l *Local) refuseHostLocal(ctx context.Context, request Request) error {
+	if l.sameHost || requestTransport(request) == "local" || request.HostLocal {
+		return nil
+	}
+	inventory, err := l.target.ListDatasets(ctx)
+	if err != nil {
+		return err
+	}
+	nearest := nearestExisting(request.DestinationRoot, inventory)
+	if nearest == "" {
+		return nil
+	}
+	identity, err := l.target.InspectDatasetIdentity(ctx, nearest)
+	if err != nil {
+		return err
+	}
+	return checkHostLocal(ctx, l.backend, request, identity)
 }
 
 // load inventories both ends for one stream. The source view is the root's own
@@ -337,7 +325,7 @@ func (l *Local) load(ctx context.Context, request Request, stream string) (View,
 		if inspectErr != nil {
 			return view, inspectErr
 		}
-		view.Source = mergeStates(view.Source, member)
+		view.Source = zfs.MergeStates(view.Source, member)
 	}
 	// Inherited public properties may be carried by property streams, and changes
 	// to their local ancestor values must be visible to preflight revalidation.
@@ -404,7 +392,10 @@ func (l *Local) load(ctx context.Context, request Request, stream string) (View,
 	}
 	view.RootDestinationExists = anchor == mappedRoot
 	view.RootDestinationIdentity, err = l.target.InspectDatasetIdentity(ctx, anchor)
-	return view, err
+	if err != nil {
+		return view, err
+	}
+	return view, checkHostLocal(ctx, l.backend, request, view.RootDestinationIdentity)
 }
 
 // Preview inventories both ends without creating holds or changing properties.
@@ -606,6 +597,11 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 	if err != nil {
 		return Result{}, err
 	}
+	// Replacing a placeholder renames on the destination before any stream
+	// loads, so a remote on this host's own pools is refused up front.
+	if err := l.refuseHostLocal(ctx, request); err != nil {
+		return Result{}, err
+	}
 	if len(request.Members) == 0 {
 		return l.applyStream(ctx, request, streams[0].Dataset, report)
 	}
@@ -681,6 +677,15 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 	var ref lifecycle.Reference
 	if resuming {
 		plan, ref, err = BuildResume(request, before, l.installation)
+		if err != nil {
+			// The token stays, so every later attempt would fail the same way;
+			// discarding it is the operator's call.
+			target := request.DestinationRoot
+			if requestTransport(request) != "local" {
+				target = request.RemoteName
+			}
+			err = fmt.Errorf("interrupted receive cannot be resumed: %w; to discard it and send again, run boomerangz dataset abort-receive %s %s", err, request.Source, target)
+		}
 	} else {
 		plan, err = Build(request, before, l.installation)
 	}
@@ -800,7 +805,8 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 	if err := verifyGUIDs(plan, destination); err != nil {
 		return result, err
 	}
-	sourceAfter, err := l.backend.InspectState(ctx, request.Source, true)
+	// Authority, the binding and every proof are the root's own properties.
+	sourceAfter, err := l.backend.InspectState(ctx, request.Source, false)
 	if err != nil {
 		return result, err
 	}
@@ -819,13 +825,13 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 	// beneath, so the first stream to bring it into existence promotes the
 	// bootstrap anchor to it.
 	mappedRoot := plan.TargetBinding.MappedDataset
-	rootState, rootErr := l.target.InspectState(ctx, mappedRoot, false)
+	// A placeholder is never an anchor: until the root's own replica replaces
+	// it, the binding stays on the nearest real ancestor.
+	rootPlaceholder, rootErr := placeholderAt(ctx, l.target, mappedRoot)
 	if rootErr != nil {
 		return result, rootErr
 	}
-	// A placeholder is never an anchor: until the root's own replica replaces
-	// it, the binding stays on the nearest real ancestor.
-	if plan.TargetBinding.Anchor != mappedRoot && !isPlaceholder(rootState, mappedRoot) {
+	if plan.TargetBinding.Anchor != mappedRoot && !rootPlaceholder {
 		resolved, identityErr := l.target.InspectDatasetIdentity(ctx, mappedRoot)
 		if identityErr != nil {
 			return result, identityErr
@@ -887,7 +893,7 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 			return result, err
 		}
 	}
-	current, err := l.backend.InspectState(ctx, request.Source, true)
+	current, err := l.backend.InspectState(ctx, request.Source, false)
 	if err != nil {
 		return result, err
 	}
@@ -945,12 +951,13 @@ func (l *Local) setAsidePlaceholder(ctx context.Context, request Request, stream
 	if !exists(destination) {
 		return nil
 	}
+	if placeholder, err := placeholderAt(ctx, l.target, destination); err != nil || !placeholder {
+		return err
+	}
+	// The busy check below needs any resume token beneath it too.
 	state, err := l.target.InspectState(ctx, destination, true)
 	if err != nil {
 		return err
-	}
-	if !isPlaceholder(state, destination) {
-		return nil
 	}
 	if exists(aside) {
 		return fmt.Errorf("placeholder %s cannot be set aside: %s already exists", destination, aside)

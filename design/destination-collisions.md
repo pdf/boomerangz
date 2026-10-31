@@ -73,9 +73,11 @@ they connect as. The daemon derives namespaces from the clients it builds; the
 CLI derives the same without connecting. A remote whose credential cannot be
 read has no known destination and goes unchecked in that scan.
 
-Not detected: a local target and a remote that reach the same pool, such as an
-SSH remote pointed at this host, since nothing ties a remote's address to the
-local host. Identity recovery scans without destinations on purpose: marking a
+A local target and a remote that reach the same pool, such as an SSH remote
+pointed at this host, are not tied together by configuration. They are caught
+when the remote is first reached instead: its pool GUID matches a local pool,
+and the remote's replicas are revalidated in the local namespace before
+anything is received. See root-actor-scope.md section 9.7. Identity recovery scans without destinations on purpose: marking a
 root invalid there would hide its owner markers from the recovery.
 
 ## 4. Out of scope

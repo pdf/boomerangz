@@ -68,6 +68,16 @@ that target. A member is refused, and the error names its root. Add
 .B --apply
 to apply after revalidation.
 .TP
+.B dataset abort-receive DATASET TARGET
+Preview discarding the interrupted receives that a local destination root or
+named remote holds for one actor root's streams. A transfer resumes an
+interrupted receive and never discards it, so when resuming keeps failing this
+is the way out. Nothing else on the destination is touched and no replication
+history is released; the next transfer sends the discarded data again. A member
+is refused, and the error names its root. Add
+.B --apply
+to apply after revalidation.
+.TP
 .B dataset clean
 Preview explicit decommissioning. Selection requires exact dataset arguments,
 .BR --recursive ,

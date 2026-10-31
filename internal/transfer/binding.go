@@ -53,6 +53,21 @@ type localIdentityReader interface {
 	InspectState(context.Context, string, bool) (zfs.State, error)
 }
 
+// placeholderAt reports whether dataset is a placeholder. Its identity says
+// whether the marker is set, in one query; only a marked dataset is inspected
+// in full, since a state inspection costs commands per snapshot.
+func placeholderAt(ctx context.Context, reader localIdentityReader, dataset string) (bool, error) {
+	identity, err := reader.InspectDatasetIdentity(ctx, dataset)
+	if err != nil || !identity.Placeholder {
+		return false, err
+	}
+	state, err := reader.InspectState(ctx, dataset, false)
+	if err != nil {
+		return false, err
+	}
+	return isPlaceholder(state, dataset), nil
+}
+
 // isPlaceholder reports whether state shows dataset as a placeholder: marked
 // locally when boomerangz created it as a receive parent, and never given a
 // snapshot or bookmark since. Anything else is treated as a real dataset.
@@ -85,11 +100,11 @@ func nearestReal(ctx context.Context, reader localIdentityReader, name, configur
 		if !inside(candidate, configuredRoot) {
 			return candidate, nil
 		}
-		state, err := reader.InspectState(ctx, candidate, false)
+		placeholder, err := placeholderAt(ctx, reader, candidate)
 		if err != nil {
 			return "", err
 		}
-		if !isPlaceholder(state, candidate) {
+		if !placeholder {
 			return candidate, nil
 		}
 		index := strings.LastIndexByte(candidate, '/')

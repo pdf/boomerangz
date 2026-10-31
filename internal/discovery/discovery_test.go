@@ -629,3 +629,29 @@ func TestRemoteDestinationOfCanonicalTargets(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteOnThisHostIsCheckedAgainstLocalDatasets(t *testing.T) {
+	t.Parallel()
+	datasets := []string{"tank", "tank/data", "tank/x", "tank/x/data", "backup", "backup/near"}
+	properties := []zfs.Property{
+		local("tank/data", "enabled", "on"),
+		local("tank/data", "remote", "near"),
+		local("tank/data", "discard", "first"),
+		local("tank/x/data", "enabled", "on"),
+		local("tank/x/data", "local", "backup/near"),
+		local("tank/x/data", "discard", "all"),
+	}
+	// Both map to backup/near/data: tank/data on the remote, tank/x/data on
+	// this host. Only a remote known to be this host shares the namespace.
+	elsewhere := map[string]RemoteDestination{"near": {Namespace: "ssh://backup.example.net:22", Root: "backup/near"}}
+	if root, _ := collisionScan(t, elsewhere, datasets, properties...).Inspect("tank/data"); !root.Policy.Valid() {
+		t.Fatalf("a remote elsewhere collided with a local replica: %q", root.Policy.Errors)
+	}
+	here := map[string]RemoteDestination{"near": {Namespace: "local", Root: "backup/near"}}
+	g := collisionScan(t, here, datasets, properties...)
+	for _, name := range []string{"tank/data", "tank/x/data"} {
+		if root, _ := g.Inspect(name); root.Policy.Valid() {
+			t.Errorf("%s stayed valid although its replica overlaps on this host", name)
+		}
+	}
+}

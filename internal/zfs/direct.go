@@ -90,31 +90,46 @@ func (d *Direct) InspectDatasetIdentity(ctx context.Context, dataset string) (Da
 	if err := validateDataset(dataset); err != nil {
 		return result, err
 	}
-	output, err := d.runner.Run(ctx, "list", "-H", "-p", "-d", "0", "-t", "filesystem,volume", "-o", "name,type,guid", dataset)
+	// zfs get, unlike zfs list, reports where the placeholder marker comes
+	// from: a placeholder's own marker is local, and the replicas received
+	// beneath it inherit it.
+	output, err := d.runner.Run(ctx, "get", "-H", "-p", "-t", "filesystem,volume", "-o", "name,property,value,source", "type,guid,"+PlaceholderProperty, dataset)
 	if err != nil {
 		return result, err
 	}
-	err = parseTable(output, 3, func(fields []string) error {
-		if result.Name != "" || fields[0] != dataset {
+	seen := make(map[string]bool, 3)
+	err = parseTable(output, 4, func(fields []string) error {
+		if fields[0] != dataset || seen[fields[1]] {
 			return fmt.Errorf("unexpected dataset identity row %q", fields[0])
 		}
-		typeName := DatasetType(fields[1])
-		if typeName != Filesystem && typeName != Volume {
-			return fmt.Errorf("unsupported dataset type %q", fields[1])
+		seen[fields[1]] = true
+		switch fields[1] {
+		case "type":
+			typeName := DatasetType(fields[2])
+			if typeName != Filesystem && typeName != Volume {
+				return fmt.Errorf("unsupported dataset type %q", fields[2])
+			}
+			result.Type = typeName
+		case "guid":
+			guid, parseErr := strconv.ParseUint(fields[2], 10, 64)
+			if parseErr != nil || guid == 0 {
+				return fmt.Errorf("invalid dataset GUID")
+			}
+			result.GUID = guid
+		case PlaceholderProperty:
+			result.Placeholder = fields[3] == string(SourceLocal) && fields[2] == "on"
+		default:
+			return fmt.Errorf("unexpected dataset identity property %q", fields[1])
 		}
-		guid, parseErr := strconv.ParseUint(fields[2], 10, 64)
-		if parseErr != nil || guid == 0 {
-			return fmt.Errorf("invalid dataset GUID")
-		}
-		result.Name, result.Type, result.GUID = fields[0], typeName, guid
 		return nil
 	})
 	if err != nil {
 		return DatasetIdentity{}, err
 	}
-	if result.Name == "" {
+	if result.Type == "" || result.GUID == 0 {
 		return DatasetIdentity{}, fmt.Errorf("dataset identity is missing")
 	}
+	result.Name = dataset
 	result.Pool, _, _ = strings.Cut(dataset, "/")
 	if d.poolRunner == nil {
 		return DatasetIdentity{}, fmt.Errorf("pool identity query is unavailable")

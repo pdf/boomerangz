@@ -38,6 +38,26 @@ func runOf(t *testing.T, subscription *Subscription, job string) []Event {
 	}
 }
 
+// runsOf follows several jobs at once until each reaches a terminal state.
+// Their transitions may share one update, which runOf would cut short.
+func runsOf(t *testing.T, subscription *Subscription, jobs ...string) map[string][]Event {
+	t.Helper()
+	runs := make(map[string][]Event, len(jobs))
+	done := make(map[string]bool, len(jobs))
+	for len(done) < len(jobs) {
+		for _, event := range receive(t, subscription).Transitions {
+			if !slices.Contains(jobs, event.Job) || done[event.Job] {
+				continue
+			}
+			runs[event.Job] = append(runs[event.Job], event)
+			if slices.Contains([]string{"succeeded", "failed", "blocked", "waiting-retry", "cancelled", "scheduled"}, event.State) {
+				done[event.Job] = true
+			}
+		}
+	}
+	return runs
+}
+
 func stateOf(t *testing.T, run []Event, state string) Event {
 	t.Helper()
 	index := slices.IndexFunc(run, func(event Event) bool { return event.State == state })
@@ -205,7 +225,7 @@ func TestRemoteTransferNamesTheSnapshotItsLastPassLanded(t *testing.T) {
 	}
 	destination.mu.Lock()
 	destination.inventory = append(destination.inventory, zfs.Dataset{Name: reportDestination, Type: zfs.Filesystem, EncryptionRoot: "-"})
-	destination.identities[reportDestination] = zfs.DatasetIdentity{Name: reportDestination, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: 11}
+	destination.identities[reportDestination] = zfs.DatasetIdentity{Name: reportDestination, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: destination.identities["backup"].PoolGUID}
 	destination.states[reportDestination] = zfs.State{
 		Objects:      []zfs.Object{{Name: reportDestination, Type: "filesystem", GUID: 20, CreateTXG: 20}},
 		ResumeTokens: map[string]string{reportDestination: "1-resume-token"},
