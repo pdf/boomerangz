@@ -105,6 +105,29 @@ message StatusSnapshot {
   repeated QueueStatus queues = 5;
   repeated JobStatus jobs = 6;
   uint64 config_generation = 7;
+  // destinations holds the latest delegated-permission check of each
+  // destination checked so far, local destinations first and each kind by
+  // name.
+  repeated DestinationPermissions destinations = 8;
+}
+
+// DestinationPermissions is the latest check of one destination's delegated
+// ZFS permissions against everything boomerangz may need there. A non-empty
+// missing or error is a warning: transfers go on, and an operation that needs a
+// missing permission still fails its own preflight.
+message DestinationPermissions {
+  // destination is a local destination root or, with remote, a remote's name.
+  string destination = 1;
+  bool remote = 2;
+  // dataset is where the check ran: the destination root, or its nearest
+  // existing ancestor while the root is absent.
+  string dataset = 3;
+  // account is the account that lacks the missing permissions.
+  string account = 4;
+  repeated string missing = 5;
+  // error says why the check itself could not run.
+  string error = 6;
+  int64 checked_unix_nano = 7;
 }
 
 message ListDatasetsRequest {}

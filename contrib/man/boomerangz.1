@@ -27,6 +27,8 @@ previous update, in the order the daemon recorded them, and one that falls too
 far behind the daemon ends with an error rather than continuing with changes
 missing. Each job state change names its run and what that run acted on, such
 as the snapshot a transfer sent or the snapshots a prune destroyed.
+Status also warns about each destination whose delegated ZFS permissions lack
+something boomerangz may need.
 .TP
 .B trigger
 Queue an immediate snapshot of every member of the selected actor roots, or of

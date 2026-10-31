@@ -3,6 +3,7 @@ package control
 
 import (
 	"context"
+	"slices"
 	"sync"
 
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
@@ -60,6 +61,10 @@ func toSnapshot(snapshot daemonstate.ControlSnapshot) *controlrpc.StatusSnapshot
 	}
 	for _, event := range snapshot.Jobs {
 		result.Jobs = append(result.Jobs, toJobStatus(event))
+	}
+	for _, destination := range snapshot.Destinations {
+		result.Destinations = append(result.Destinations, &controlrpc.DestinationPermissions{Destination: destination.Destination, Remote: destination.Remote, Dataset: destination.Dataset, Account: destination.Account,
+			Missing: slices.Clone(destination.Missing), Error: destination.Error, CheckedUnixNano: destination.Checked.UnixNano()})
 	}
 	return result
 }

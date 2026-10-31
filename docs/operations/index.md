@@ -53,6 +53,23 @@ around it. A scan that fails writes a `discovery failed` line instead, and a
 configuration reload that republishes the same generation writes no second
 line.
 
+### Destination permission lines
+
+When the daemon finds that a destination lacks a delegated ZFS permission it
+may need, it writes a warning-level
+`destination lacks delegated ZFS permissions boomerangz may need; operations that need them will fail`
+line with `destination`, the local destination root or the remote's name,
+`remote`, `dataset`, where the check ran, `account`, the account that lacks
+them, and `missing`, the missing permissions separated by commas. A check
+that could not run writes a warning-level
+`could not check destination ZFS permissions` line with `error` in place of
+the permission keys, and a destination whose earlier warning no longer
+applies writes an info-level
+`destination grants every delegated ZFS permission boomerangz may need` line.
+A recheck that finds the same thing writes nothing. See
+[destination permissions](#destination-permissions) for when the daemon
+checks.
+
 ### Gaps in the log
 
 The log is complete from the moment the daemon starts. If writing to the log
@@ -118,6 +135,49 @@ one rather than continuing with changes missing. Start it again to receive a
 fresh snapshot; changes made while no watch was connected are not replayed. A
 script that runs a watch unattended should treat that exit as a reason to
 reconnect, not as the daemon failing.
+
+### Destination permissions
+
+The daemon checks each destination's delegated ZFS permissions against
+everything Boomerangz may need there, not only what the next transfer uses:
+the receive permissions, `rename` for
+[placeholder replacement](/guide/datasets#roots-and-members), what
+[reseed](/operations/recovery#reseed-a-target) and
+[abort-receive](/operations/recovery#discard-an-interrupted-receive) need, and the permission for each native
+property a `set_prop` or `ignore_prop` names. Most transfers exercise only part
+of that set, so a missing permission can otherwise go unnoticed until the rare
+operation that needs it fails. The check reads the effective delegation for the
+account that runs ZFS on the receiving side, at the destination root, or at its
+nearest existing ancestor while the root does not exist yet.
+
+A local destination root is checked when discovery first finds a dataset
+sending to it; a remote is checked when the daemon first opens its endpoint
+for a transfer. Each is checked again when what it must grant changes, after
+every `boomerangz config reload`, and, for a remote, when its endpoint opens
+after failing to. Nothing is checked on a timer, so after granting a missing
+permission, reload the configuration to clear the warning.
+
+A finding is a warning, never a failure. Transfers keep running, and an
+operation that needs a missing permission still stops at its own permission
+preflight with an error naming what is missing.
+
+In a terminal, `status` lists each destination with something missing, or
+whose check could not run, under `WARNINGS`. The JSON object carries
+`destinations`, an array with one entry per destination checked so far, local
+destinations first:
+
+| Field | Meaning |
+|---|---|
+| `destination` | The local destination root, or the remote's name |
+| `remote` | `true` for a remote |
+| `dataset` | Where the check ran: the root, or its nearest existing ancestor |
+| `account` | The account that lacks the `missing` permissions |
+| `missing` | The missing permissions, sorted; absent when nothing is missing |
+| `error` | Why the check could not run; absent when it ran |
+| `checked_unix_nano` | When the check ran |
+
+The array is empty until the first check completes, and a destination that
+nothing sends to any more leaves it.
 
 ### Job states
 
@@ -196,7 +256,8 @@ that is already queued or running.
 
 Use all three views:
 
-1. `boomerangz status` to confirm the daemon and recent work;
+1. `boomerangz status` to confirm the daemon and recent work, and that it
+   reports no [destination permission](#destination-permissions) warnings;
 2. `boomerangz dataset inspect DATASET` to confirm the effective policy;
 3. `zfs list -t snapshot -r DATASET` on the source and `zfs list -r ROOT` on
    each destination to confirm the stored data.

@@ -280,3 +280,22 @@ root = "tank/backups"
 
 Treat pairing bundles as secrets. See [Secure your deployment](./security) for
 authentication choices and certificate trust.
+
+## Check destination permissions
+
+Whichever transport a destination uses, the daemon checks its delegation once
+it reaches it: a local destination when discovery first finds a dataset
+sending there, and a remote when a transfer first opens its endpoint. The
+check runs on the receiving side, as the account that executes ZFS there, and
+covers everything Boomerangz may need on the destination, including `rename`
+and the permissions for any receive properties your policies set or ignore.
+Anything missing is reported as a warning in `boomerangz status` and in the
+daemon log, naming the destination, the account and the permissions:
+
+```sh
+boomerangz status
+```
+
+A remote is checked again whenever its endpoint opens after failing to, and
+every destination after `boomerangz config reload`. See
+[Destination permissions](/operations/#destination-permissions).

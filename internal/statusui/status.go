@@ -21,16 +21,32 @@ type output struct {
 	Datasets         []*controlrpc.DatasetStatus `json:"datasets"`
 	Queues           []*controlrpc.QueueStatus   `json:"queues"`
 	Jobs             []*controlrpc.JobStatus     `json:"jobs"`
+	// Destinations is every destination's latest permission check, missing
+	// permissions and failed checks included; it is an empty array, not
+	// absent, before any check.
+	Destinations []*controlrpc.DestinationPermissions `json:"destinations"`
 }
 
 func normalized(snapshot *controlrpc.StatusSnapshot) output {
-	result := output{Revision: snapshot.GetRevision(), Generation: snapshot.GetGeneration(), ConfigGeneration: snapshot.GetConfigGeneration(), Datasets: slices.Clone(snapshot.GetDatasets()), Queues: slices.Clone(snapshot.GetQueues()), Jobs: slices.Clone(snapshot.GetJobs())}
+	result := output{Revision: snapshot.GetRevision(), Generation: snapshot.GetGeneration(), ConfigGeneration: snapshot.GetConfigGeneration(), Datasets: slices.Clone(snapshot.GetDatasets()), Queues: slices.Clone(snapshot.GetQueues()), Jobs: slices.Clone(snapshot.GetJobs()), Destinations: slices.Clone(snapshot.GetDestinations())}
+	if result.Destinations == nil {
+		result.Destinations = []*controlrpc.DestinationPermissions{}
+	}
 	if snapshot.GetObservedUnixNano() != 0 {
 		result.Observed = time.Unix(0, snapshot.GetObservedUnixNano()).UTC()
 	}
 	slices.SortFunc(result.Datasets, func(a, b *controlrpc.DatasetStatus) int { return strings.Compare(a.GetName(), b.GetName()) })
 	slices.SortFunc(result.Queues, func(a, b *controlrpc.QueueStatus) int { return strings.Compare(a.GetName(), b.GetName()) })
 	slices.SortFunc(result.Jobs, func(a, b *controlrpc.JobStatus) int { return strings.Compare(a.GetJob(), b.GetJob()) })
+	slices.SortStableFunc(result.Destinations, func(a, b *controlrpc.DestinationPermissions) int {
+		if a.GetRemote() != b.GetRemote() {
+			if a.GetRemote() {
+				return 1
+			}
+			return -1
+		}
+		return strings.Compare(a.GetDestination(), b.GetDestination())
+	})
 	return result
 }
 
@@ -185,6 +201,38 @@ func byteSize(bytes uint64) string {
 	return fmt.Sprintf("%.1f PiB", value/float64(unit))
 }
 
+// writePermissionWarnings lists each destination whose permission check found
+// something missing or could not run, in full: the operator needs every
+// permission name to act on it, so the lines are never cut to width.
+func writePermissionWarnings(writer io.Writer, destinations []*controlrpc.DestinationPermissions) error {
+	header := false
+	for _, destination := range destinations {
+		if len(destination.GetMissing()) == 0 && destination.GetError() == "" {
+			continue
+		}
+		if !header {
+			if _, err := fmt.Fprintln(writer, "\nWARNINGS"); err != nil {
+				return err
+			}
+			header = true
+		}
+		kind := "local"
+		if destination.GetRemote() {
+			kind = "remote"
+		}
+		var err error
+		if len(destination.GetMissing()) != 0 {
+			_, err = fmt.Fprintf(writer, "%s destination %s: %s lacks delegated ZFS permissions on %s: %s\n", kind, destination.GetDestination(), destination.GetAccount(), destination.GetDataset(), strings.Join(destination.GetMissing(), ","))
+		} else {
+			_, err = fmt.Fprintf(writer, "%s destination %s: permissions not checked: %s\n", kind, destination.GetDestination(), destination.GetError())
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func newTable(writer io.Writer) *tabwriter.Writer {
 	return tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)
 }
@@ -210,6 +258,9 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) 
 		width = 80
 	}
 	if _, err := fmt.Fprintf(writer, "boomerangz  dataset generation %d  config generation %d  %s\n", view.Generation, view.ConfigGeneration, view.Observed.Format(time.RFC3339)); err != nil {
+		return err
+	}
+	if err := writePermissionWarnings(writer, view.Destinations); err != nil {
 		return err
 	}
 	if len(view.Datasets) == 0 {

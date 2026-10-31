@@ -40,10 +40,15 @@ type remoteApplier struct {
 	// hostLocal is told when the remote turns out to receive into one of this
 	// host's own pools.
 	hostLocal func()
+	// reached is told each time the endpoint opens, or fails to.
+	reached func(context.Context, zfs.Executor, error)
 }
 
 func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, report transfer.Reporter) (transfer.Result, error) {
 	endpoint, err := a.client.Open(ctx)
+	if a.reached != nil {
+		a.reached(ctx, endpoint.executor, err)
+	}
 	if err != nil {
 		return transfer.Result{}, err
 	}
@@ -87,6 +92,7 @@ type Runtime struct {
 	pending      *transfer.PendingSet
 	remotes      map[string]remoteClient
 	safety       *Safety
+	permissions  *permissionChecks
 	locks        *keyLocks
 	status       *Status
 	sends        atomic.Uint64 // numbers each sending transition; see transferReporter
@@ -189,6 +195,7 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 		roads: make(map[string]roadState), hostLocal: make(map[string]bool), retireFailures: make(map[string]int), delayed: make(map[string]time.Time), dirty: make(map[string]bool), configGeneration: 1,
 	}
 	runtime.safety = newSafety(gate, source, clients, liveConfig.Remotes)
+	runtime.permissions = newPermissionChecks(status, logger, time.Now)
 	for _, pool := range []*Pool{management, local, remote} {
 		pool.queue.mu.Lock()
 		pool.queue.observeLocked(queueChange{})
@@ -345,6 +352,11 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	generation := r.configGeneration
 	r.publishRuntimeLocked()
 	r.mu.Unlock()
+	// Every destination is checked again: local ones by the rescan requested
+	// below, remote ones when their endpoints next open. A reload is also how
+	// an operator who has since granted a missing permission clears the
+	// warning.
+	r.permissions.invalidate(false)
 	for _, reconcile := range reconciles {
 		jobID := "remote:" + reconcile.dataset + ":" + reconcile.remote
 		r.markDirty(jobID)
@@ -549,6 +561,53 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 			}
 			r.enqueueInactive(name, false)
 		}
+	}
+	r.checkLocalDestinations(context.Background())
+}
+
+// destinationNeedsLocked returns what each destination the current
+// generation sends to must grant. Callers hold r.mu.
+func (r *Runtime) destinationNeedsLocked() map[destinationKey]destinationNeed {
+	roots := make(map[string]string, len(r.config.Remotes))
+	for name, setting := range r.config.Remotes {
+		roots[name] = setting.Root
+	}
+	return destinationNeeds(r.generation, r.installation, roots)
+}
+
+// checkLocalDestinations checks each local destination root that is due a
+// permission check, and forgets the destinations nothing sends to any more.
+// Remote destinations are checked as their endpoints open; see remoteReached.
+func (r *Runtime) checkLocalDestinations(ctx context.Context) {
+	r.mu.Lock()
+	needs := r.destinationNeedsLocked()
+	r.mu.Unlock()
+	r.permissions.update(needs)
+	for _, key := range slices.SortedFunc(maps.Keys(needs), func(a, b destinationKey) int { return strings.Compare(a.name, b.name) }) {
+		if !key.remote {
+			r.permissions.check(ctx, key, needs[key], r.backend)
+		}
+	}
+}
+
+// remoteReached checks a remote's permissions through an endpoint a transfer
+// just opened, when the remote is due a check. A failed open makes the next
+// successful one check again, so a remote that reconnects is rechecked.
+func (r *Runtime) remoteReached(ctx context.Context, name string, client remoteClient, executor zfs.Executor, openErr error) {
+	r.mu.Lock()
+	current := r.remotes[name] == client
+	needs := r.destinationNeedsLocked()
+	r.mu.Unlock()
+	if !current {
+		return
+	}
+	if openErr != nil {
+		r.permissions.unreached(name)
+		return
+	}
+	key := destinationKey{name: name, remote: true}
+	if need, needed := needs[key]; needed {
+		r.permissions.check(ctx, key, need, executor)
 	}
 }
 
@@ -1324,7 +1383,10 @@ func (r *Runtime) road(dataset, remote string, effective policy.Effective, membe
 	}
 	client := r.remotes[remote]
 	request := transfer.Request{Source: dataset, DestinationRoot: setting.Root, Policy: effective.Clone(), Members: slices.Clone(members), Transport: client.Transport(), RemoteName: remote, CanonicalTarget: client.CanonicalTarget(), HostLocal: r.hostLocal[remote]}
-	applier := remoteApplier{source: r.backend, client: client, installation: r.installation, lifecycle: r.lifecycle, hostLocal: func() { r.learnHostLocal(remote, client) }}
+	applier := remoteApplier{source: r.backend, client: client, installation: r.installation, lifecycle: r.lifecycle, hostLocal: func() { r.learnHostLocal(remote, client) },
+		reached: func(ctx context.Context, executor zfs.Executor, err error) {
+			r.remoteReached(ctx, remote, client, executor, err)
+		}}
 	coordinator, err := transfer.NewRoadwarrior(applier, request, r.pending, transfer.DefaultRetryPolicy(), r.now, rand.Float64)
 	if err != nil {
 		return roadState{}, err

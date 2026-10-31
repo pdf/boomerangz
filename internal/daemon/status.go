@@ -74,14 +74,15 @@ type Status struct {
 }
 
 type statusMessage struct {
-	event     *Event        // a transition
-	queued    []Event       // transitions a queue change produced, with its view
-	queue     *queueView    // a pool's queue view, sent under the queue lock
-	deadlines *deadlineView // scheduler deadlines, sent under the scheduler lock
-	runtime   *runtimeView  // the runtime's dataset view, sent under the runtime lock
-	subscribe *subscribeRequest
-	snapshot  chan ControlSnapshot
-	flush     chan struct{}
+	event        *Event                                // a transition
+	queued       []Event                               // transitions a queue change produced, with its view
+	queue        *queueView                            // a pool's queue view, sent under the queue lock
+	deadlines    *deadlineView                         // scheduler deadlines, sent under the scheduler lock
+	runtime      *runtimeView                          // the runtime's dataset view, sent under the runtime lock
+	destinations *[]daemonstate.DestinationPermissions // every destination's latest permission check
+	subscribe    *subscribeRequest
+	snapshot     chan ControlSnapshot
+	flush        chan struct{}
 }
 
 type queueView struct {
@@ -157,6 +158,15 @@ func (s *Status) publishRuntime(view runtimeView) {
 		return
 	}
 	s.input <- statusMessage{runtime: &view}
+}
+
+// publishDestinations sends every destination's latest permission check.
+// Callers hold the permission checker's lock.
+func (s *Status) publishDestinations(destinations []daemonstate.DestinationPermissions) {
+	if s == nil {
+		return
+	}
+	s.input <- statusMessage{destinations: &destinations}
 }
 
 // Snapshot returns a detached copy of the current state.
@@ -310,15 +320,16 @@ func (u *Subscription) Err() error {
 
 // statusOwner is the memory only the owner goroutine touches.
 type statusOwner struct {
-	status      *Status
-	revision    uint64
-	jobs        map[string]Event
-	jobQueues   map[string]string
-	queues      map[string]QueueSnapshot
-	deadlines   map[string]time.Time
-	runtime     runtimeView
-	subscribers map[*forwarder]*subscriber
-	current     *ControlSnapshot // immutable once built; nil when stale
+	status       *Status
+	revision     uint64
+	jobs         map[string]Event
+	jobQueues    map[string]string
+	queues       map[string]QueueSnapshot
+	deadlines    map[string]time.Time
+	runtime      runtimeView
+	destinations []daemonstate.DestinationPermissions // sorted; never modified once received
+	subscribers  map[*forwarder]*subscriber
+	current      *ControlSnapshot // immutable once built; nil when stale
 }
 
 // subscriber is the owner's record of one forwarder.
@@ -424,6 +435,10 @@ func (o *statusOwner) apply(m statusMessage) ([]Event, *discoveryRecord, bool) {
 		o.runtime = *m.runtime
 		changed = true
 	}
+	if m.destinations != nil {
+		o.destinations = *m.destinations
+		changed = true
+	}
 	incoming := m.queued
 	if m.event != nil {
 		incoming = append(slices.Clone(incoming), *m.event)
@@ -480,7 +495,7 @@ func (o *statusOwner) state() *ControlSnapshot {
 	if o.current != nil {
 		return o.current
 	}
-	result := &ControlSnapshot{Revision: o.revision, Generation: o.runtime.generation, ConfigGeneration: o.runtime.configGeneration, Queues: maps.Clone(o.queues)}
+	result := &ControlSnapshot{Revision: o.revision, Generation: o.runtime.generation, ConfigGeneration: o.runtime.configGeneration, Queues: maps.Clone(o.queues), Destinations: o.destinations}
 	if result.Queues == nil {
 		result.Queues = map[string]QueueSnapshot{}
 	}
@@ -804,6 +819,10 @@ func cloneSnapshot(snapshot *ControlSnapshot) ControlSnapshot {
 	result := *snapshot
 	result.Datasets = slices.Clone(snapshot.Datasets)
 	result.Jobs = slices.Clone(snapshot.Jobs)
+	result.Destinations = slices.Clone(snapshot.Destinations)
+	for i := range result.Destinations {
+		result.Destinations[i].Missing = slices.Clone(result.Destinations[i].Missing)
+	}
 	result.Queues = maps.Clone(snapshot.Queues)
 	for name, queue := range result.Queues {
 		queue.IDs = slices.Clone(queue.IDs)

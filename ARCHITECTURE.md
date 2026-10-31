@@ -78,7 +78,9 @@ Roughly bottom-up, in dependency order:
   full-resync path, and aborting interrupted receives), `hostlocal.go`
   (refusing a remote that receives into this host's own pools until it is
   validated as local), `recovery.go` (`PendingSet` coalescing and the
-  `Roadwarrior` reconnect/retry loop for flaky remotes).
+  `Roadwarrior` reconnect/retry loop for flaky remotes), `permissions.go`
+  (the one spelling of every delegated permission set the preflights check,
+  and `DestinationPermissions`, their union for a destination).
 - **replication** - transport implementations sharing one gRPC service
   contract (`proto/boomerangz/replication/v1/remote.proto`):
   - `ssh/` - default v1 transport: batch-mode SSH, either driving remote ZFS
@@ -98,7 +100,9 @@ Roughly bottom-up, in dependency order:
   `lifecycle`'s inactive/retirement logic into the runtime), `status.go`
   (`Status`, the one goroutine that owns job states, progress, and views, and
   delivers every transition to its subscribers: `WatchStatus` and the daemon
-  log).
+  log), `permissions.go` (checks each destination's delegation against
+  `transfer.DestinationPermissions` when the daemon first reaches it, and
+  reports what is missing as a warning in status and the log).
 - **daemonstate** - plain shared data types (`Event`, `ControlSnapshot`,
   `ReloadResult`, ...) with no behavior, used so `daemon` and `control` don't
   depend on each other's internals.

@@ -655,6 +655,11 @@ func TestGuestRemoteOutageReconnection(t *testing.T) {
 	// The reconnected transfer lands the newest coalesced snapshot: the newer
 	// one or a snapshot created after it.
 	waitForCreation(t, waiter, 30*time.Second, afterInitial, source, success.Snapshot)
+	// The endpoint that finally opened checked the remote's delegation on the
+	// receiving side, which grants everything boomerangz needs.
+	if destinations := runtime.ControlStatus().Destinations; len(destinations) != 1 || destinations[0].Destination != "home" || !destinations[0].Remote || len(destinations[0].Missing) != 0 || destinations[0].Error != "" {
+		t.Fatalf("destination permissions after reconnecting = %+v, want home checked with nothing missing", destinations)
+	}
 	cancel()
 	select {
 	case runErr := <-done:
@@ -665,4 +670,83 @@ func TestGuestRemoteOutageReconnection(t *testing.T) {
 		t.Fatal("daemon did not stop after remote outage test")
 	}
 	t.Logf("remote outage retried and verified %s via %s", source, success.Target)
+}
+
+// TestGuestDaemonReportsMissingDestinationPermissions runs the daemon against
+// a destination container that grants everything a transfer needs except
+// rename, which only placeholder replacement exercises. The daemon reports it
+// missing when it first reaches the destination, from the real delegation
+// zfs allow reads, and its transfers there go on.
+func TestGuestDaemonReportsMissingDestinationPermissions(t *testing.T) {
+	runID := os.Getenv("BOOMERANGZ_DAEMON_GUEST_RUN")
+	if runID == "" {
+		t.Fatal("BOOMERANGZ_DAEMON_GUEST_RUN is unset: the disposable guest harness did not provide a run ID")
+	}
+	sourceDevice := os.Getenv("BOOMERANGZ_INTEGRATION_SOURCE_DEVICE")
+	destinationDevice := os.Getenv("BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE")
+	if sourceDevice == "" || destinationDevice == "" {
+		t.Fatal("source and destination test devices are required")
+	}
+	sourcePool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.SourceDisk, sourceDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationPool, err := zfstest.VerifyGuestPool(t.Context(), runID, zfstest.DestinationDisk, destinationDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := func(args ...string) {
+		t.Helper()
+		if output, commandErr := exec.CommandContext(t.Context(), "zfs", args...).CombinedOutput(); commandErr != nil {
+			t.Fatalf("guest zfs %s: %v: %s", args[0], commandErr, output)
+		}
+	}
+	// The bootstrap delegates the limited container without rename.
+	container := destinationPool + "/limited"
+	name := "permissions-" + time.Now().UTC().Format("150405000")
+	source := sourcePool + "/data/" + name
+	command("create", "-u", source)
+	zfstest.RegisterCleanup(t, source)
+	zfstest.RegisterCleanup(t, container+"/"+name)
+	command("set", policy.Namespace+"enabled=on", policy.Namespace+"policy=1x1h", policy.Namespace+"local="+container, policy.Namespace+"discard=all", source)
+	direct, err := zfs.NewDirect("zfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.Daemon.ReconcileInterval.Duration = 100 * time.Millisecond
+	cfg.Daemon.ManagementWorkers = 2
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	runtime, err := daemon.New(cfg, &scopedDaemonBackend{Direct: direct, root: source}, "abcdefab-cdef-4abc-8def-abcdefabcdef", logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter := statuswait.New(t, runtime)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(ctx) }()
+
+	_, created := createdSnapshot(t, waiter, 30*time.Second, 0, source)
+	landed := waitForTransferred(t, waiter, "local:"+source+":"+container, source, created)
+	if landed.Destination != container+"/"+name {
+		t.Fatalf("transfer landed on %q, want %q", landed.Destination, container+"/"+name)
+	}
+	destinations := runtime.ControlStatus().Destinations
+	if len(destinations) != 1 {
+		t.Fatalf("destinations = %+v", destinations)
+	}
+	got := destinations[0]
+	if got.Destination != container || got.Remote || got.Dataset != container || got.Account != "boomerangz" || !slices.Equal(got.Missing, []string{"rename"}) || got.Error != "" {
+		t.Fatalf("destination permissions = %+v, want rename missing for boomerangz on %s", got, container)
+	}
+	cancel()
+	select {
+	case runErr := <-done:
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon did not stop")
+	}
 }

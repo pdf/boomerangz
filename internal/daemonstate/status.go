@@ -108,6 +108,23 @@ type DatasetStatus struct {
 	NextSnapshot time.Time
 }
 
+// DestinationPermissions is the latest check of one destination's delegated
+// ZFS permissions against everything boomerangz may need there. Destination is
+// a local destination root or, with Remote, a remote's name. Missing names the
+// permissions Account lacks on Dataset, the destination root or its nearest
+// existing ancestor; Error says why the check itself could not run. Either is
+// a warning, never a failure: transfers go on, and each operation's own
+// preflight still stops the one that needs a missing permission.
+type DestinationPermissions struct {
+	Destination string    `json:"destination"`
+	Remote      bool      `json:"remote,omitempty"`
+	Dataset     string    `json:"dataset,omitempty"`
+	Account     string    `json:"account,omitempty"`
+	Missing     []string  `json:"missing,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	Checked     time.Time `json:"checked"`
+}
+
 // ControlSnapshot is one coherent-enough operational view.
 type ControlSnapshot struct {
 	Revision         uint64
@@ -117,6 +134,9 @@ type ControlSnapshot struct {
 	Datasets         []DatasetStatus
 	Queues           map[string]QueueSnapshot
 	Jobs             []Event
+	// Destinations holds the latest permission check of each destination
+	// checked so far, sorted local first and then by name.
+	Destinations []DestinationPermissions
 }
 
 // Update is one delivery to a status subscriber: every transition since the
