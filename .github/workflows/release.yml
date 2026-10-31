@@ -90,6 +90,9 @@ jobs:
           name: release-dist
           path: dist
       - name: Install host virtualization tools
+        # An install takes a minute or two; one that hangs on a stalled mirror
+        # or a held dpkg lock would otherwise use the whole job timeout.
+        timeout-minutes: 10
         run: |
           set -euxo pipefail
           sudo apt-get update

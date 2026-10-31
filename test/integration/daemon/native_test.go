@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,21 +69,38 @@ func runDaemon(t *testing.T, cfg config.Config, backend *scopedDaemonBackend) (*
 		t.Fatal(err)
 	}
 	waiter := statuswait.New(t, runtime)
+	serveDaemon(t, runtime)
+	return runtime, waiter
+}
+
+// serveDaemon runs runtime until the test that owns it ends, and returns a
+// stop that shuts it down early and reports how it stopped. Cleanups run in
+// reverse order of registration, so a runtime served after its fixtures
+// registered theirs is stopped before they are destroyed, also when the test
+// fails partway; a runtime still running then would have jobs fail on the
+// datasets destroyed under them.
+func serveDaemon(t *testing.T, runtime *daemon.Runtime) func(*testing.T) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case runErr := <-done:
-			if runErr != nil {
-				t.Errorf("daemon shutdown: %v", runErr)
+	var once sync.Once
+	stop := func(t *testing.T) {
+		t.Helper()
+		once.Do(func() {
+			cancel()
+			select {
+			case runErr := <-done:
+				if runErr != nil {
+					t.Errorf("daemon shutdown: %v", runErr)
+				}
+			case <-time.After(10 * time.Second):
+				t.Error("daemon did not shut down")
 			}
-		case <-time.After(10 * time.Second):
-			t.Error("daemon did not shut down")
-		}
-	})
-	return runtime, waiter
+		})
+	}
+	t.Cleanup(func() { stop(t) })
+	return stop
 }
 
 // freePort reserves and releases a loopback port. The pairing bundle has to
