@@ -177,6 +177,23 @@ available and review its identity.
 Adoption is exact-dataset only. Conflicting lineage or unresolved receive state
 blocks it.
 
+The same command promotes a replica, for instance after losing the source. A
+replica received with `replicate=on` or `props=on` arrives with the sending
+installation's owner and recovery state as received properties, and none of
+its policy. Give it a policy of its own on the host that will manage it, then
+adopt it:
+
+```sh
+sudo zfs set org.boomerangz:enabled=on org.boomerangz:local=backup/next backup/data
+boomerangz dataset adopt backup/data
+boomerangz dataset adopt backup/data --apply
+```
+
+The promoted dataset continues the source's lineage, so its existing
+snapshots stay owned and later transfers build on them. The source's received
+state is kept as a record of where the replica came from and is otherwise
+ignored.
+
 ## Recover an installation identity
 
 If the identity directory is lost but the original managed pools remain,

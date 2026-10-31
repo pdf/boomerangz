@@ -10,6 +10,49 @@ crosses it.
 Upgrade through the same package channel you installed, as described in
 [Installation](/getting-started/installation#upgrade-or-remove).
 
+## v0.3.0
+
+This release changes how recovery proofs and target bindings are stored, and
+does not read the ones earlier releases wrote. Stop the daemon before
+upgrading, and clear the old records on every actor root before starting it
+again.
+
+### Clear old recovery proofs and target bindings
+
+A recovery proof, `org.boomerangz:state:reference:*`, no longer lists every
+snapshot it protects, so a recursive stream's proof no longer outgrows a ZFS
+property. A target binding, `org.boomerangz:state:target:*`, now stores only
+the destination's identity. With either left in the old form, every transfer,
+clean and retirement of the root refuses with `invalid reference proof` or
+`invalid target binding`.
+
+For each actor root, here `tank/data`, remove the old proofs and bindings and
+the holds and bookmarks the proofs recorded:
+
+```sh
+root=tank/data
+zfs get -H -o property -s local all "$root" | grep -E '^org\.boomerangz:state:(reference|target):' | grep -v ':suspended$' | xargs -r -I{} sudo zfs inherit {} "$root"
+zfs list -H -t snapshot -o name -r "$root" | xargs -r zfs holds -H | awk '$2 ~ /^boomerangz-/ { print $2, $1 }' | while read -r tag snapshot; do sudo zfs release "$tag" "$snapshot"; done
+zfs list -H -t bookmark -o name -r "$root" | grep '#boomerangz-' | xargs -r -n1 sudo zfs destroy
+```
+
+Suspension markers, `org.boomerangz:state:target:*:suspended`, are unchanged
+and stay. Then start the daemon and run each root's transfers with
+`boomerangz trigger`. A transfer to an existing replica that still shares a
+snapshot with its source records a new binding and continues incrementally. One
+that reports that the destination has no common base needs
+`boomerangz dataset reseed`, as in [Reseed a target](/operations/recovery#reseed-a-target).
+
+Check the result with:
+
+```sh
+zfs get -H -o property,value -s local all tank/data | grep 'state:\(reference\|target\):'
+```
+
+Each binding's value now reads like `{"version":2,"pool_guid":...,"anchor_guid":...}`,
+each proof's like `{"created":"..."}`, and `boomerangz status` shows each
+target's last transfer verified.
+
 ## v0.2.0
 
 This release replaces per-dataset actors with [actor roots](/guide/datasets).
