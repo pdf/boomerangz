@@ -57,6 +57,16 @@ type observedLocalStream struct {
 	mu       sync.Mutex
 	changed  chan struct{} // closed and replaced on every recorded send
 	sends    []observedSend
+	// gate, when set, holds a send of source once it has started, until it
+	// returns.
+	gate func(ctx context.Context, source string) error
+}
+
+// setGate replaces the gate sends pass through.
+func (s *observedLocalStream) setGate(gate func(context.Context, string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gate = gate
 }
 
 type observedSend struct {
@@ -73,6 +83,14 @@ func (s *observedLocalStream) Run(ctx context.Context, send zfs.SendOptions, rec
 		return s.delegate.Run(ctx, send, receive, estimate, report)
 	}
 	started := time.Now().UnixNano()
+	s.mu.Lock()
+	gate := s.gate
+	s.mu.Unlock()
+	if gate != nil {
+		if err := gate(ctx, send.Source); err != nil {
+			return zfs.Progress{}, err
+		}
+	}
 	timer := time.NewTimer(s.delay)
 	select {
 	case <-ctx.Done():
@@ -370,8 +388,9 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Keep each acquired transfer lock observable without relying on fixture
-	// data volume, while delegating every stream to the real local ZFS pipeline.
+	// Every stream is delegated to the real local ZFS pipeline. The pause only
+	// keeps each send's interval wide; whether two sends overlap is decided by
+	// the gate below, on what the daemon reports.
 	observed := newObservedLocalStream(localStream, 2*time.Second, map[string]bool{left: true, child: true, right: true})
 	cfg := config.Defaults()
 	cfg.Daemon.ReconcileInterval.Duration = 100 * time.Millisecond
@@ -388,6 +407,40 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	done := make(chan error, 1)
 	job := func(dataset string) string { return "local:" + dataset + ":" + target }
 	waiter := statuswait.New(t, runtime)
+	// awaitSibling holds each root's send, from its start, until the other
+	// root's job reports either sending - it got in alongside - or
+	// waiting-lock - the daemon is holding it back. Both are events the daemon
+	// reports, so whichever it does decides the overlap the phase asserts, and
+	// nothing depends on how far apart the two jobs reached their sends.
+	awaitSibling := func(from statuswait.Cursor) func(context.Context, string) error {
+		other := map[string]string{left: right, right: left}
+		return func(ctx context.Context, source string) error {
+			sibling, gated := other[source]
+			if !gated {
+				return nil
+			}
+			for {
+				changed := waiter.Changed()
+				if slices.ContainsFunc(waiter.Transitions()[from:], func(event daemon.Event) bool {
+					return event.Job == job(sibling) && (event.State == "sending" || event.State == "waiting-lock")
+				}) {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-changed:
+				}
+			}
+		}
+	}
+
+	// The roots' replicas are initially absent and share their nearest
+	// existing destination ancestor, so their setup sends are serialized: each
+	// may create receive ancestors the other would race. The first to send
+	// waits for the other to be held back on the lock. The gate is in place
+	// before the daemon runs, so no send passes it unobserved.
+	observed.setGate(awaitSibling(0))
 	go func() { done <- runtime.Run(ctx) }()
 
 	// Each phase names the snapshots it transfers: the ones its snapshot jobs
@@ -425,9 +478,6 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 		return sends[index].sendInterval
 	}
 
-	// The roots' replicas are initially absent and share their nearest
-	// existing destination ancestor, so their setup sends are serialized: each
-	// may create receive ancestors the other would race.
 	initial, created := phase(t, 0, []string{left, right})
 	if sendIntervalsOverlap(initial[left], initial[right]) {
 		t.Fatalf("initial setup of roots sharing a destination ancestor overlapped: %+v", initial)
@@ -440,8 +490,9 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	}
 
 	// Once each root's replica exists, the roots no longer share a lock scope
-	// and send concurrently.
+	// and send concurrently: the first to send waits for the other to send too.
 	from := waiter.Settle(t, 30*time.Second)
+	observed.setGate(awaitSibling(from))
 	accepted, err := runtime.Trigger([]string{left, right})
 	if err != nil || len(accepted) != 2 {
 		t.Fatalf("trigger roots=%v err=%v", accepted, err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -370,5 +371,82 @@ func TestPoolRecordsCancelledForAPoppedJobItDoesNotStart(t *testing.T) {
 	want := []string{"a:pending-transfer:", "a:cancelled:worker pool stopped before the job started"}
 	if got := recorded(); ran || !slices.Equal(got, want) {
 		t.Fatalf("ran=%t recorded %v, want %v", ran, got, want)
+	}
+}
+
+func TestPoolReportsAJobWaitingOnAnotherJobsLock(t *testing.T) {
+	t.Parallel()
+	events := make(chan Event, 16)
+	pool, _ := NewPool("transfer", 2, 4, func(event Event) { events <- event })
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	_ = pool.Start(ctx)
+	hold, held := make(chan struct{}), make(chan struct{})
+	first := Job{RunID: nextRunID(), ID: "local:tank/a:backup", Group: "tank/a", Scope: "tank/a", LockKey: "local:backup", StartState: "planning",
+		Run: func(context.Context) Outcome { close(held); <-hold; return Outcome{} }}
+	second := Job{RunID: nextRunID(), ID: "local:tank/b:backup", Group: "tank/b", Scope: "tank/b", LockKey: "local:backup", StartState: "planning",
+		Run: func(context.Context) Outcome { return Outcome{} }}
+	if _, err := pool.Submit(first); err != nil {
+		t.Fatal(err)
+	}
+	<-held
+	if _, err := pool.Submit(second); err != nil {
+		t.Fatal(err)
+	}
+	// The second job is held back by the first's lock, and says so, naming
+	// it, before it can start.
+	var states []string
+	for {
+		var event Event
+		select {
+		case event = <-events:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no waiting-lock transition; second job reported %v", states)
+		}
+		if event.Job != second.ID {
+			continue
+		}
+		states = append(states, event.State)
+		if event.State == "planning" {
+			t.Fatalf("the second job started while the first held the lock: %v", states)
+		}
+		if event.State == "waiting-lock" {
+			if !strings.Contains(event.Reason, first.ID) {
+				t.Fatalf("waiting-lock does not name the holder: %q", event.Reason)
+			}
+			break
+		}
+	}
+	close(hold)
+	for {
+		select {
+		case event := <-events:
+			if event.Job == second.ID && event.State == "succeeded" {
+				pool.Close()
+				pool.Wait()
+				return
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the second job did not run once the lock was released")
+		}
+	}
+}
+
+func TestLocksReportNoWaitForADisjointScope(t *testing.T) {
+	t.Parallel()
+	var locks keyLocks
+	release, err := locks.acquireAs(t.Context(), "local:backup", "backup/a", "left", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	waited := false
+	sibling, err := locks.acquireAs(t.Context(), "local:backup", "backup/b", "right", func(string) { waited = true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sibling()
+	if waited {
+		t.Fatal("a disjoint scope reported waiting")
 	}
 }

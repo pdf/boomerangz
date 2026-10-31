@@ -175,9 +175,9 @@ func (w *Waiter) Outcome(t testing.TB, bound time.Duration, from Cursor, job, wa
 }
 
 // runningStates are reported between a job being queued and its outcome, and
-// never as an outcome: the pool's pending state, every job's start state, and
-// the transfer phases.
-var runningStates = []string{"running", "snapshotting", "pruning", "reconciling", "retiring", "planning", "sending", "verifying"}
+// never as an outcome: the pool's pending state, a wait for another job's
+// lock, every job's start state, and the transfer phases.
+var runningStates = []string{"waiting-lock", "running", "snapshotting", "pruning", "reconciling", "retiring", "planning", "sending", "verifying"}
 
 // Running reports whether a transition marks a job queued or running rather
 // than ended. probing is a remote job's start state, and also the outcome of
