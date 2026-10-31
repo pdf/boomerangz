@@ -122,7 +122,9 @@ failure attributable to the transport instead of to the test.
 | --- | --- |
 | Daemon control socket lifecycle | `TestGuestDaemonControl` |
 | Recovery after an abrupt restart: the restarted snapshot job ends `scheduled` on the adopted snapshot rather than duplicating it | `TestGuestDaemonAbruptRestart` |
-| Packaged systemd unit start/reload/stop, not enabled by default | `targets/cachyos/run.sh` |
+| Packaged systemd unit start/reload/stop, not enabled by default, on every target | `guest/installed-system.sh` |
+| AUR recipes built, installed, upgraded with the configuration kept, and removed (`make integration-package-test`) | `targets/cachyos/package.sh` |
+| The `.deb` installed from a signed apt repository built by the publishing script; an upgrade across `action_versions` keeping the configuration and naming its notes; remove, purge and reinstall keeping the identity (`make integration-package-test`) | `targets/ubuntu/package.sh` |
 | `pairing create` / `import` / `list` / `revoke` against a real listener | `TestGuestPairingLifecycle` |
 | A revoked credential refused by the listener, and refused finally rather than as an outage | `TestGuestPairingLifecycle/revoke` |
 | `ssh-shell` operations outside `ssh_shell.replication_roots` refused | `TestGuestAccessControlRefusals/operation-outside-replication-roots` |
@@ -174,10 +176,13 @@ stages entirely.
 ## How a run is structured
 
 `host/run.sh` provisions the guest and hands off to `targets/<target>/run.sh`,
-which installs the packaged assets and calls `guest/run-common.sh`. That runs
-the raw capability probe and then each test binary package-wide, with no
-name filters: a test added to any package here runs without editing a runner
-script.
+which reports the target's kernel and OpenZFS packages and calls
+`guest/installed-system.sh`. That installs the packaged assets and calls
+`guest/run-common.sh`, which runs the raw capability probe and then each test
+binary package-wide, with no name filters: a test added to any package here
+runs without editing a runner script. The Ubuntu targets `ubuntu-lts` and
+`ubuntu-current` differ only in the image their `config.sh` pins; their
+scripts are links into `targets/ubuntu/`.
 
 The `integration` build tag is the gate, and a run ID is an input rather than
 an opt-in. A test compiled with the tag fails when the harness has not given
