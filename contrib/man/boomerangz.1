@@ -78,6 +78,9 @@ for structured output.
 Preview adoption of an existing lineage. Add
 .B --apply
 to apply after revalidation.
+Print a readable plan, or use
+.B --json
+for structured output.
 .TP
 .B dataset reseed DATASET TARGET
 Preview the destructive reset of one actor root's replica on a local
@@ -87,6 +90,9 @@ subtree, and releases the source-side replication history of every member on
 that target. A member is refused, and the error names its root. Add
 .B --apply
 to apply after revalidation.
+Print a readable plan, or use
+.B --json
+for structured output.
 .TP
 .B dataset abort-receive DATASET TARGET
 Preview discarding the interrupted receives that a local destination root or
@@ -97,6 +103,9 @@ history is released; the next transfer sends the discarded data again. A member
 is refused, and the error names its root. Add
 .B --apply
 to apply after revalidation.
+Print a readable plan, or use
+.B --json
+for structured output.
 .TP
 .B dataset clean
 Preview explicit decommissioning. Selection requires exact dataset arguments,
@@ -120,6 +129,9 @@ nor
 Add
 .B --apply
 to apply after revalidation.
+Print a readable plan, or use
+.B --json
+for structured output.
 .TP
 .B identity recover
 Preview installation-identity recovery from local owner markers. Add
@@ -127,6 +139,9 @@ Preview installation-identity recovery from local owner markers. Add
 when more than one candidate exists and
 .B --apply
 to apply.
+Print a readable plan, or use
+.B --json
+for structured output.
 .TP
 .B migrate
 Preview moving each named source root's state, or with
@@ -135,6 +150,9 @@ every dataset that keeps state, to the format this build reads. A root in an
 older format is refused by every other operation until it is migrated. Add
 .B --apply
 to apply after revalidation; the daemon must be stopped first.
+Print a readable plan, or use
+.B --json
+for structured output.
 .TP
 .B config check
 Validate the primary configuration file, every drop-in, and the merged result.

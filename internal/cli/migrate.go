@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,7 +16,7 @@ import (
 // selected root. Preview may run beside the daemon; apply may not, since the
 // daemon refuses the roots it would be rewriting, and nothing is applied
 // while any selected root is blocked.
-func runMigrate(ctx context.Context, out io.Writer, cfg config.Config, executor zfs.Executor, names []string, all, apply bool) (resultErr error) {
+func runMigrate(ctx context.Context, out io.Writer, cfg config.Config, executor zfs.Executor, names []string, all, apply, jsonOutput bool) (resultErr error) {
 	if all && len(names) > 0 {
 		return fmt.Errorf("--all cannot be combined with dataset names")
 	}
@@ -75,7 +74,8 @@ func runMigrate(ctx context.Context, out io.Writer, cfg config.Config, executor 
 			}
 		}
 	}
-	encoder := json.NewEncoder(out)
-	encoder.SetIndent("", "  ")
-	return errors.Join(resultErr, encoder.Encode(plans))
+	if jsonOutput {
+		return errors.Join(resultErr, writeJSON(out, plans))
+	}
+	return errors.Join(resultErr, writeMigrationPlans(out, plans, apply))
 }

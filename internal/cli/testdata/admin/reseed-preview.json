@@ -1,0 +1,41 @@
+{
+  "dataset": "tank/home",
+  "target": "ssh://backup@example.net:22/pool/replicas",
+  "binding": {
+    "transport": "ssh",
+    "canonical_target": "ssh://backup@example.net:22/pool/replicas",
+    "destination_root": "pool/replicas",
+    "mapped_dataset": "pool/replicas/home",
+    "pool": "pool",
+    "pool_guid": 101,
+    "anchor": "pool/replicas/home",
+    "anchor_guid": 202,
+    "relative_path": "home"
+  },
+  "binding_stored": true,
+  "receive_anchor": "pool/replicas",
+  "destination_exists": true,
+  "destination_objects": [
+    "pool/replicas/home",
+    "pool/replicas/home@boomerangz-1"
+  ],
+  "set_aside": "pool/replicas/.home.boomerangz-aside",
+  "resume_datasets": [
+    "pool/replicas/home/docs"
+  ],
+  "references": [
+    {
+      "target_id": "t-1",
+      "dataset": "tank/home",
+      "metadata": {
+        "lineage": "22222222-2222-4222-8222-222222222222",
+        "snapshot": "44444444-4444-4444-8444-444444444444",
+        "created": "2026-10-01T02:03:04Z"
+      },
+      "recursive": true
+    }
+  ],
+  "suspended": true,
+  "warning": "applying this plan permanently destroys the mapped destination replica and resets its replication history",
+  "applied": false
+}

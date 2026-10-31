@@ -1,0 +1,88 @@
+{
+  "dataset": "tank",
+  "lineage": "11111111-1111-4111-8111-111111111111",
+  "old_owner": "22222222-2222-4222-8222-222222222222",
+  "new_owner": "33333333-3333-4333-8333-333333333333",
+  "policy": {
+    "enabled": true,
+    "grid": "12x5m,24x1h,14x1d",
+    "local": [
+      "backup/data"
+    ],
+    "incremental": "all",
+    "requested": {
+      "large_blocks": true,
+      "compressed": true,
+      "embedded_data": false,
+      "raw": false,
+      "props": false,
+      "replicate": false
+    },
+    "effective_send": {
+      "large_blocks": true,
+      "compressed": true,
+      "embedded_data": false,
+      "raw": false,
+      "props": false,
+      "replicate": false
+    },
+    "discard": "off",
+    "values": {
+      "org.boomerangz:compressed": {
+        "value": "on"
+      },
+      "org.boomerangz:discard": {
+        "value": "off"
+      },
+      "org.boomerangz:enabled": {
+        "value": "on",
+        "dataset": "tank"
+      },
+      "org.boomerangz:incremental": {
+        "value": "all"
+      },
+      "org.boomerangz:large_blocks": {
+        "value": "on"
+      },
+      "org.boomerangz:local": {
+        "value": "backup/data",
+        "dataset": "tank"
+      },
+      "org.boomerangz:policy": {
+        "value": "12x5m,24x1h,14x1d"
+      },
+      "org.boomerangz:props": {
+        "value": "off"
+      },
+      "org.boomerangz:raw": {
+        "value": "off"
+      },
+      "org.boomerangz:replicate": {
+        "value": "off"
+      }
+    }
+  },
+  "local_targets": [
+    {
+      "configured_name": "backup/data",
+      "transport": "local",
+      "canonical_endpoint": "local:backup/data",
+      "destination_root": "backup/data",
+      "mapped_dataset": "backup/data",
+      "resolved_identity": {
+        "transport": "local",
+        "canonical_target": "local:backup/data",
+        "destination_root": "backup/data",
+        "mapped_dataset": "backup/data",
+        "pool": "backup",
+        "pool_guid": 30,
+        "anchor": "backup",
+        "anchor_guid": 20,
+        "relative_path": "data"
+      },
+      "status": "unbound"
+    }
+  ],
+  "warning": "transferred policy may name absent, unrelated, or inappropriate destinations on this host",
+  "applied": true
+}

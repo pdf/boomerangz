@@ -34,4 +34,4 @@ complete -c boomerangz -l scope -r -a 'status trigger replicate prune admin'
 complete -c boomerangz -l expires-in -r
 complete -c boomerangz -l owner -r
 complete -c boomerangz -n '__fish_seen_subcommand_from dataset; and __fish_seen_subcommand_from list' -l status -r -a 'all active member excluded target inactive invalid' -d 'Show only this status'
-complete -c boomerangz -n '__fish_seen_subcommand_from status version; or begin; __fish_seen_subcommand_from dataset; and __fish_seen_subcommand_from list inspect; end' -l json -d 'Emit JSON'
+complete -c boomerangz -n '__fish_seen_subcommand_from status version migrate; or begin; __fish_seen_subcommand_from dataset; and __fish_seen_subcommand_from list inspect adopt clean reseed abort-receive; end; or begin; __fish_seen_subcommand_from identity; and __fish_seen_subcommand_from recover; end' -l json -d 'Emit JSON'

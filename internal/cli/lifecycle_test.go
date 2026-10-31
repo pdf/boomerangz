@@ -94,7 +94,7 @@ func TestCleanCLIPreviewAndApply(t *testing.T) {
 	cfg.Paths.IdentityDir = filepath.Join(t.TempDir(), "identity")
 	e := &cleanExecutor{properties: []zfs.Property{{Dataset: "tank/data", Name: "org.boomerangz:enabled", Value: "off", Source: zfs.SourceLocal}}}
 	var out bytes.Buffer
-	if err := runClean(t.Context(), &out, cfg, e, []string{"tank/data"}, false, false, false, nil, false); err != nil {
+	if err := runClean(t.Context(), &out, cfg, e, []string{"tank/data"}, false, false, false, nil, false, true); err != nil {
 		t.Fatal(err)
 	}
 	if e.writes != 0 || !bytes.Contains(out.Bytes(), []byte(`"operation": "inherit"`)) {
@@ -104,7 +104,7 @@ func TestCleanCLIPreviewAndApply(t *testing.T) {
 		t.Fatal("preview created a lock")
 	}
 	out.Reset()
-	if err := runClean(t.Context(), &out, cfg, e, []string{"tank/data"}, false, false, false, nil, true); err != nil {
+	if err := runClean(t.Context(), &out, cfg, e, []string{"tank/data"}, false, false, false, nil, true, true); err != nil {
 		t.Fatal(err)
 	}
 	if e.writes != 1 {
@@ -127,21 +127,21 @@ func TestAdoptionReviewsLocalTargetWithoutSecondFlag(t *testing.T) {
 	cfg.Paths.IdentityDir = filepath.Join(t.TempDir(), "identity")
 	cfg.Paths.SocketPath = filepath.Join(t.TempDir(), "control.sock")
 	var preview bytes.Buffer
-	if err := runAdopt(t.Context(), &preview, cfg, executor, "tank", false); err != nil {
+	if err := runAdopt(t.Context(), &preview, cfg, executor, "tank", false, true); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(preview.Bytes(), []byte(`"status": "unbound"`)) {
 		t.Fatalf("target review missing: %s", preview.String())
 	}
 	var applied bytes.Buffer
-	if err := runAdopt(t.Context(), &applied, cfg, executor, "tank", true); err != nil {
+	if err := runAdopt(t.Context(), &applied, cfg, executor, "tank", true, true); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(applied.Bytes(), []byte(`"applied": true`)) {
 		t.Fatalf("adoption not applied: %s", applied.String())
 	}
 	applied.Reset()
-	if err := runAdopt(t.Context(), &applied, cfg, executor, "tank", true); err != nil {
+	if err := runAdopt(t.Context(), &applied, cfg, executor, "tank", true, true); err != nil {
 		t.Fatalf("owned dataset could not be revalidated through adoption: %v", err)
 	}
 }

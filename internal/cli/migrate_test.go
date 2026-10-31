@@ -29,7 +29,7 @@ func TestMigrateCLIPreviewsBesideTheDaemonAndAppliesWithoutIt(t *testing.T) {
 		}
 		return ""
 	}
-	if err := runMigrate(t.Context(), &bytes.Buffer{}, cfg, e, []string{"tank"}, true, false); err == nil {
+	if err := runMigrate(t.Context(), &bytes.Buffer{}, cfg, e, []string{"tank"}, true, false, true); err == nil {
 		t.Fatal("accepted names with --all")
 	}
 	if err := os.WriteFile(cfg.Paths.SocketPath, nil, 0o600); err != nil {
@@ -37,20 +37,20 @@ func TestMigrateCLIPreviewsBesideTheDaemonAndAppliesWithoutIt(t *testing.T) {
 	}
 	var out bytes.Buffer
 	// --all finds only the root: backup keeps no state.
-	if err := runMigrate(t.Context(), &out, cfg, e, nil, true, false); err != nil {
+	if err := runMigrate(t.Context(), &out, cfg, e, nil, true, false, true); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), `"status": "pending"`) || strings.Contains(out.String(), `"backup"`) || version() != "" {
 		t.Fatalf("preview=%s version=%q", out.String(), version())
 	}
-	if err := runMigrate(t.Context(), &bytes.Buffer{}, cfg, e, []string{"tank"}, false, true); err == nil || !strings.Contains(err.Error(), "stop the daemon") || version() != "" {
+	if err := runMigrate(t.Context(), &bytes.Buffer{}, cfg, e, []string{"tank"}, false, true, true); err == nil || !strings.Contains(err.Error(), "stop the daemon") || version() != "" {
 		t.Fatalf("applied beside the daemon: err=%v version=%q", err, version())
 	}
 	if err := os.Remove(cfg.Paths.SocketPath); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if err := runMigrate(t.Context(), &out, cfg, e, []string{"tank"}, false, true); err != nil {
+	if err := runMigrate(t.Context(), &out, cfg, e, []string{"tank"}, false, true, true); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), `"status": "migrated"`) || version() != "2" {

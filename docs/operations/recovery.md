@@ -2,7 +2,9 @@
 
 Administrative commands preview their changes before they apply them. Read the
 complete preview, resolve blockers, and save the output with your change record
-before using `--apply`.
+before using `--apply`. The preview is printed for reading; add `--json` for
+the structured form when a script consumes it, as described in the
+[CLI reference](/reference/cli#dataset-lifecycle).
 
 ## Interrupted or unavailable destination
 

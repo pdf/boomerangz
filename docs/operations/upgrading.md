@@ -30,12 +30,12 @@ sudo systemctl stop boomerangz.service
 sudo -u boomerangz -H boomerangz migrate --all
 ```
 
-Each root is listed with `"status": "pending"` and the properties it rewrites:
+Each root is listed with `Status: pending` and the properties it rewrites:
 every recovery proof, `org.boomerangz:state:reference:*`, shrinks to a fixed
 size; every target binding, `org.boomerangz:state:target:*`, keeps only the
 destination's identity and the dataset it maps to; and the version marker is
 written last. Holds, bookmarks and snapshots are not touched, so transfers
-continue incrementally afterwards. A root listed as `"blocked"` names what
+continue incrementally afterwards. A root listed as `Status: blocked` names what
 cannot be carried over; resolve it, or forget that target with
 `boomerangz dataset clean --forget-target`, and preview again. Apply it, then
 start the daemon:
@@ -56,8 +56,24 @@ Check the result with:
 sudo -u boomerangz -H boomerangz migrate --all
 ```
 
-Every root now reads `"status": "current"`, and `boomerangz status` shows each
+Every root now reads `Status: current`, and `boomerangz status` shows each
 target's next transfer verified.
+
+### Administrative commands print text
+
+`dataset adopt`, `dataset clean`, `dataset reseed`, `dataset abort-receive`,
+`identity recover` and `migrate` now print a readable plan by default rather
+than JSON, matching `dataset list` and `dataset inspect`. A script that parses
+their output must add `--json`, which prints exactly the JSON these commands
+printed before:
+
+```sh
+boomerangz dataset clean tank/data --json
+```
+
+Check a script by running its command once by hand with `--json` and
+confirming the output is the JSON it expects; without the flag the output
+begins with `Dataset:` or `Current identity:` instead.
 
 ## v0.2.0
 

@@ -18,15 +18,15 @@ _boomerangz_options() {
     'daemon ') reply=(-h --help --config --config-dir) ;;
     'status ') reply=(-h --help --config --config-dir --credential -w --watch --json) ;;
     'trigger ') reply=(-h --help --config --config-dir --credential) ;;
-    'migrate ') reply=(-h --help --config --config-dir --all --apply) ;;
+    'migrate ') reply=(-h --help --config --config-dir --all --apply --json) ;;
     'version ') reply=(-h --help --json) ;;
     'pairing create') reply=(-h --help --config --config-dir --listener --client-cert --client-key --scope --expires-in) ;;
     'pairing import'|'pairing list'|'pairing revoke') reply=(-h --help --config --config-dir) ;;
     'dataset list') reply=(-h --help --config --config-dir --status --json) ;;
     'dataset inspect') reply=(-h --help --config --config-dir --json) ;;
-    'dataset adopt'|'dataset reseed'|'dataset abort-receive') reply=(-h --help --config --config-dir --apply) ;;
-    'dataset clean') reply=(-h --help --config --config-dir --recursive --all --destroy-owned-snapshots --forget-target --apply) ;;
-    'identity recover') reply=(-h --help --config --config-dir --owner --apply) ;;
+    'dataset adopt'|'dataset reseed'|'dataset abort-receive') reply=(-h --help --config --config-dir --apply --json) ;;
+    'dataset clean') reply=(-h --help --config --config-dir --recursive --all --destroy-owned-snapshots --forget-target --apply --json) ;;
+    'identity recover') reply=(-h --help --config --config-dir --owner --apply --json) ;;
     *) reply=(-h --help) ;;
   esac
 }

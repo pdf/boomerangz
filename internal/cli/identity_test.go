@@ -58,14 +58,14 @@ func TestIdentityRecoveryPreviewAndApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	var preview bytes.Buffer
-	if err := runIdentityRecover(t.Context(), &preview, cfg, executor, executor, "", false); err != nil {
+	if err := runIdentityRecover(t.Context(), &preview, cfg, executor, executor, "", false, true); err != nil {
 		t.Fatal(err)
 	}
 	if after, _ := installidentity.Read(cfg.Paths.IdentityDir); after != current {
 		t.Fatal("preview replaced installation identity")
 	}
 	var applied bytes.Buffer
-	if err := runIdentityRecover(t.Context(), &applied, cfg, executor, executor, "", true); err != nil {
+	if err := runIdentityRecover(t.Context(), &applied, cfg, executor, executor, "", true, true); err != nil {
 		t.Fatal(err)
 	}
 	if after, _ := installidentity.Read(cfg.Paths.IdentityDir); after != owner {
