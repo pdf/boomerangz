@@ -74,12 +74,12 @@ func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) 
 	const lineage = "22222222-2222-4222-8222-222222222222"
 	metadata := lifecycle.Metadata{Lineage: lineage, Snapshot: "33333333-3333-4333-8333-333333333333", Created: time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)}
 	canonical := "local:backup/data"
-	encoded, err := json.Marshal(map[string]any{"version": 2, "pool_guid": 90, "mapped": "backup/data", "anchor_guid": 91})
+	encoded, err := json.Marshal(map[string]any{"pool_guid": 90, "mapped": "backup/data", "anchor_guid": 91})
 	if err != nil {
 		t.Fatal(err)
 	}
 	bindingProperty := policy.StateNamespace + "target:" + lifecycle.TargetID(canonical)
-	sourceState := zfs.State{Objects: []zfs.Object{{Name: "tank/data", Type: "filesystem", GUID: 10}}, Properties: []zfs.Property{{Dataset: "tank/data", Name: bindingProperty, Value: string(encoded), Source: zfs.SourceLocal}}}
+	sourceState := zfs.State{Objects: []zfs.Object{{Name: "tank/data", Type: "filesystem", GUID: 10}}, Properties: []zfs.Property{{Dataset: "tank/data", Name: bindingProperty, Value: string(encoded), Source: zfs.SourceLocal}, {Dataset: "tank/data", Name: lifecycle.VersionProperty, Value: "2", Source: zfs.SourceLocal}}}
 	owned := "backup/data@" + metadata.Name()
 	backend := &targetBackend{
 		datasets:   []zfs.Dataset{{Name: "backup/data", Type: zfs.Filesystem}},

@@ -1,0 +1,16 @@
+[
+  {
+    "dataset": "tank",
+    "status": "migrated",
+    "from": 1,
+    "to": 2,
+    "actions": [
+      {
+        "property": "org.boomerangz:state:version",
+        "value": "2"
+      }
+    ],
+    "blockers": null,
+    "applied": 1
+  }
+]

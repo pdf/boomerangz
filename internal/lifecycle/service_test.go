@@ -169,6 +169,7 @@ func addTestAuthority(b *memoryBackend) {
 	b.state.Properties = append(b.state.Properties,
 		zfs.Property{Dataset: "tank/data", Name: LineageProperty, Value: testLineage, Source: zfs.SourceLocal},
 		zfs.Property{Dataset: "tank/data", Name: OwnerProperty, Value: testInstallation, Source: zfs.SourceLocal},
+		zfs.Property{Dataset: "tank/data", Name: VersionProperty, Value: "2", Source: zfs.SourceLocal},
 	)
 }
 

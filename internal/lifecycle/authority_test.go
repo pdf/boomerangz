@@ -16,6 +16,7 @@ func TestRootAuthority(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			state := zfs.State{Properties: []zfs.Property{
 				{Dataset: "tank/data", Name: OwnerProperty, Value: owner, Source: zfs.SourceLocal},
+				{Dataset: "tank/data", Name: VersionProperty, Value: "2", Source: zfs.SourceLocal},
 				{Dataset: "tank/data", Name: LineageProperty, Value: lineage, Source: zfs.SourceLocal},
 			}}
 			installation := owner

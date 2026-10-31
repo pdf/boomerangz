@@ -206,10 +206,10 @@ func TestTargetOperationsRefuseABlockedTarget(t *testing.T) {
 	// the executor: it is nil.
 	for name, run := range map[string]func() error{
 		"reseed": func() error {
-			return runReseed(t.Context(), io.Discard, cfg, collidingReader{}, nil, "tank/a/home", "backup", false)
+			return runReseed(t.Context(), io.Discard, cfg, collidingReader{}, nil, "tank/a/home", "backup", false, false)
 		},
 		"abort-receive": func() error {
-			return runAbortReceive(t.Context(), io.Discard, cfg, collidingReader{}, nil, "tank/a/home", "backup", false)
+			return runAbortReceive(t.Context(), io.Discard, cfg, collidingReader{}, nil, "tank/a/home", "backup", false, false)
 		},
 	} {
 		if err := run(); err == nil || !strings.Contains(err.Error(), "tank/b/home") {

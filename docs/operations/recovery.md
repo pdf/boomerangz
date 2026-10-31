@@ -2,7 +2,9 @@
 
 Administrative commands preview their changes before they apply them. Read the
 complete preview, resolve blockers, and save the output with your change record
-before using `--apply`.
+before using `--apply`. The preview is printed for reading; add `--json` for
+the structured form when a script consumes it, as described in the
+[CLI reference](/reference/cli#dataset-lifecycle).
 
 ## Interrupted or unavailable destination
 
@@ -220,7 +222,9 @@ unreachable remote remains suspended until you rerun adoption with the remote
 available and review its identity.
 
 Adoption is exact-dataset only. Conflicting lineage or unresolved receive state
-blocks it.
+blocks it, and so does recovery state written by an older release: run
+`boomerangz migrate` on the dataset first, as in the
+[upgrade notes](/operations/upgrading).
 
 The same command promotes a replica, for instance after losing the source. A
 replica received with `replicate=on` or `props=on` arrives with the sending

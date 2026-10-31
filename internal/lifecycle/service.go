@@ -239,13 +239,20 @@ func (s *Service) AdoptDataset(ctx context.Context, dataset string, effective po
 	if current, authorityErr := RootAuthority(state, dataset, s.installation); authorityErr == nil && current == lineage {
 		return "", fmt.Errorf("dataset is already owned by this installation")
 	}
+	// Adoption marks the root's state as the current format, which is only
+	// true of the records it already keeps once they have been migrated.
+	if version, err := StateVersion(state, dataset); err != nil {
+		return "", err
+	} else if version > CurrentVersion || (version < CurrentVersion && keepsRecords(state, dataset)) {
+		return "", CurrentState(state, dataset)
+	}
 	if err := ValidateLineageEvidence(state, dataset, lineage); err != nil {
 		return "", err
 	}
 	if err := s.unchanged(ctx, dataset, false, state); err != nil {
 		return "", err
 	}
-	if err := s.backend.SetProperties(ctx, dataset, map[string]string{LineageProperty: lineage, OwnerProperty: s.installation}); err != nil {
+	if err := s.backend.SetProperties(ctx, dataset, s.authorityProperties(lineage)); err != nil {
 		return "", err
 	}
 	after, err := s.backend.InspectState(ctx, dataset, false)
@@ -338,7 +345,7 @@ func (s *Service) CreateSnapshot(ctx context.Context, dataset string, members []
 		return Metadata{}, err
 	}
 	if fresh {
-		if err := s.backend.SetProperties(ctx, dataset, map[string]string{LineageProperty: lineage, OwnerProperty: s.installation}); err != nil {
+		if err := s.backend.SetProperties(ctx, dataset, s.authorityProperties(lineage)); err != nil {
 			return Metadata{}, err
 		}
 		current, err := s.backend.InspectState(ctx, dataset, true)

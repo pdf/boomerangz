@@ -89,6 +89,9 @@ func (s *Service) cleanPlan(ctx context.Context, dataset string, options CleanOp
 	if err := scopeReady(state, dataset); err != nil {
 		plan.Blockers = append(plan.Blockers, err.Error())
 	}
+	if err := recordsReadable(state, dataset); err != nil {
+		plan.Blockers = append(plan.Blockers, err.Error())
+	}
 	activation, err := backend.GetActivationProperties(ctx)
 	if err != nil {
 		return plan, state, err

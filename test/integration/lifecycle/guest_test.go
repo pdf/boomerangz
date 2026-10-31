@@ -243,7 +243,7 @@ func TestGuestLifecycle(t *testing.T) {
 			refs[target] = r
 		}
 		binding := lifecycle.TargetStatePrefix + lifecycle.TargetID(gone)
-		command(t, "zfs", "set", binding+`={"version":2}`, root)
+		command(t, "zfs", "set", binding+`={"pool_guid":1}`, root)
 		// What stays: everything that is not the gone target's.
 		snapshot := func(t *testing.T) (map[string]bool, []string) {
 			t.Helper()

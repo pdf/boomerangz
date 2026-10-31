@@ -623,7 +623,7 @@ func TestCollidingReplicasBlockTheirTargets(t *testing.T) {
 	// bound records a stored binding for root's replica on a local target,
 	// keyed as transfer keys it: by the hash of the target's canonical form.
 	bound := func(root, target string) zfs.Property {
-		return local(root, "state:target:"+lifecycle.TargetID("local:"+target), `{"version":2,"pool_guid":1,"anchor_guid":2}`)
+		return local(root, "state:target:"+lifecycle.TargetID("local:"+target), `{"pool_guid":1,"anchor_guid":2}`)
 	}
 	t.Run("an established replica keeps its target", func(t *testing.T) {
 		t.Parallel()
@@ -666,7 +666,7 @@ func TestCollidingReplicasBlockTheirTargets(t *testing.T) {
 		destinations := map[string]RemoteDestination{"near": {Namespace: "ssh://host:22", Root: "pool/backup", Canonical: canonical}}
 		var rows []zfs.Property
 		rows = append(rows, enabled("tank/a/home", "remote", "near", "discard", "all")...)
-		rows = append(rows, local("tank/a/home", "state:target:"+lifecycle.TargetID(canonical), `{"version":2,"pool_guid":1,"anchor_guid":2}`))
+		rows = append(rows, local("tank/a/home", "state:target:"+lifecycle.TargetID(canonical), `{"pool_guid":1,"anchor_guid":2}`))
 		rows = append(rows, enabled("tank/b/home", "remote", "near", "discard", "all")...)
 		g := collisionScan(t, destinations, datasets, rows...)
 		requireUnblocked(t, g, "tank/a/home")

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -67,7 +66,22 @@ func lifecycleLock(cfg config.Config) (*os.File, error) {
 	return file, nil
 }
 
-func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zfs.Executor, dataset string, apply bool) (resultErr error) {
+// adoptionResult is what an adoption reviews: the lineage changing owner, the
+// policy it brings, and each of its targets as verified from this host.
+type adoptionResult struct {
+	Dataset       string                           `json:"dataset"`
+	Lineage       string                           `json:"lineage"`
+	OldOwner      string                           `json:"old_owner,omitempty"`
+	NewOwner      string                           `json:"new_owner"`
+	Policy        policy.Effective                 `json:"policy"`
+	LocalTargets  []transfer.LocalTargetInspection `json:"local_targets,omitempty"`
+	RemoteTargets []transfer.LocalTargetInspection `json:"remote_targets,omitempty"`
+	Blockers      []string                         `json:"blockers,omitempty"`
+	Warning       string                           `json:"warning"`
+	Applied       bool                             `json:"applied"`
+}
+
+func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zfs.Executor, dataset string, apply, jsonOutput bool) (resultErr error) {
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return err
 	}
@@ -194,39 +208,31 @@ func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 		}
 		suspendedTargets[remote.CanonicalEndpoint] = suspended
 	}
-	type adoptionResult struct {
-		Dataset       string                           `json:"dataset"`
-		Lineage       string                           `json:"lineage"`
-		OldOwner      string                           `json:"old_owner,omitempty"`
-		NewOwner      string                           `json:"new_owner"`
-		Policy        policy.Effective                 `json:"policy"`
-		LocalTargets  []transfer.LocalTargetInspection `json:"local_targets,omitempty"`
-		RemoteTargets []transfer.LocalTargetInspection `json:"remote_targets,omitempty"`
-		Blockers      []string                         `json:"blockers,omitempty"`
-		Warning       string                           `json:"warning"`
-		Applied       bool                             `json:"applied"`
-	}
 	result := adoptionResult{Dataset: dataset, Lineage: lineage, OldOwner: oldOwner, NewOwner: installation, Policy: effective, LocalTargets: localTargets, RemoteTargets: remoteTargets, Blockers: blockers, Warning: "transferred policy may name absent, unrelated, or inappropriate destinations on this host"}
-	encoder := json.NewEncoder(out)
-	encoder.SetIndent("", "  ")
+	write := func() error {
+		if jsonOutput {
+			return writeJSON(out, result)
+		}
+		return writeAdoption(out, result, apply)
+	}
 	if len(blockers) > 0 {
 		if !apply {
-			return encoder.Encode(result)
+			return write()
 		}
-		return errors.Join(fmt.Errorf("adoption blocked; no owner change applied"), encoder.Encode(result))
+		return errors.Join(fmt.Errorf("adoption blocked; no owner change applied"), write())
 	}
 	if apply {
 		revalidated, revalidationBlockers := inspectLocal()
 		revalidatedRemote, remoteRevalidationBlockers := inspectRemote()
 		if len(revalidationBlockers) > 0 || len(remoteRevalidationBlockers) > 0 || !reflect.DeepEqual(localTargets, revalidated) || !reflect.DeepEqual(remoteTargets, revalidatedRemote) {
 			result.Blockers = append(result.Blockers, "target identity changed during adoption; retry preview")
-			return errors.Join(fmt.Errorf("adoption blocked; no owner change applied"), encoder.Encode(result))
+			return errors.Join(fmt.Errorf("adoption blocked; no owner change applied"), write())
 		}
 		if alreadyOwned {
 			current, inspectErr := executor.InspectState(ctx, dataset, false)
 			if inspectErr != nil || !reflect.DeepEqual(state, current) {
 				result.Blockers = append(result.Blockers, "source state changed during target revalidation; retry preview")
-				return errors.Join(fmt.Errorf("target revalidation blocked; no changes applied"), inspectErr, encoder.Encode(result))
+				return errors.Join(fmt.Errorf("target revalidation blocked; no changes applied"), inspectErr, write())
 			}
 		}
 		for _, remote := range revalidatedRemote {
@@ -254,7 +260,7 @@ func runAdopt(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 		}
 		result.Applied = true
 	}
-	return encoder.Encode(result)
+	return write()
 }
 
 func cleanScopes(ctx context.Context, executor zfs.Executor, names []string, recursive, all bool) ([]string, bool, error) {
@@ -298,8 +304,8 @@ func cleanScopes(ctx context.Context, executor zfs.Executor, names []string, rec
 	return scopes, recursive, nil
 }
 
-func runClean(ctx context.Context, out io.Writer, cfg config.Config, executor zfs.Executor, names []string, recursive, all, destroy bool, forget []string, apply bool) (resultErr error) {
-	if handled, err := runDaemonClean(ctx, out, cfg, names, recursive, all, destroy, forget, apply); handled {
+func runClean(ctx context.Context, out io.Writer, cfg config.Config, executor zfs.Executor, names []string, recursive, all, destroy bool, forget []string, apply, jsonOutput bool) (resultErr error) {
+	if handled, err := runDaemonClean(ctx, out, cfg, names, recursive, all, destroy, forget, apply, jsonOutput); handled {
 		return err
 	}
 	scopes, recursive, err := cleanScopes(ctx, executor, names, recursive, all)
@@ -349,7 +355,8 @@ func runClean(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 	} else if apply && blocked {
 		resultErr = fmt.Errorf("clean blocked; no changes applied")
 	}
-	encoder := json.NewEncoder(out)
-	encoder.SetIndent("", "  ")
-	return errors.Join(resultErr, encoder.Encode(plans))
+	if jsonOutput {
+		return errors.Join(resultErr, writeJSON(out, plans))
+	}
+	return errors.Join(resultErr, writeCleanPlans(out, plans, apply))
 }

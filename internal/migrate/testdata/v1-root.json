@@ -1,0 +1,259 @@
+{
+  "Objects": [
+    {
+      "Name": "tank/data",
+      "Type": "filesystem",
+      "GUID": 1,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data/a",
+      "Type": "filesystem",
+      "GUID": 2,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data/b",
+      "Type": "filesystem",
+      "GUID": 3,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Type": "snapshot",
+      "GUID": 103,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data/a@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Type": "snapshot",
+      "GUID": 104,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data/b@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Type": "snapshot",
+      "GUID": 105,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Type": "snapshot",
+      "GUID": 106,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data/a@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Type": "snapshot",
+      "GUID": 107,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data/b@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Type": "snapshot",
+      "GUID": 108,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data#boomerangz-b180abddedb36179a0689c720baf67cbc5fcf2d4d2f4c3cd4121a060e0749f86-39bac421-b493-48ba-a16a-de9c374838e6",
+      "Type": "bookmark",
+      "GUID": 103,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data/a#boomerangz-b180abddedb36179a0689c720baf67cbc5fcf2d4d2f4c3cd4121a060e0749f86-39bac421-b493-48ba-a16a-de9c374838e6",
+      "Type": "bookmark",
+      "GUID": 104,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data/b#boomerangz-b180abddedb36179a0689c720baf67cbc5fcf2d4d2f4c3cd4121a060e0749f86-39bac421-b493-48ba-a16a-de9c374838e6",
+      "Type": "bookmark",
+      "GUID": 105,
+      "Creation": 0,
+      "CreateTXG": 0
+    },
+    {
+      "Name": "tank/data/a#boomerangz-5bee580965c35c6b52625720a774c4ca45b8c0645a90b678bba72f2fedda61ca-0fff57d3-929c-4c83-b0d1-b67ad92e3a18",
+      "Type": "bookmark",
+      "GUID": 107,
+      "Creation": 0,
+      "CreateTXG": 0
+    }
+  ],
+  "Properties": [
+    {
+      "Dataset": "tank/data",
+      "Name": "org.boomerangz:enabled",
+      "Value": "on",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data",
+      "Name": "org.boomerangz:state:lineage",
+      "Value": "f9285350-91a5-438c-a723-cab9cfee7947",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data",
+      "Name": "org.boomerangz:state:owner",
+      "Value": "abcdefab-cdef-4abc-8def-abcdefabcdef",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Name": "org.boomerangz:state:lineage",
+      "Value": "f9285350-91a5-438c-a723-cab9cfee7947",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Name": "org.boomerangz:state:snapshot",
+      "Value": "39bac421-b493-48ba-a16a-de9c374838e6",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Name": "org.boomerangz:state:created",
+      "Value": "2026-09-01T12:00:00Z",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/a@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Name": "org.boomerangz:state:lineage",
+      "Value": "f9285350-91a5-438c-a723-cab9cfee7947",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/a@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Name": "org.boomerangz:state:snapshot",
+      "Value": "39bac421-b493-48ba-a16a-de9c374838e6",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/a@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Name": "org.boomerangz:state:created",
+      "Value": "2026-09-01T12:00:00Z",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/b@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Name": "org.boomerangz:state:lineage",
+      "Value": "f9285350-91a5-438c-a723-cab9cfee7947",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/b@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Name": "org.boomerangz:state:snapshot",
+      "Value": "39bac421-b493-48ba-a16a-de9c374838e6",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/b@boomerangz-20260901T120000.000000000Z-39bac421",
+      "Name": "org.boomerangz:state:created",
+      "Value": "2026-09-01T12:00:00Z",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Name": "org.boomerangz:state:created",
+      "Value": "2026-09-02T12:00:00Z",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Name": "org.boomerangz:state:lineage",
+      "Value": "f9285350-91a5-438c-a723-cab9cfee7947",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Name": "org.boomerangz:state:snapshot",
+      "Value": "0fff57d3-929c-4c83-b0d1-b67ad92e3a18",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/a@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Name": "org.boomerangz:state:lineage",
+      "Value": "f9285350-91a5-438c-a723-cab9cfee7947",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/a@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Name": "org.boomerangz:state:snapshot",
+      "Value": "0fff57d3-929c-4c83-b0d1-b67ad92e3a18",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/a@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Name": "org.boomerangz:state:created",
+      "Value": "2026-09-02T12:00:00Z",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/b@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Name": "org.boomerangz:state:lineage",
+      "Value": "f9285350-91a5-438c-a723-cab9cfee7947",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/b@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Name": "org.boomerangz:state:snapshot",
+      "Value": "0fff57d3-929c-4c83-b0d1-b67ad92e3a18",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data/b@boomerangz-20260902T120000.000000000Z-0fff57d3",
+      "Name": "org.boomerangz:state:created",
+      "Value": "2026-09-02T12:00:00Z",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data",
+      "Name": "org.boomerangz:state:reference:b180abddedb36179a0689c720baf67cbc5fcf2d4d2f4c3cd4121a060e0749f86:c8bf0c4ace30f147c59052801f8a6656:39bac421-b493-48ba-a16a-de9c374838e6",
+      "Value": "{\"target\":\"local:backup\",\"dataset\":\"tank/data\",\"metadata\":{\"lineage\":\"f9285350-91a5-438c-a723-cab9cfee7947\",\"snapshot\":\"39bac421-b493-48ba-a16a-de9c374838e6\",\"created\":\"2026-09-01T12:00:00Z\"},\"sources\":[{\"dataset\":\"tank/data\",\"guid\":103,\"metadata\":{\"lineage\":\"f9285350-91a5-438c-a723-cab9cfee7947\",\"snapshot\":\"39bac421-b493-48ba-a16a-de9c374838e6\",\"created\":\"2026-09-01T12:00:00Z\"}},{\"dataset\":\"tank/data/a\",\"guid\":104,\"metadata\":{\"lineage\":\"f9285350-91a5-438c-a723-cab9cfee7947\",\"snapshot\":\"39bac421-b493-48ba-a16a-de9c374838e6\",\"created\":\"2026-09-01T12:00:00Z\"}},{\"dataset\":\"tank/data/b\",\"guid\":105,\"metadata\":{\"lineage\":\"f9285350-91a5-438c-a723-cab9cfee7947\",\"snapshot\":\"39bac421-b493-48ba-a16a-de9c374838e6\",\"created\":\"2026-09-01T12:00:00Z\"}}]}",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data",
+      "Name": "org.boomerangz:state:reference:b180abddedb36179a0689c720baf67cbc5fcf2d4d2f4c3cd4121a060e0749f86:c8bf0c4ace30f147c59052801f8a6656:0fff57d3-929c-4c83-b0d1-b67ad92e3a18",
+      "Value": "{\"target\":\"local:backup\",\"dataset\":\"tank/data\",\"metadata\":{\"lineage\":\"f9285350-91a5-438c-a723-cab9cfee7947\",\"snapshot\":\"0fff57d3-929c-4c83-b0d1-b67ad92e3a18\",\"created\":\"2026-09-02T12:00:00Z\"},\"sources\":[{\"dataset\":\"tank/data\",\"guid\":106,\"metadata\":{\"lineage\":\"f9285350-91a5-438c-a723-cab9cfee7947\",\"snapshot\":\"0fff57d3-929c-4c83-b0d1-b67ad92e3a18\",\"created\":\"2026-09-02T12:00:00Z\"}},{\"dataset\":\"tank/data/a\",\"guid\":107,\"metadata\":{\"lineage\":\"f9285350-91a5-438c-a723-cab9cfee7947\",\"snapshot\":\"0fff57d3-929c-4c83-b0d1-b67ad92e3a18\",\"created\":\"2026-09-02T12:00:00Z\"}},{\"dataset\":\"tank/data/b\",\"guid\":108,\"metadata\":{\"lineage\":\"f9285350-91a5-438c-a723-cab9cfee7947\",\"snapshot\":\"0fff57d3-929c-4c83-b0d1-b67ad92e3a18\",\"created\":\"2026-09-02T12:00:00Z\"}}]}",
+      "Source": "local"
+    },
+    {
+      "Dataset": "tank/data",
+      "Name": "org.boomerangz:state:reference:5bee580965c35c6b52625720a774c4ca45b8c0645a90b678bba72f2fedda61ca:9e256da659f85ada6f09f6e4e5254bf7:0fff57d3-929c-4c83-b0d1-b67ad92e3a18",
+      "Value": "{\"target\":\"ssh://backup@host:22/pool/archive\",\"dataset\":\"tank/data/a\",\"metadata\":{\"lineage\":\"f9285350-91a5-438c-a723-cab9cfee7947\",\"snapshot\":\"0fff57d3-929c-4c83-b0d1-b67ad92e3a18\",\"created\":\"2026-09-02T12:00:00Z\"},\"sources\":[{\"dataset\":\"tank/data/a\",\"guid\":107,\"metadata\":{\"lineage\":\"f9285350-91a5-438c-a723-cab9cfee7947\",\"snapshot\":\"0fff57d3-929c-4c83-b0d1-b67ad92e3a18\",\"created\":\"2026-09-02T12:00:00Z\"}}]}",
+      "Source": "local"
+    }
+  ],
+  "Received": null,
+  "ResumeTokens": null,
+  "Clones": null,
+  "Holds": {
+    "tank/data/a@boomerangz-20260901T120000.000000000Z-39bac421": [],
+    "tank/data/a@boomerangz-20260902T120000.000000000Z-0fff57d3": [
+      "boomerangz-b180abddedb36179a0689c720baf67cbc5fcf2d4d2f4c3cd4121a060e0749f86",
+      "boomerangz-5bee580965c35c6b52625720a774c4ca45b8c0645a90b678bba72f2fedda61ca"
+    ],
+    "tank/data/b@boomerangz-20260901T120000.000000000Z-39bac421": [],
+    "tank/data/b@boomerangz-20260902T120000.000000000Z-0fff57d3": [
+      "boomerangz-b180abddedb36179a0689c720baf67cbc5fcf2d4d2f4c3cd4121a060e0749f86"
+    ],
+    "tank/data@boomerangz-20260901T120000.000000000Z-39bac421": [],
+    "tank/data@boomerangz-20260902T120000.000000000Z-0fff57d3": [
+      "boomerangz-b180abddedb36179a0689c720baf67cbc5fcf2d4d2f4c3cd4121a060e0749f86"
+    ]
+  }
+}

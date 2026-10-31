@@ -1,0 +1,4 @@
+{
+  "org.boomerangz:state:target:5bee580965c35c6b52625720a774c4ca45b8c0645a90b678bba72f2fedda61ca": "{\"version\":1,\"transport\":\"ssh\",\"canonical_target\":\"ssh://backup@host:22/pool/archive\",\"destination_root\":\"pool/archive\",\"mapped_dataset\":\"pool/archive/data\",\"pool\":\"pool\",\"pool_guid\":600,\"anchor\":\"pool/archive\",\"anchor_guid\":601,\"relative_path\":\"data\"}",
+  "org.boomerangz:state:target:b180abddedb36179a0689c720baf67cbc5fcf2d4d2f4c3cd4121a060e0749f86": "{\"version\":1,\"transport\":\"local\",\"canonical_target\":\"local:backup\",\"destination_root\":\"backup\",\"mapped_dataset\":\"backup\",\"pool\":\"backup\",\"pool_guid\":500,\"anchor\":\"backup\",\"anchor_guid\":501,\"relative_path\":\"\"}"
+}

@@ -307,7 +307,7 @@ func TestGuestDatasetCLI(t *testing.T) {
 			Applied           bool   `json:"applied"`
 			Warning           string `json:"warning"`
 		}
-		output := cli(t, "dataset", "reseed", active, destinationRoot)
+		output := cli(t, "dataset", "reseed", active, destinationRoot, "--json")
 		if err := json.Unmarshal([]byte(output), &preview); err != nil {
 			t.Fatalf("decode reseed preview: %v: %s", err, output)
 		}
@@ -321,7 +321,7 @@ func TestGuestDatasetCLI(t *testing.T) {
 		var applied struct {
 			Applied bool `json:"applied"`
 		}
-		output = cli(t, "dataset", "reseed", active, destinationRoot, "--apply")
+		output = cli(t, "dataset", "reseed", active, destinationRoot, "--apply", "--json")
 		if err := json.Unmarshal([]byte(output), &applied); err != nil {
 			t.Fatalf("decode reseed result: %v: %s", err, output)
 		}
@@ -438,7 +438,7 @@ func TestGuestIdentityRecoverCLI(t *testing.T) {
 	}
 
 	chain("preview", func(t *testing.T) {
-		result := decode(t, cli(t, "identity", "recover", "--owner", owner))
+		result := decode(t, cli(t, "identity", "recover", "--owner", owner, "--json"))
 		if result.Current != current || result.Recovered != owner || result.Applied {
 			t.Fatalf("identity recover preview=%+v", result)
 		}
@@ -457,7 +457,7 @@ func TestGuestIdentityRecoverCLI(t *testing.T) {
 	})
 
 	chain("apply", func(t *testing.T) {
-		result := decode(t, cli(t, "identity", "recover", "--owner", owner, "--apply"))
+		result := decode(t, cli(t, "identity", "recover", "--owner", owner, "--apply", "--json"))
 		if !result.Applied || result.Recovered != owner {
 			t.Fatalf("identity recover --apply=%+v", result)
 		}
@@ -565,7 +565,7 @@ func TestGuestAbortReceiveCLI(t *testing.T) {
 		Receives []string `json:"receives"`
 		Applied  bool     `json:"applied"`
 	}
-	output := cli(t, "dataset", "abort-receive", source, destinationRoot)
+	output := cli(t, "dataset", "abort-receive", source, destinationRoot, "--json")
 	if err := json.Unmarshal([]byte(output), &plan); err != nil {
 		t.Fatalf("decode preview: %v: %s", err, output)
 	}
@@ -575,7 +575,7 @@ func TestGuestAbortReceiveCLI(t *testing.T) {
 	if token(t, destinationRoot) == "" {
 		t.Fatal("the preview discarded the receive")
 	}
-	output = cli(t, "dataset", "abort-receive", source, destinationRoot, "--apply")
+	output = cli(t, "dataset", "abort-receive", source, destinationRoot, "--apply", "--json")
 	if err := json.Unmarshal([]byte(output), &plan); err != nil || !plan.Applied {
 		t.Fatalf("abort --apply: %v: %s", err, output)
 	}
