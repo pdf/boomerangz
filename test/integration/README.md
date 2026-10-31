@@ -200,9 +200,13 @@ together are an unfiltered run. CI gives each guest the runner's 4 vCPUs with
 `BOOMERANGZ_GUEST_VCPUS`.
 
 The harness provisions a guest once and reuses it. After provisioning it
-flattens the system image into the image cache, keyed by the target's
-`config.sh` and `provision.sh`, and later runs boot a fresh overlay of it
-with a new cloud-init seed, skipping the download and provisioning. A
+flattens the system image into the image cache, keyed by `host/image-key.sh`:
+the host's CPU class and a digest of the target's `config.sh` and
+`provision.sh`. The guest boots with the host's CPU and provisioning may
+install packages built for it - CachyOS picks x86-64-v3, x86-64-v4 or Zen 4/5
+builds - so an image is reused only on hosts of the class it was provisioned
+on. Later runs boot a fresh overlay of it with a new cloud-init seed, skipping
+the download and provisioning. A
 provisioned image older than a week is rebuilt, so kernel and OpenZFS updates
 still arrive; CI keeps the cache between runs and keys it by the week too.
 

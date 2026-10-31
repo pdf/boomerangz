@@ -79,11 +79,12 @@ readonly guest_artifacts=/var/tmp/boomerangz-integration-$run_id
 # cache; locally it persists between runs.
 readonly image_cache=${BOOMERANGZ_IMAGE_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/boomerangz-integration}
 readonly base_image=$image_cache/$target_image_name
-# A provisioned image is keyed by everything that shapes it: the base image
-# and the target's provisioning inputs. It is reused for a week at most, so
-# the guest still picks up kernel and OpenZFS updates without any input
-# changing.
-provisioned_key=$(cat "$target_dir/config.sh" "$target_dir/provision.sh" | sha256sum | cut -c1-16)
+# A provisioned image is keyed by everything that shapes it: the host CPU
+# class it was provisioned for and the target's provisioning inputs (see
+# image-key.sh, which CI's cache key uses too). It is reused for a week at
+# most, so the guest still picks up kernel and OpenZFS updates without any
+# input changing.
+provisioned_key=$("$script_dir/image-key.sh" "$target")
 readonly provisioned_key
 readonly provisioned_image=$image_cache/$target-provisioned-$provisioned_key.qcow2
 readonly provisioned_max_age_minutes=$((7 * 24 * 60))
@@ -177,12 +178,20 @@ copy_to_guest() {
 		-r "$@" "$ssh_target:/home/$target_guest_user/integration/"
 }
 
+# Waits up to three minutes of wall time for the guest's SSH. A guest that
+# panicked never answers, so the console is checked too and a panic fails the
+# wait at once, naming it, rather than when the time runs out.
 wait_for_ssh() {
-	for _ in {1..180}; do
+	local console=$diagnostics/console-$boot_index.log
+	local deadline=$((SECONDS + 180))
+	while ((SECONDS < deadline)); do
 		if ssh_guest true 2>/dev/null; then
 			return
 		fi
 		kill -0 "$qemu_pid" 2>/dev/null || fail "target $target exited before SSH became ready"
+		if grep -q 'Kernel panic' "$console" 2>/dev/null; then
+			fail "target $target kernel panicked while booting: $(grep -m1 'Kernel panic' "$console")"
+		fi
 		sleep 1
 	done
 	fail "target $target SSH did not become ready"
@@ -313,7 +322,9 @@ if [[ $provisioned == no ]]; then
 	qemu-img convert -O qcow2 "$system_image" "$staged"
 	chmod 0444 "$staged"
 	mv -f -- "$staged" "$provisioned_image"
-	find "$image_cache" -maxdepth 1 -name "$target-provisioned-*.qcow2" ! -name "$(basename -- "$provisioned_image")" -delete
+	# Superseded images of this CPU class go; another class's may still serve
+	# runs on other hosts sharing this cache.
+	find "$image_cache" -maxdepth 1 -name "$target-provisioned-${provisioned_key%-*}-*.qcow2" ! -name "$(basename -- "$provisioned_image")" -delete
 	"$target_dir/prepare-image.sh" "$provisioned_image" "$system_image" "$target_system_size"
 fi
 
