@@ -12,7 +12,6 @@ import (
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
-	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
@@ -75,8 +74,7 @@ func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) 
 	const lineage = "22222222-2222-4222-8222-222222222222"
 	metadata := lifecycle.Metadata{Lineage: lineage, Snapshot: "33333333-3333-4333-8333-333333333333", Created: time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)}
 	canonical := "local:backup/data"
-	binding := transfer.TargetBinding{Version: 1, Transport: "local", CanonicalTarget: canonical, DestinationRoot: "backup/data", MappedDataset: "backup/data", Pool: "backup", PoolGUID: 90, Anchor: "backup/data", AnchorGUID: 91}
-	encoded, err := json.Marshal(binding)
+	encoded, err := json.Marshal(map[string]any{"version": 2, "pool_guid": 90, "anchor_guid": 91})
 	if err != nil {
 		t.Fatal(err)
 	}

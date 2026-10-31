@@ -403,7 +403,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 	if err != nil {
 		return plan, err
 	}
-	storedBinding, err := storedTargetBinding(view.Source, request.Source, wantedBinding.CanonicalTarget)
+	storedBinding, err := storedTargetBinding(view.Source, request.Source, wantedBinding)
 	if err != nil {
 		return plan, err
 	}

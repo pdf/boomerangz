@@ -208,29 +208,62 @@ func TestScheduledSnapshotRetriesWhenActivationGateIsNotReady(t *testing.T) {
 	}
 }
 
-func TestSafetyRejectsLocalResumeState(t *testing.T) {
-	t.Parallel()
-	gate := &lifecycle.Gate{}
+// policyBackend is a runtimeBackend whose pool holds one root, tank/data,
+// configured to send to the local target backup/data. A proof records only
+// its target's hash, so a target checker resolves the target from policy.
+type policyBackend struct {
+	runtimeBackend
+}
+
+func (*policyBackend) ListDatasets(context.Context) ([]zfs.Dataset, error) {
+	return []zfs.Dataset{{Name: "tank", Type: zfs.Filesystem, EncryptionRoot: "-"}, {Name: "tank/data", Type: zfs.Filesystem, EncryptionRoot: "-"}}, nil
+}
+
+func (*policyBackend) GetActivationProperties(context.Context) ([]zfs.Property, error) {
+	return []zfs.Property{{Dataset: "tank/data", Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal}}, nil
+}
+
+func (*policyBackend) GetStoredProperties(_ context.Context, datasets []string) ([]zfs.Property, error) {
+	if !slices.Contains(datasets, "tank/data") {
+		return nil, nil
+	}
+	return []zfs.Property{
+		{Dataset: "tank/data", Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal},
+		{Dataset: "tank/data", Name: policy.Namespace + "local", Value: "backup/data", Source: zfs.SourceLocal},
+		{Dataset: "tank/data", Name: policy.Namespace + "discard", Value: "all", Source: zfs.SourceLocal},
+	}, nil
+}
+
+// resumableLocalTarget is a policyBackend whose bound local target holds an
+// interrupted receive.
+func resumableLocalTarget() (*policyBackend, string) {
 	canonical := "local:backup/data"
 	bindingProperty := policy.StateNamespace + "target:" + lifecycle.TargetID(canonical)
-	backend := &runtimeBackend{identity: zfs.DatasetIdentity{Name: "backup/data", Type: zfs.Filesystem, GUID: 91, Pool: "backup", PoolGUID: 90}, state: zfs.State{Properties: []zfs.Property{{Dataset: "tank/data", Name: bindingProperty, Value: `{"version":1,"transport":"local","canonical_target":"local:backup/data","destination_root":"backup/data","mapped_dataset":"backup/data","pool":"backup","pool_guid":90,"anchor":"backup/data","anchor_guid":91,"relative_path":""}`, Source: zfs.SourceLocal}}, ResumeTokens: map[string]string{"backup/data": "token"}}}
-	safety := newSafety(gate, backend, nil, nil)
-	if err := safety.CheckTarget(t.Context(), "tank/data", canonical); err == nil {
-		t.Fatal("resumable target was accepted")
+	backend := &policyBackend{runtimeBackend{identity: zfs.DatasetIdentity{Name: "backup/data/data", Type: zfs.Filesystem, GUID: 91, Pool: "backup", PoolGUID: 90}, state: zfs.State{Properties: []zfs.Property{{Dataset: "tank/data", Name: bindingProperty, Value: `{"version":2,"pool_guid":90,"anchor_guid":91}`, Source: zfs.SourceLocal}}, ResumeTokens: map[string]string{"backup/data/data": "token"}}}}
+	return backend, lifecycle.TargetID(canonical)
+}
+
+func TestSafetyRejectsLocalResumeState(t *testing.T) {
+	t.Parallel()
+	backend, targetID := resumableLocalTarget()
+	safety := newSafety(&lifecycle.Gate{}, backend, nil, nil)
+	if err := safety.CheckTarget(t.Context(), "tank/data", targetID); err == nil || !strings.Contains(err.Error(), "resumable") {
+		t.Fatalf("resumable target was not refused for its resume state: %v", err)
+	}
+	if err := safety.CheckTarget(t.Context(), "tank/data", lifecycle.TargetID("local:backup/other")); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("an unconfigured target was not refused as such: %v", err)
 	}
 }
 
 func TestStandaloneTargetCheckerUsesSameLocalResumeCheck(t *testing.T) {
 	t.Parallel()
-	canonical := "local:backup/data"
-	bindingProperty := policy.StateNamespace + "target:" + lifecycle.TargetID(canonical)
-	backend := &runtimeBackend{identity: zfs.DatasetIdentity{Name: "backup/data", Type: zfs.Filesystem, GUID: 91, Pool: "backup", PoolGUID: 90}, state: zfs.State{Properties: []zfs.Property{{Dataset: "tank/data", Name: bindingProperty, Value: `{"version":1,"transport":"local","canonical_target":"local:backup/data","destination_root":"backup/data","mapped_dataset":"backup/data","pool":"backup","pool_guid":90,"anchor":"backup/data","anchor_guid":91,"relative_path":""}`, Source: zfs.SourceLocal}}, ResumeTokens: map[string]string{"backup/data": "token"}}}
+	backend, targetID := resumableLocalTarget()
 	checker, err := NewTargetChecker(backend, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := checker.CheckTarget(t.Context(), "tank/data", canonical); err == nil {
-		t.Fatal("resumable target was accepted")
+	if err := checker.CheckTarget(t.Context(), "tank/data", targetID); err == nil || !strings.Contains(err.Error(), "resumable") {
+		t.Fatalf("resumable target was not refused for its resume state: %v", err)
 	}
 }
 
@@ -433,10 +466,12 @@ func TestRemoteDestinationsFollowEachRemotesBinding(t *testing.T) {
 		"paired": {Transport: "native", Credential: "missing", Root: "pool/backup"},
 	}
 	destinations := RemoteDestinations(settings, t.TempDir())
-	want := discovery.RemoteDestination{Namespace: "ssh://backup.example.net:22", Root: "pool/backup"}
-	// Different users on one host reach one dataset tree.
-	if destinations["home"] != want || destinations["office"] != want {
-		t.Fatalf("destinations = %+v", destinations)
+	// Different users on one host reach one dataset tree, through different
+	// canonical targets, which their bindings are keyed by.
+	for name, canonical := range map[string]string{"home": "ssh://replicator@backup.example.net:22/pool/backup", "office": "ssh://other@backup.example.net:22/pool/backup"} {
+		if want := (discovery.RemoteDestination{Namespace: "ssh://backup.example.net:22", Root: "pool/backup", Canonical: canonical}); destinations[name] != want {
+			t.Fatalf("destinations[%s] = %+v, want %+v", name, destinations[name], want)
+		}
 	}
 	if _, found := destinations["paired"]; found {
 		t.Fatalf("a remote without a readable credential was given a destination: %+v", destinations["paired"])
@@ -447,7 +482,7 @@ func TestRemoteDestinationsFollowEachRemotesBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loopback := remoteDestinations(clients, map[string]bool{"home": true}); loopback["home"] != (discovery.RemoteDestination{Namespace: "local", Root: "pool/backup"}) {
+	if loopback := remoteDestinations(clients, map[string]bool{"home": true}); loopback["home"] != (discovery.RemoteDestination{Namespace: "local", Root: "pool/backup", Canonical: "ssh://replicator@backup.example.net:22/pool/backup"}) {
 		t.Fatalf("loopback destination = %+v", loopback["home"])
 	}
 }

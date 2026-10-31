@@ -686,7 +686,7 @@ func TestReceivedTargetStateIsProvenance(t *testing.T) {
 		},
 		Received: map[string]map[string]string{request.Source: {bindingKey: `{"foreign":true}`, suspendedKey: "unverified"}},
 	}
-	if stored, err := storedTargetBinding(received, request.Source, canonical); err != nil || stored != nil {
+	if stored, err := storedTargetBinding(received, request.Source, binding); err != nil || stored != nil {
 		t.Fatalf("received binding was read as this root's: %+v err=%v", stored, err)
 	}
 	if suspended, err := TargetSuspended(received, request.Source, canonical); err != nil || suspended {
@@ -696,7 +696,52 @@ func TestReceivedTargetStateIsProvenance(t *testing.T) {
 		Properties: []zfs.Property{{Dataset: request.Source, Name: bindingKey, Value: encoded, Source: zfs.SourceLocal}},
 		Received:   received.Received,
 	}
-	if stored, err := storedTargetBinding(masked, request.Source, canonical); err != nil || stored == nil || *stored != binding {
+	if stored, err := storedTargetBinding(masked, request.Source, binding); err != nil || stored == nil || *stored != binding {
 		t.Fatalf("local binding over a hidden received one: %+v err=%v", stored, err)
+	}
+}
+
+// A binding stores only the destination's identity: everything else is what
+// configuration says about the target, and the comparison against a fresh
+// resolution is what checks it.
+func TestTargetBindingStoresOnlyIdentity(t *testing.T) {
+	t.Parallel()
+	request := Request{Source: "tank/projects/data", DestinationRoot: "backup", Policy: policy.Effective{Discard: policy.DiscardFirst}}
+	target, err := bindingTarget(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, test := range map[string]struct {
+		anchor zfs.DatasetIdentity
+		stored string
+	}{
+		"bootstrap": {zfs.DatasetIdentity{Name: "backup", GUID: 10, Pool: "backup", PoolGUID: 11}, `{"version":2,"pool_guid":11,"anchor_guid":10,"anchor":"backup"}`},
+		"replica":   {zfs.DatasetIdentity{Name: "backup/projects/data", GUID: 12, Pool: "backup", PoolGUID: 11}, `{"version":2,"pool_guid":11,"anchor_guid":12}`},
+	} {
+		binding, err := bindingFor(request, target.MappedDataset, test.anchor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := encodeBinding(binding)
+		if err != nil || encoded != test.stored {
+			t.Fatalf("%s: stored %s err=%v, want %s", name, encoded, err, test.stored)
+		}
+		state := zfs.State{Properties: []zfs.Property{{Dataset: request.Source, Name: targetBindingProperty(target.CanonicalTarget), Value: encoded, Source: zfs.SourceLocal}}}
+		stored, err := storedTargetBinding(state, request.Source, target)
+		if err != nil || stored == nil || *stored != binding {
+			t.Fatalf("%s: read back %+v err=%v, want %+v", name, stored, err, binding)
+		}
+	}
+	for name, value := range map[string]string{
+		"another version":   `{"version":1,"pool_guid":11,"anchor_guid":12}`,
+		"derivable field":   `{"version":2,"pool_guid":11,"anchor_guid":12,"mapped_dataset":"backup/projects/data"}`,
+		"anchor outside":    `{"version":2,"pool_guid":11,"anchor_guid":10,"anchor":"other"}`,
+		"replica as anchor": `{"version":2,"pool_guid":11,"anchor_guid":12,"anchor":"backup/projects/data"}`,
+		"trailing data":     `{"version":2,"pool_guid":11,"anchor_guid":12} {}`,
+	} {
+		state := zfs.State{Properties: []zfs.Property{{Dataset: request.Source, Name: targetBindingProperty(target.CanonicalTarget), Value: value, Source: zfs.SourceLocal}}}
+		if stored, err := storedTargetBinding(state, request.Source, target); err == nil {
+			t.Errorf("%s: accepted %+v", name, stored)
+		}
 	}
 }

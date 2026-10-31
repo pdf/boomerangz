@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
@@ -619,10 +620,10 @@ func TestCollidingReplicasBlockTheirTargets(t *testing.T) {
 		requireUnblocked(t, g, "tank/a/home")
 		requireUnblocked(t, g, "tank/b/home")
 	})
-	// bound records a stored binding proving root's replica at mapped on a
-	// local target.
-	bound := func(root, target, mapped string) zfs.Property {
-		return local(root, "state:target:"+target, `{"version":1,"transport":"local","destination_root":"`+target+`","mapped_dataset":"`+mapped+`"}`)
+	// bound records a stored binding for root's replica on a local target,
+	// keyed as transfer keys it: by the hash of the target's canonical form.
+	bound := func(root, target string) zfs.Property {
+		return local(root, "state:target:"+lifecycle.TargetID("local:"+target), `{"version":2,"pool_guid":1,"anchor_guid":2}`)
 	}
 	t.Run("an established replica keeps its target", func(t *testing.T) {
 		t.Parallel()
@@ -630,7 +631,7 @@ func TestCollidingReplicasBlockTheirTargets(t *testing.T) {
 		// new configuration that would land on the same dataset.
 		var rows []zfs.Property
 		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "all")...)
-		rows = append(rows, bound("tank/a/home", "backup", "backup/home"))
+		rows = append(rows, bound("tank/a/home", "backup"))
 		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
 		g := collisionScan(t, nil, datasets, rows...)
 		requireUnblocked(t, g, "tank/a/home")
@@ -638,11 +639,11 @@ func TestCollidingReplicasBlockTheirTargets(t *testing.T) {
 	})
 	t.Run("a binding elsewhere proves nothing here", func(t *testing.T) {
 		t.Parallel()
-		// The stored binding is for a different mapping, so neither side is
+		// The stored binding is for a different target, so neither side is
 		// established at backup/home.
 		var rows []zfs.Property
 		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "all")...)
-		rows = append(rows, bound("tank/a/home", "backup", "backup/a/home"))
+		rows = append(rows, bound("tank/a/home", "elsewhere"))
 		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
 		g := collisionScan(t, nil, datasets, rows...)
 		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
@@ -652,12 +653,24 @@ func TestCollidingReplicasBlockTheirTargets(t *testing.T) {
 		t.Parallel()
 		var rows []zfs.Property
 		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "all")...)
-		rows = append(rows, bound("tank/a/home", "backup", "backup/home"))
+		rows = append(rows, bound("tank/a/home", "backup"))
 		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
-		rows = append(rows, bound("tank/b/home", "backup", "backup/home"))
+		rows = append(rows, bound("tank/b/home", "backup"))
 		g := collisionScan(t, nil, datasets, rows...)
 		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
 		requireCollision(t, g, "tank/b/home", "backup", false, "tank/a/home")
+	})
+	t.Run("a remote's binding is found by its canonical target", func(t *testing.T) {
+		t.Parallel()
+		const canonical = "ssh://replicator@host:22/pool/backup"
+		destinations := map[string]RemoteDestination{"near": {Namespace: "ssh://host:22", Root: "pool/backup", Canonical: canonical}}
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "remote", "near", "discard", "all")...)
+		rows = append(rows, local("tank/a/home", "state:target:"+lifecycle.TargetID(canonical), `{"version":2,"pool_guid":1,"anchor_guid":2}`))
+		rows = append(rows, enabled("tank/b/home", "remote", "near", "discard", "all")...)
+		g := collisionScan(t, destinations, datasets, rows...)
+		requireUnblocked(t, g, "tank/a/home")
+		requireCollision(t, g, "tank/b/home", "near", true, "tank/a/home")
 	})
 	t.Run("only the colliding target is blocked", func(t *testing.T) {
 		t.Parallel()
@@ -676,8 +689,8 @@ func TestCollidingReplicasBlockTheirTargets(t *testing.T) {
 func TestRemoteDestinationOfCanonicalTargets(t *testing.T) {
 	t.Parallel()
 	for canonical, want := range map[string]RemoteDestination{
-		"ssh://replicator@Backup.Example.net:22/pool/data": {Namespace: "ssh://backup.example.net:22", Root: "pool/data"},
-		"native://10.0.0.5:9443/tank/replicas":             {Namespace: "native://10.0.0.5:9443", Root: "tank/replicas"},
+		"ssh://replicator@Backup.Example.net:22/pool/data": {Namespace: "ssh://backup.example.net:22", Root: "pool/data", Canonical: "ssh://replicator@Backup.Example.net:22/pool/data"},
+		"native://10.0.0.5:9443/tank/replicas":             {Namespace: "native://10.0.0.5:9443", Root: "tank/replicas", Canonical: "native://10.0.0.5:9443/tank/replicas"},
 	} {
 		got, err := RemoteDestinationOf(canonical)
 		if err != nil || got != want {

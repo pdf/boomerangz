@@ -273,11 +273,11 @@ func TestVerifyTargetBindingRejectsSameNamedReplacement(t *testing.T) {
 	})
 	identity := view.DestinationIdentity
 	backend := &localBackend{source: view.Source, identity: &identity}
-	if _, err := VerifyTargetBinding(t.Context(), backend, view.Source, request.Source, plan.TargetBinding.CanonicalTarget, request.DestinationRoot); err != nil {
+	if _, err := VerifyTargetBinding(t.Context(), backend, view.Source, request); err != nil {
 		t.Fatalf("stable target rejected: %v", err)
 	}
 	identity.GUID++
-	if _, err := VerifyTargetBinding(t.Context(), backend, view.Source, request.Source, plan.TargetBinding.CanonicalTarget, request.DestinationRoot); err == nil {
+	if _, err := VerifyTargetBinding(t.Context(), backend, view.Source, request); err == nil {
 		t.Fatal("same-named replacement accepted")
 	}
 }

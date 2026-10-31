@@ -69,7 +69,11 @@ func (s *ReseedService) plan(ctx context.Context, request Request) (ReseedPlan, 
 	if err != nil {
 		return plan, err
 	}
-	binding, err := storedTargetBinding(source, request.Source, canonical)
+	target, err := bindingTarget(request)
+	if err != nil {
+		return plan, err
+	}
+	binding, err := storedTargetBinding(source, request.Source, target)
 	if err != nil {
 		return plan, err
 	}
@@ -79,13 +83,7 @@ func (s *ReseedService) plan(ctx context.Context, request Request) (ReseedPlan, 
 			return plan, err
 		}
 	}
-	mapped, _, err := request.mapped(request.Source)
-	if err != nil {
-		return plan, err
-	}
-	if binding != nil && (binding.Transport != requestTransport(request) || binding.CanonicalTarget != canonical || binding.DestinationRoot != request.DestinationRoot || binding.MappedDataset != mapped) {
-		return plan, fmt.Errorf("configured target mapping differs from persistent binding; refusing reseed")
-	}
+	mapped := target.MappedDataset
 	inventory, err := s.destination.ListDatasets(ctx)
 	if err != nil {
 		return plan, err

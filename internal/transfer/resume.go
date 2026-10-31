@@ -120,7 +120,7 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 	if suspended {
 		return plan, zero, fmt.Errorf("target is suspended pending explicit remote revalidation")
 	}
-	stored, err := storedTargetBinding(view.Source, request.Source, canonical)
+	stored, err := storedTargetBinding(view.Source, request.Source, bindingTemplate(request, mappedRoot, transport, canonical))
 	if err != nil || stored == nil {
 		return plan, zero, fmt.Errorf("resumable transfer lacks a valid target binding")
 	}

@@ -489,7 +489,11 @@ func TestMemberStreamsNestUnderTheRootsReplica(t *testing.T) {
 		t.Fatalf("each member's proof should be at its own newest instant: %+v", refs)
 	}
 	state := must(pool.InspectState(t.Context(), "tank/home", false))
-	binding, err := storedTargetBinding(state, "tank/home", "local:backup")
+	target, err := bindingTarget(pool.resolve(t, "backup"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := storedTargetBinding(state, "tank/home", target)
 	if err != nil || binding == nil || binding.Anchor != "backup/home" || binding.MappedDataset != "backup/home" {
 		t.Fatalf("binding=%+v err=%v", binding, err)
 	}
@@ -694,7 +698,11 @@ func (p *treePool) isPlaceholder(t *testing.T, dataset string) bool {
 func bindingAnchor(t *testing.T, pool *treePool, target string) string {
 	t.Helper()
 	state := must(pool.InspectState(t.Context(), "tank/home", false))
-	binding, err := storedTargetBinding(state, "tank/home", "local:"+target)
+	template, err := bindingTarget(pool.resolve(t, target))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := storedTargetBinding(state, "tank/home", template)
 	if err != nil || binding == nil {
 		t.Fatalf("binding=%+v err=%v", binding, err)
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/discovery"
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
@@ -116,12 +117,17 @@ func (s *Safety) setTargets(targets *TargetChecker) {
 // A recovery proof records only the hash of its target's canonical identity, so
 // targetID is matched against each configured remote and each local target the
 // source's policy, or a member's, configures. A target no longer configured
-// cannot be checked.
+// cannot be checked. The binding is rebuilt from the source's policy, which
+// says where the replica is mapped.
 func (s *TargetChecker) CheckTarget(ctx context.Context, source, targetID string) error {
 	if s == nil || s.local == nil {
 		return fmt.Errorf("target verification is unavailable")
 	}
 	sourceState, err := s.local.InspectState(ctx, source, false)
+	if err != nil {
+		return err
+	}
+	effective, locals, err := s.sourcePolicy(ctx, source)
 	if err != nil {
 		return err
 	}
@@ -135,7 +141,8 @@ func (s *TargetChecker) CheckTarget(ctx context.Context, source, targetID string
 		if err != nil {
 			return err
 		}
-		binding, bindingErr := transfer.VerifyTargetBinding(ctx, endpoint.executor, sourceState, source, target, setting.Root)
+		request := transfer.Request{Source: source, DestinationRoot: setting.Root, Policy: effective, Transport: client.Transport(), RemoteName: name, CanonicalTarget: target}
+		binding, bindingErr := transfer.VerifyTargetBinding(ctx, endpoint.executor, sourceState, request)
 		checkErr := bindingErr
 		if bindingErr == nil {
 			checkErr = checkResumeState(ctx, endpoint.executor, binding.MappedDataset)
@@ -145,16 +152,11 @@ func (s *TargetChecker) CheckTarget(ctx context.Context, source, targetID string
 		}
 		return checkErr
 	}
-	locals, err := s.localTargets(ctx, source)
-	if err != nil {
-		return err
-	}
 	for _, root := range locals {
-		target := "local:" + root
-		if lifecycle.TargetID(target) != targetID {
+		if lifecycle.TargetID("local:"+root) != targetID {
 			continue
 		}
-		binding, err := transfer.VerifyTargetBinding(ctx, s.local, sourceState, source, target, root)
+		binding, err := transfer.VerifyTargetBinding(ctx, s.local, sourceState, transfer.Request{Source: source, DestinationRoot: root, Policy: effective})
 		if err != nil {
 			return err
 		}
@@ -163,13 +165,13 @@ func (s *TargetChecker) CheckTarget(ctx context.Context, source, targetID string
 	return fmt.Errorf("recorded target is not configured")
 }
 
-// localTargets lists the local destinations source's policy configures, with
-// its members'. A root's members may send where the root itself does not, and
-// their proofs are on the root.
-func (s *TargetChecker) localTargets(ctx context.Context, source string) ([]string, error) {
+// sourcePolicy resolves source's policy, and the local destinations it and
+// its members configure. A root's members may send where the root itself does
+// not, and their proofs are on the root.
+func (s *TargetChecker) sourcePolicy(ctx context.Context, source string) (policy.Effective, []string, error) {
 	reader, ok := s.local.(discovery.Reader)
 	if !ok {
-		return nil, fmt.Errorf("local target policy is unavailable")
+		return policy.Effective{}, nil, fmt.Errorf("source policy is unavailable")
 	}
 	var remotes []string
 	for name := range s.settings {
@@ -177,15 +179,15 @@ func (s *TargetChecker) localTargets(ctx context.Context, source string) ([]stri
 	}
 	scanner, err := discovery.New(reader, discovery.Options{Remotes: remotes})
 	if err != nil {
-		return nil, err
+		return policy.Effective{}, nil, err
 	}
 	generation, err := scanner.Scan(ctx, []string{source})
 	if err != nil {
-		return nil, err
+		return policy.Effective{}, nil, err
 	}
 	entry, exists := generation.Inspect(source)
 	if !exists || !entry.Inspected {
-		return nil, fmt.Errorf("source policy inspection is incomplete")
+		return policy.Effective{}, nil, fmt.Errorf("source policy inspection is incomplete")
 	}
 	locals := slices.Clone(entry.Policy.Local)
 	for _, member := range entry.Members {
@@ -194,7 +196,7 @@ func (s *TargetChecker) localTargets(ctx context.Context, source string) ([]stri
 		}
 	}
 	slices.Sort(locals)
-	return slices.Compact(locals), nil
+	return entry.Policy, slices.Compact(locals), nil
 }
 
 // OpenConfigured opens one named remote using the same transport construction

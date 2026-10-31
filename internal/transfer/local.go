@@ -331,7 +331,7 @@ func (l *Local) load(ctx context.Context, request Request, stream string) (View,
 		}
 		view.Source.Properties = append(view.Source.Properties, rows...)
 	}
-	bound, err := storedTargetBinding(view.Source, request.Source, canonicalTarget(request))
+	bound, err := storedTargetBinding(view.Source, request.Source, bindingTemplate(request, mappedRoot, requestTransport(request), canonicalTarget(request)))
 	if err != nil {
 		return view, err
 	}
@@ -796,7 +796,7 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 	if _, err := lifecycle.RootAuthority(sourceAfter, request.Source, l.installation); err != nil {
 		return result, err
 	}
-	bound, err := storedTargetBinding(sourceAfter, request.Source, plan.TargetBinding.CanonicalTarget)
+	bound, err := storedTargetBinding(sourceAfter, request.Source, plan.TargetBinding)
 	if err != nil || bound == nil || *bound != plan.TargetBinding {
 		return result, fmt.Errorf("source target binding changed during transfer")
 	}
