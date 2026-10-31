@@ -12,46 +12,68 @@ Upgrade through the same package channel you installed, as described in
 
 ## v0.3.0
 
-This release changes how recovery proofs and target bindings are stored, and
-does not read the ones earlier releases wrote. Stop the daemon before
-upgrading, and clear the old records on every actor root before starting it
-again.
+This release changes how boomerangz stores recovery proofs and target
+bindings, and stops reading the old form: each source root now records the
+format of its state in `org.boomerangz:state:version`, and a root without the
+marker is in the earlier format. Until it is migrated, the daemon snapshots,
+prunes and replicates nothing for it, and reports
+`state on tank/data is format v1, and this build reads v2; stop the daemon
+and run boomerangz migrate tank/data`.
 
-### Clear old recovery proofs and target bindings
+### Migrate every source root
 
-A recovery proof, `org.boomerangz:state:reference:*`, no longer lists every
-snapshot it protects, so a recursive stream's proof no longer outgrows a ZFS
-property. A target binding, `org.boomerangz:state:target:*`, now stores only
-the destination's identity and the dataset it maps to. With either left in the old form, every transfer,
-clean and retirement of the root refuses with `invalid reference proof` or
-`invalid target binding`.
-
-For each actor root, here `tank/data`, remove the old proofs and bindings and
-the holds and bookmarks the proofs recorded:
+Stop the daemon before upgrading. After upgrading, preview the migration of
+every dataset that keeps boomerangz state:
 
 ```sh
-root=tank/data
-zfs get -H -o property -s local all "$root" | grep -E '^org\.boomerangz:state:(reference|target):' | grep -v ':suspended$' | xargs -r -I{} sudo zfs inherit {} "$root"
-zfs list -H -t snapshot -o name -r "$root" | xargs -r zfs holds -H | awk '$2 ~ /^boomerangz-/ { print $2, $1 }' | while read -r tag snapshot; do sudo zfs release "$tag" "$snapshot"; done
-zfs list -H -t bookmark -o name -r "$root" | grep '#boomerangz-' | xargs -r -n1 sudo zfs destroy
+sudo systemctl stop boomerangz.service
+sudo -u boomerangz -H boomerangz migrate --all
 ```
 
-Suspension markers, `org.boomerangz:state:target:*:suspended`, are unchanged
-and stay. Then start the daemon and run each root's transfers with
-`boomerangz trigger`. A transfer to an existing replica that still shares a
-snapshot with its source records a new binding and continues incrementally. One
-that reports that the destination has no common base needs
-`boomerangz dataset reseed`, as in [Reseed a target](/operations/recovery#reseed-a-target).
+Each root is listed with `Status: pending` and the properties it rewrites:
+every recovery proof, `org.boomerangz:state:reference:*`, shrinks to a fixed
+size; every target binding, `org.boomerangz:state:target:*`, keeps only the
+destination's identity and the dataset it maps to; and the version marker is
+written last. Holds, bookmarks and snapshots are not touched, so transfers
+continue incrementally afterwards. A root listed as `Status: blocked` names what
+cannot be carried over; resolve it, or forget that target with
+`boomerangz dataset clean --forget-target`, and preview again. Apply it, then
+start the daemon:
+
+```sh
+sudo -u boomerangz -H boomerangz migrate --all --apply
+sudo systemctl start boomerangz.service
+```
+
+A migration that is interrupted leaves the root in its old format and can be
+run again; it finishes what is left. Snapshots taken before the upgrade keep
+an `org.boomerangz:state:created` property, which this release no longer
+reads or writes; it goes with the snapshots as retention prunes them.
 
 Check the result with:
 
 ```sh
-zfs get -H -o property,value -s local all tank/data | grep 'state:\(reference\|target\):'
+sudo -u boomerangz -H boomerangz migrate --all
 ```
 
-Each binding's value now reads like `{"version":2,"pool_guid":...,"mapped":"backup/archive","anchor_guid":...}`,
-each proof's like `{"created":"..."}`, and `boomerangz status` shows each
-target's last transfer verified.
+Every root now reads `Status: current`, and `boomerangz status` shows each
+target's next transfer verified.
+
+### Administrative commands print text
+
+`dataset adopt`, `dataset clean`, `dataset reseed`, `dataset abort-receive`,
+`identity recover` and `migrate` now print a readable plan by default rather
+than JSON, matching `dataset list` and `dataset inspect`. A script that parses
+their output must add `--json`, which prints exactly the JSON these commands
+printed before:
+
+```sh
+boomerangz dataset clean tank/data --json
+```
+
+Check a script by running its command once by hand with `--json` and
+confirming the output is the JSON it expects; without the flag the output
+begins with `Dataset:` or `Current identity:` instead.
 
 ## v0.2.0
 

@@ -32,6 +32,7 @@ type commandLine struct {
 	SSHShell sshShellCommand `cmd:"" name:"ssh-shell" hidden:"" help:"Serve the restricted replication protocol over SSH."`
 	Dataset  datasetCommand  `cmd:"" help:"Inspect and administer dataset lifecycle."`
 	Identity identityCommand `cmd:"" help:"Inspect and recover installation identity."`
+	Migrate  migrateCommand  `cmd:"" help:"Preview migration of source roots' state to the format this build reads."`
 }
 
 type commandEnvironment struct {
@@ -384,12 +385,14 @@ func (c *datasetInspectCommand) Run(env *commandEnvironment) error {
 type datasetAdoptCommand struct {
 	Dataset string `arg:"" required:"" help:"Exact ZFS dataset name."`
 	Apply   bool   `help:"Apply the adoption after revalidation."`
+	JSON    bool   `help:"Emit JSON."`
 }
 
 type datasetReseedCommand struct {
 	Dataset string `arg:"" required:"" help:"Exact managed source dataset name."`
 	Target  string `arg:"" required:"" help:"Configured local destination root or remote name."`
 	Apply   bool   `help:"Apply the reseed after revalidation."`
+	JSON    bool   `help:"Emit JSON."`
 }
 
 func (c *datasetReseedCommand) Run(env *commandEnvironment) error {
@@ -401,13 +404,14 @@ func (c *datasetReseedCommand) Run(env *commandEnvironment) error {
 	if err != nil {
 		return err
 	}
-	return runReseed(env.Context, env.Stdout, loaded.Config, reader, executor, c.Dataset, c.Target, c.Apply)
+	return runReseed(env.Context, env.Stdout, loaded.Config, reader, executor, c.Dataset, c.Target, c.Apply, c.JSON)
 }
 
 type datasetAbortReceiveCommand struct {
 	Dataset string `arg:"" required:"" help:"Exact managed source dataset name."`
 	Target  string `arg:"" required:"" help:"Configured local destination root or remote name."`
 	Apply   bool   `help:"Discard the interrupted receives after revalidation."`
+	JSON    bool   `help:"Emit JSON."`
 }
 
 func (c *datasetAbortReceiveCommand) Run(env *commandEnvironment) error {
@@ -419,7 +423,7 @@ func (c *datasetAbortReceiveCommand) Run(env *commandEnvironment) error {
 	if err != nil {
 		return err
 	}
-	return runAbortReceive(env.Context, env.Stdout, loaded.Config, reader, executor, c.Dataset, c.Target, c.Apply)
+	return runAbortReceive(env.Context, env.Stdout, loaded.Config, reader, executor, c.Dataset, c.Target, c.Apply, c.JSON)
 }
 
 func (c *datasetAdoptCommand) Run(env *commandEnvironment) error {
@@ -431,7 +435,7 @@ func (c *datasetAdoptCommand) Run(env *commandEnvironment) error {
 	if err != nil {
 		return err
 	}
-	return runAdopt(env.Context, env.Stdout, loaded.Config, executor, c.Dataset, c.Apply)
+	return runAdopt(env.Context, env.Stdout, loaded.Config, executor, c.Dataset, c.Apply, c.JSON)
 }
 
 type datasetCleanCommand struct {
@@ -441,6 +445,7 @@ type datasetCleanCommand struct {
 	DestroyOwnedSnapshots bool     `name:"destroy-owned-snapshots" help:"Also delete fully proven owned snapshots without dependencies."`
 	ForgetTargets         []string `name:"forget-target" placeholder:"TARGET" help:"Clean only this target's state from a source root, without checking the target: a configured remote, a local destination root, or a target ID. Repeat as needed."`
 	Apply                 bool     `help:"Apply clean after revalidation."`
+	JSON                  bool     `help:"Emit JSON."`
 }
 
 func (c *datasetCleanCommand) Run(env *commandEnvironment) error {
@@ -448,14 +453,34 @@ func (c *datasetCleanCommand) Run(env *commandEnvironment) error {
 	if err != nil {
 		return err
 	}
-	if handled, controlErr := runDaemonClean(env.Context, env.Stdout, loaded.Config, c.Datasets, c.Recursive, c.All, c.DestroyOwnedSnapshots, c.ForgetTargets, c.Apply); handled {
+	if handled, controlErr := runDaemonClean(env.Context, env.Stdout, loaded.Config, c.Datasets, c.Recursive, c.All, c.DestroyOwnedSnapshots, c.ForgetTargets, c.Apply, c.JSON); handled {
 		return controlErr
 	}
 	_, executor, err := datasetExecutor(env)
 	if err != nil {
 		return err
 	}
-	return runClean(env.Context, env.Stdout, loaded.Config, executor, c.Datasets, c.Recursive, c.All, c.DestroyOwnedSnapshots, c.ForgetTargets, c.Apply)
+	return runClean(env.Context, env.Stdout, loaded.Config, executor, c.Datasets, c.Recursive, c.All, c.DestroyOwnedSnapshots, c.ForgetTargets, c.Apply, c.JSON)
+}
+
+type migrateCommand struct {
+	configOptions `embed:""`
+	Datasets      []string `arg:"" optional:"" help:"Exact source roots."`
+	All           bool     `help:"Select every dataset that keeps boomerangz state."`
+	Apply         bool     `help:"Apply the migration after revalidation; the daemon must be stopped."`
+	JSON          bool     `help:"Emit JSON."`
+}
+
+func (c *migrateCommand) Run(env *commandEnvironment) error {
+	loaded, err := c.load()
+	if err != nil {
+		return err
+	}
+	_, executor, err := datasetExecutor(env)
+	if err != nil {
+		return err
+	}
+	return runMigrate(env.Context, env.Stdout, loaded.Config, executor, c.Datasets, c.All, c.Apply, c.JSON)
 }
 
 type identityCommand struct {
@@ -466,6 +491,7 @@ type identityCommand struct {
 type identityRecoverCommand struct {
 	Owner string `help:"Explicit owner UUID when more than one candidate exists."`
 	Apply bool   `help:"Apply the identity replacement after revalidation."`
+	JSON  bool   `help:"Emit JSON."`
 }
 
 func (c *identityRecoverCommand) Run(env *commandEnvironment) error {
@@ -477,5 +503,5 @@ func (c *identityRecoverCommand) Run(env *commandEnvironment) error {
 	if err != nil {
 		return err
 	}
-	return runIdentityRecover(env.Context, env.Stdout, loaded.Config, reader, executor, c.Owner, c.Apply)
+	return runIdentityRecover(env.Context, env.Stdout, loaded.Config, reader, executor, c.Owner, c.Apply, c.JSON)
 }

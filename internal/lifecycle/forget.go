@@ -60,6 +60,9 @@ func (s *Service) forgetPlan(ctx context.Context, dataset string, options CleanO
 	if err := scopeReady(state, dataset); err != nil {
 		plan.Blockers = append(plan.Blockers, err.Error())
 	}
+	if err := recordsReadable(state, dataset); err != nil {
+		plan.Blockers = append(plan.Blockers, err.Error())
+	}
 	var datasets []string
 	for _, object := range datasetObjects(state) {
 		datasets = append(datasets, object.Name)

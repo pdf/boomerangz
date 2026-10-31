@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,8 +17,8 @@ import (
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
-func runReseed(ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, dataset, target string, apply bool) error {
-	return runTargetOperation(ctx, out, cfg, reader, executor, dataset, target, apply, func(service *transfer.ReseedService, request transfer.Request) (any, error) {
+func runReseed(ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, dataset, target string, apply, jsonOutput bool) error {
+	return runTargetOperation(ctx, out, cfg, reader, executor, dataset, target, apply, jsonOutput, writeReseedPlan, func(service *transfer.ReseedService, request transfer.Request) (transfer.ReseedPlan, error) {
 		if apply {
 			return service.Apply(ctx, request)
 		}
@@ -30,8 +29,8 @@ func runReseed(ctx context.Context, out io.Writer, cfg config.Config, reader dis
 // runAbortReceive previews, or applies, discarding the interrupted receives one
 // target holds for an actor root's streams: the explicit way out when resuming
 // one keeps failing.
-func runAbortReceive(ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, dataset, target string, apply bool) error {
-	return runTargetOperation(ctx, out, cfg, reader, executor, dataset, target, apply, func(service *transfer.ReseedService, request transfer.Request) (any, error) {
+func runAbortReceive(ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, dataset, target string, apply, jsonOutput bool) error {
+	return runTargetOperation(ctx, out, cfg, reader, executor, dataset, target, apply, jsonOutput, writeAbortPlan, func(service *transfer.ReseedService, request transfer.Request) (transfer.AbortPlan, error) {
 		if apply {
 			return service.ApplyAbort(ctx, request)
 		}
@@ -40,9 +39,10 @@ func runAbortReceive(ctx context.Context, out io.Writer, cfg config.Config, read
 }
 
 // runTargetOperation resolves one configured target of an actor root, under
-// the lifecycle lock when applying, and prints what operation returns. A remote
-// found to receive into this host's own pools is revalidated as local first.
-func runTargetOperation(ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, dataset, target string, apply bool, operation func(*transfer.ReseedService, transfer.Request) (any, error)) (resultErr error) {
+// the lifecycle lock when applying, and prints what operation returns with
+// write, or as JSON. A remote found to receive into this host's own pools is
+// revalidated as local first.
+func runTargetOperation[P any](ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, dataset, target string, apply, jsonOutput bool, write func(io.Writer, P, bool) error, operation func(*transfer.ReseedService, transfer.Request) (P, error)) (resultErr error) {
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return err
 	}
@@ -151,9 +151,10 @@ func runTargetOperation(ctx context.Context, out io.Writer, cfg config.Config, r
 		request.HostLocal = true
 		plan, err = operation(service, request)
 	}
-	encoder := json.NewEncoder(out)
-	encoder.SetIndent("", "  ")
-	return errors.Join(err, encoder.Encode(plan))
+	if jsonOutput {
+		return errors.Join(err, writeJSON(out, plan))
+	}
+	return errors.Join(err, write(out, plan, apply))
 }
 
 // reseedRequest resolves target for an actor root. A target belongs to the root

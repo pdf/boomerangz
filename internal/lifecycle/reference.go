@@ -149,6 +149,10 @@ type referenceBackend interface {
 }
 
 func referenceRecords(state zfs.State, dataset, lineage string) ([]Reference, error) {
+	// A proof in an older format is not misread as an invalid one.
+	if err := recordsReadable(state, dataset); err != nil {
+		return nil, err
+	}
 	var refs []Reference
 	seen := map[string]bool{}
 	for _, p := range state.Properties {

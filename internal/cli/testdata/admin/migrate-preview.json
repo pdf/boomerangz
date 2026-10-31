@@ -1,0 +1,25 @@
+[
+  {
+    "dataset": "backup",
+    "status": "unmanaged",
+    "from": 0,
+    "to": 2,
+    "actions": null,
+    "blockers": null,
+    "applied": 0
+  },
+  {
+    "dataset": "tank",
+    "status": "pending",
+    "from": 1,
+    "to": 2,
+    "actions": [
+      {
+        "property": "org.boomerangz:state:version",
+        "value": "2"
+      }
+    ],
+    "blockers": null,
+    "applied": 0
+  }
+]

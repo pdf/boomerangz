@@ -275,6 +275,7 @@ func newReportPool(t *testing.T) (*memoryZFS, []zfs.Property) {
 		{Dataset: reportSource, Name: policy.Namespace + "local", Value: reportDestination, Source: zfs.SourceLocal},
 		{Dataset: reportSource, Name: lifecycle.LineageProperty, Value: reportLineage, Source: zfs.SourceLocal},
 		{Dataset: reportSource, Name: lifecycle.OwnerProperty, Value: reportInstallation, Source: zfs.SourceLocal},
+		{Dataset: reportSource, Name: lifecycle.VersionProperty, Value: "2", Source: zfs.SourceLocal},
 	}
 	pool := &memoryZFS{
 		inventory: []zfs.Dataset{{Name: "tank", Type: zfs.Filesystem}, {Name: reportSource, Type: zfs.Filesystem, EncryptionRoot: "-"}, {Name: "backup", Type: zfs.Filesystem}},

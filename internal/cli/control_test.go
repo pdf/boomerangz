@@ -102,7 +102,7 @@ func TestControlCommandsUseRunningDaemon(t *testing.T) {
 		t.Fatalf("triggered=%v", runtime.triggered)
 	}
 	var cleanOutput bytes.Buffer
-	cleanArgs := []string{"dataset", "--config", configPath, "--config-dir", filepath.Join(dir, "missing"), "clean", "--apply", "--forget-target", "home-backup", "--forget-target", "backup/archive", "tank/data"}
+	cleanArgs := []string{"dataset", "--config", configPath, "--config-dir", filepath.Join(dir, "missing"), "clean", "--apply", "--json", "--forget-target", "home-backup", "--forget-target", "backup/archive", "tank/data"}
 	if err := runWithReader(t.Context(), cleanArgs, &cleanOutput, io.Discard, BuildInfo{}, nil); err != nil {
 		t.Fatal(err)
 	}

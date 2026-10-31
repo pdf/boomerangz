@@ -1,0 +1,21 @@
+[
+  {
+    "dataset": "tank/data",
+    "options": {
+      "recursive": false,
+      "destroy_owned_snapshots": false
+    },
+    "actions": [
+      {
+        "operation": "inherit",
+        "object": "tank/data",
+        "property": "org.boomerangz:enabled"
+      }
+    ],
+    "blockers": null,
+    "warnings": [
+      "inherit masks received properties; hidden received values may remain and can be restored externally"
+    ],
+    "applied": 0
+  }
+]

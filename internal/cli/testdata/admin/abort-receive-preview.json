@@ -1,0 +1,10 @@
+{
+  "dataset": "tank/home",
+  "target": "ssh://backup@example.net:22/pool/replicas",
+  "receives": [
+    "pool/replicas/home",
+    "pool/replicas/home/docs"
+  ],
+  "warning": "applying this plan discards the partially received data of each listed receive; the next transfer sends it again",
+  "applied": false
+}

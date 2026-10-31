@@ -68,8 +68,14 @@ Roughly bottom-up, in dependency order:
     replication targets from pruning.
   - `prune.go` - grid-driven retention decisions.
   - `inactive.go` - deactivation and delayed automatic retirement.
-  - `clean.go` - explicit, preview-first `dataset clean` planning/execution.
+  - `clean.go` - explicit, preview-first `dataset clean` planning/execution;
+    `forget.go` narrows it to one target (`--forget-target`).
+  - `version.go` - the state format marker (`state:version`) and the gate
+    that refuses a root in any other format.
   - `service.go` - the facade (`Service`) other packages call.
+- **migrate** - `boomerangz migrate`: moves a source root's state to the
+  current format one step at a time (`steps` in `migrate.go`, one file per
+  step). See "State format versions" below.
 - **transfer** - plans and executes replication jobs on top of `lifecycle`
   and `zfs`: `plan.go` (`Build` computes the send/receive plan),
   `local.go` (`Local` executor: `Preview`/`Apply`), `binding.go` (verifies a
@@ -229,11 +235,12 @@ ZFS-native recovery/ownership state - there is no separate database.
 
 | Property | Set by | Purpose |
 | --- | --- | --- |
+| `state:version` | `Service.CreateSnapshot` and `Service.AdoptDataset`, with the owner and lineage; `boomerangz migrate` | The format the root's state is written in, as a decimal integer ([internal/lifecycle/version.go](internal/lifecycle/version.go)). A format version, not a release. A root with state and no marker is format v1, which predates it. |
 | `state:owner` | `lifecycle.RootAuthority` callers (adoption, first management) | Installation UUID that owns a source root ([internal/lifecycle/authority.go](internal/lifecycle/authority.go), `OwnerProperty`). |
 | `state:lineage` | Same as above | Per-root lineage UUID, shared by the root's owned snapshots ([internal/lifecycle/ownership.go](internal/lifecycle/ownership.go), `LineageProperty`). |
 | `state:snapshot` | `lifecycle.Metadata.Properties()` at snapshot creation | Per-snapshot UUID embedded on the snapshot itself, not the dataset. The creation time is not stored: the snapshot name encodes it to the nanosecond, and `Ownership` reads it from there. |
 | `state:reference:<target-id>:<stream-id>:<snapshot-uuid>` | `Service.ProtectSet` | Recovery proof for one stream's endpoint on one target: the stream's own snapshot, plus its descendants' for a `-R` stream, each held and later bookmarked ([internal/lifecycle/reference.go](internal/lifecycle/reference.go)). One per member stream, so members at different instants advance independently. The value is fixed-size JSON `{stream, created, recursive}`: the stream relative to the root (omitted for the root's own), the snapshot's creation time (bookmarks carry only the UUID, so the snapshot name cannot be rebuilt without it), and whether the stream carries its subtree. Everything else is derived: the lineage is the root's, the target ID and snapshot UUID are in the key, and the endpoint's snapshots and GUIDs are read from ZFS by `Reference.Sources`. |
-| `state:target:<target-id>` | `transfer` binding logic | A source's persistent identity for one configured destination ([internal/transfer/binding.go](internal/transfer/binding.go)). The value is JSON `{version, pool_guid, mapped, anchor_guid, anchor}`: `mapped` is the mapped dataset the binding was made for, and `anchor` is stored only while bootstrapping, when it names the mapped dataset's nearest existing ancestor; after the first receive the binding moves to the replica, which `mapped` already names. The rest of the in-memory `TargetBinding` is what configuration says about the target and is rebuilt from it: the key hashes the canonical target, which also encodes the transport and destination root, and the pool and relative path follow from the anchor. |
+| `state:target:<target-id>` | `transfer` binding logic | A source's persistent identity for one configured destination ([internal/transfer/binding.go](internal/transfer/binding.go)). The value is JSON `{pool_guid, mapped, anchor_guid, anchor}`, in the root's format with no version of its own: `mapped` is the mapped dataset the binding was made for, and `anchor` is stored only while bootstrapping, when it names the mapped dataset's nearest existing ancestor; after the first receive the binding moves to the replica, which `mapped` already names. The rest of the in-memory `TargetBinding` is what configuration says about the target and is rebuilt from it: the key hashes the canonical target, which also encodes the transport and destination root, and the pool and relative path follow from the anchor. |
 | `state:target:<target-id>:suspended` | `transfer.SetTargetSuspended` | Marks a target unverified/suspended pending adoption revalidation. It stays separate from the binding because adoption suspends a remote it cannot reach, which may have no binding yet. |
 | `state:inactive` | `Service.ReconcileInactive` | JSON `InactiveMarker` recording when an owned root first went inactive, for delayed retirement ([internal/lifecycle/inactive.go](internal/lifecycle/inactive.go)). |
 
@@ -334,12 +341,49 @@ Cross-cutting rules that hold across all of these:
   are dynamic (per target/snapshot) and are only read per-dataset via
   `GetStoredProperties`'s `all`-property query when a specific dataset is
   already in scope for other reasons.
+- **State is read only in the format its root says it is in.**
+  `RootAuthority` refuses a root whose `state:version` is not
+  `lifecycle.CurrentVersion`, after the owner and lineage checks, so every
+  snapshot, prune, transfer and retirement stops on an unmigrated root with
+  an error naming `boomerangz migrate`; clean and `--forget-target` block on
+  one that keeps records, and adoption refuses to stamp the current format
+  over records in an older one. See "State format versions" below.
 - **Clean and retirement inherit (never destroy) these properties as the
   final step**, after the underlying holds/bookmarks/snapshots they
   describe have already been resolved (`backend.InheritProperty` in
   clean.go:336, inactive.go:207) - the property is a proof *about* ZFS
   state, so it is only cleared once nothing depends on being able to
   reconstruct that proof again.
+
+### State format versions (`internal/migrate`)
+
+The `state:*` records are versioned per source root by `state:version`, not
+per record. A format version changes only when what boomerangz stores does,
+and is unrelated to release numbers. Format v1 is everything written before
+the marker existed; v2 has fixed-size proofs and slim bindings.
+
+`boomerangz migrate [DATASET...|--all]` moves roots to the current format.
+It previews by default, and `--apply` needs the daemon stopped, takes the
+lifecycle lock, re-plans and compares, and writes each property only while it
+still holds the value the plan read. Each step (`step` in `migrate.go`)
+decodes one format and encodes the next with its own frozen copies of both,
+never the live encoders, which would write a later format once there is one
+and stamp it as the step's. The runner alone checks the end of the chain
+against the live decoders. A step leaves records already in its target
+format alone and the marker is written last, so an interrupted run leaves
+the root in its old format and a repeated run finishes it. Steps are kept
+indefinitely. `--all` selects every dataset with a local owner, proof or
+binding; a member or an unmanaged dataset has no format and is never given
+one.
+
+The v1 to v2 step rewrites each proof from its listed sources to
+`{stream, created, recursive}`, checking every listed GUID against the
+snapshot and bookmark that still exist, and each binding to the slim form.
+Keys, holds and bookmark names are the same in both formats, so nothing
+else changes. v1 snapshots also carry `state:created`, which v2 never reads;
+it is left to age out with the snapshots. `internal/migrate/testdata` holds
+v1 state as main's own code wrote it, and `TestGuestStateMigration` migrates
+a real root and replicates on from it incrementally.
 
 ## Scheduler behavior (`internal/daemon/scheduler.go`)
 

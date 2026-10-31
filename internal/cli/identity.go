@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +20,15 @@ type recoveryRoot struct {
 	Dataset string `json:"dataset"`
 	Owner   string `json:"owner"`
 	Lineage string `json:"lineage"`
+}
+
+// recoveryResult is the identity a recovery replaces, the one it restores,
+// and the roots that are the evidence for it.
+type recoveryResult struct {
+	Current   string         `json:"current"`
+	Recovered string         `json:"recovered"`
+	Roots     []recoveryRoot `json:"roots"`
+	Applied   bool           `json:"applied"`
 }
 
 func localMarker(rows []zfs.Property, dataset, name string) (string, error) {
@@ -95,7 +103,7 @@ func recoveryInventory(ctx context.Context, reader discovery.Reader, executor zf
 	return roots, allOwners, nil
 }
 
-func runIdentityRecover(ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, selected string, apply bool) (resultErr error) {
+func runIdentityRecover(ctx context.Context, out io.Writer, cfg config.Config, reader discovery.Reader, executor zfs.Executor, selected string, apply, jsonOutput bool) (resultErr error) {
 	if selected != "" && !identity.Valid(selected) {
 		return fmt.Errorf("--owner must be a canonical UUID")
 	}
@@ -149,12 +157,9 @@ func runIdentityRecover(ctx context.Context, out io.Writer, cfg config.Config, r
 			return err
 		}
 	}
-	encoder := json.NewEncoder(out)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(struct {
-		Current   string         `json:"current"`
-		Recovered string         `json:"recovered"`
-		Roots     []recoveryRoot `json:"roots"`
-		Applied   bool           `json:"applied"`
-	}{current, selected, selectedRoots, apply})
+	result := recoveryResult{current, selected, selectedRoots, apply}
+	if jsonOutput {
+		return writeJSON(out, result)
+	}
+	return writeRecovery(out, result, apply)
 }

@@ -58,6 +58,15 @@ permission check.
 | `boomerangz dataset abort-receive DATASET TARGET` | Preview discarding the interrupted receives that a local destination root or named remote holds for one actor root and its members; `--apply` performs the revalidated plan. The replica, its snapshots, the binding and the source's replication history stay. A member, or a destination blocked by a collision, is refused. |
 | `boomerangz dataset clean [DATASET...]` | Preview decommissioning. Use `--recursive`, `--all`, `--destroy-owned-snapshots`, `--forget-target TARGET`, and `--apply` as needed. |
 | `boomerangz identity recover` | Preview recovery. `--owner UUID` resolves multiple candidates; `--apply` performs the revalidated plan. |
+| `boomerangz migrate [DATASET...]` | Preview moving source roots' state to the format this build reads. `--all` selects every dataset that keeps state; `--apply` performs the revalidated plan and requires the daemon to be stopped. |
+
+`dataset adopt`, `dataset reseed`, `dataset abort-receive`, `dataset clean`,
+`identity recover` and `migrate` print a readable plan: every action with the
+object and property it changes, every blocker, every warning, and what was
+applied, ending with a reminder that a preview changed nothing. Each takes
+`--json` to print the same plan as indented JSON instead, which is the form for
+scripts. The JSON carries the same fields as before these commands had a
+readable form; text output is for reading and may change between releases.
 
 `dataset clean --all` cannot be combined with dataset arguments. Named datasets
 are exact unless `--recursive` is supplied. Snapshot destruction is never

@@ -15,6 +15,7 @@ import (
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/control"
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
+	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/statusui"
 	"golang.org/x/term"
 )
@@ -136,7 +137,7 @@ func runConfigReload(ctx context.Context, out io.Writer, socket string) error {
 	}{Generation: response.GetGeneration(), Applied: response.GetApplied(), RestartRequired: response.GetRestartRequired()})
 }
 
-func runDaemonClean(ctx context.Context, out io.Writer, cfg config.Config, names []string, recursive, all, destroy bool, forget []string, apply bool) (bool, error) {
+func runDaemonClean(ctx context.Context, out io.Writer, cfg config.Config, names []string, recursive, all, destroy bool, forget []string, apply, jsonOutput bool) (bool, error) {
 	_, err := os.Lstat(cfg.Paths.SocketPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -153,36 +154,20 @@ func runDaemonClean(ctx context.Context, out io.Writer, cfg config.Config, names
 	if err != nil {
 		return true, err
 	}
-	type action struct {
-		Operation string `json:"operation"`
-		Object    string `json:"object"`
-		Property  string `json:"property,omitempty"`
-		GUID      uint64 `json:"guid,omitempty"`
-	}
-	type options struct {
-		Recursive bool     `json:"recursive"`
-		Destroy   bool     `json:"destroy_owned_snapshots"`
-		Forget    []string `json:"forget_targets,omitempty"`
-	}
-	type plan struct {
-		Dataset  string   `json:"dataset"`
-		Options  options  `json:"options"`
-		Actions  []action `json:"actions"`
-		Blockers []string `json:"blockers"`
-		Warnings []string `json:"warnings"`
-		Applied  uint32   `json:"applied"`
-	}
-	plans := make([]plan, 0, len(response.GetPlans()))
+	plans := make([]lifecycle.CleanPlan, 0, len(response.GetPlans()))
 	for _, source := range response.GetPlans() {
-		item := plan{Dataset: source.GetDataset(), Options: options{Recursive: source.GetRecursive(), Destroy: source.GetDestroyOwnedSnapshots(), Forget: source.GetForgetTargets()}, Blockers: source.GetBlockers(), Warnings: source.GetWarnings(), Applied: source.GetApplied()}
+		item := lifecycle.CleanPlan{Dataset: source.GetDataset(), Options: lifecycle.CleanOptions{Recursive: source.GetRecursive(), DestroyOwnedSnapshots: source.GetDestroyOwnedSnapshots(), ForgetTargets: source.GetForgetTargets()}, Blockers: source.GetBlockers(), Warnings: source.GetWarnings(), Applied: int(source.GetApplied())}
 		for _, sourceAction := range source.GetActions() {
-			item.Actions = append(item.Actions, action{sourceAction.GetOperation(), sourceAction.GetObject(), sourceAction.GetProperty(), sourceAction.GetGuid()})
+			item.Actions = append(item.Actions, lifecycle.CleanAction{Operation: sourceAction.GetOperation(), Object: sourceAction.GetObject(), Property: sourceAction.GetProperty(), GUID: sourceAction.GetGuid()})
 		}
 		plans = append(plans, item)
 	}
-	encoder := json.NewEncoder(out)
-	encoder.SetIndent("", "  ")
-	encodeErr := encoder.Encode(plans)
+	var encodeErr error
+	if jsonOutput {
+		encodeErr = writeJSON(out, plans)
+	} else {
+		encodeErr = writeCleanPlans(out, plans, apply)
+	}
 	if response.GetError() != "" {
 		return true, errors.Join(errors.New(response.GetError()), encodeErr)
 	}

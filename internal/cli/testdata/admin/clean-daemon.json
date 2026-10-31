@@ -1,0 +1,17 @@
+[
+  {
+    "dataset": "tank/data",
+    "options": {
+      "recursive": false,
+      "destroy_owned_snapshots": false,
+      "forget_targets": [
+        "home-backup",
+        "backup/archive"
+      ]
+    },
+    "actions": null,
+    "blockers": null,
+    "warnings": null,
+    "applied": 1
+  }
+]
