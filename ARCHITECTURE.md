@@ -470,7 +470,10 @@ every mutation - `signal()` - to release whichever goroutine is blocked in
   again inside the same attempt (`applySettled`, at most
   `preparationAttempts` times) rather than failing it with
   `PreparationChangedError`; a snapshot landing after preparation is the next
-  run's, through the job's dirty flag.
+  run's, through the job's dirty flag. Only a stream's endpoints and base are
+  held, so a prune after preparation may still destroy a `send -I`
+  intermediate before it is sent; verification then expects only the
+  intermediates the source still has (`settleIntermediates`).
 
 ## Protobuf / gRPC surface
 

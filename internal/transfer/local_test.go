@@ -27,6 +27,8 @@ type localBackend struct {
 	checks      map[string][]string
 	checkErr    error
 	afterSet    func()
+	// beforeSend runs once, when the stream's send is estimated.
+	beforeSend func()
 	// inspections records every InspectState call as dataset, recursive.
 	inspections []string
 	// poolGUID distinguishes another host's backup pool; zero is this host's.
@@ -181,7 +183,36 @@ func (b *localBackend) DestroyBookmark(_ context.Context, bookmark string) error
 }
 
 func (b *localBackend) EstimateSend(context.Context, zfs.SendOptions) (zfs.Estimate, error) {
+	if b.beforeSend != nil {
+		before := b.beforeSend
+		b.beforeSend = nil
+		before()
+	}
 	return zfs.Estimate{Bytes: 123}, nil
+}
+
+// intermediateStream receives what send -I would carry: every snapshot of the
+// source between the base and the endpoint that exists when the send runs.
+type intermediateStream struct{ backend *localBackend }
+
+func (s intermediateStream) Run(_ context.Context, send zfs.SendOptions, receive zfs.ReceiveOptions, estimate zfs.Estimate, _ func(zfs.Progress)) (zfs.Progress, error) {
+	s.backend.writes = append(s.backend.writes, "stream")
+	objects := objectMap(s.backend.source)
+	base, endpoint := objects[send.Base], objects[send.Snapshot]
+	for _, object := range s.backend.source.Objects {
+		if object.Type != "snapshot" || object.CreateTXG <= base.CreateTXG || object.CreateTXG > endpoint.CreateTXG {
+			continue
+		}
+		received := receive.Root + strings.TrimPrefix(object.Name, send.Source)
+		s.backend.destination.Objects = append(s.backend.destination.Objects, zfs.Object{Name: received, Type: "snapshot", GUID: object.GUID, CreateTXG: 200 + object.CreateTXG})
+		for _, property := range s.backend.source.Properties {
+			if property.Dataset == object.Name {
+				property.Dataset = received
+				s.backend.destination.Properties = append(s.backend.destination.Properties, property)
+			}
+		}
+	}
+	return zfs.Progress{Bytes: estimate.Bytes}, nil
 }
 
 type localTestStream struct {
@@ -491,6 +522,62 @@ func TestApplyBoundsPlanningAgainWhileHistoryKeepsMoving(t *testing.T) {
 	if slices.Contains(backend.writes, "stream") {
 		t.Fatal("stream started while its history was still moving")
 	}
+}
+
+// A send -I carries the intermediates that exist when it runs. The root's
+// prune job locks the root, not the target, so it may destroy one after
+// preparation; that one was never sent, and is not missing from the replica.
+func TestApplyVerifiesIntermediatesPrunedBeforeTheSend(t *testing.T) {
+	t.Parallel()
+	request, view := testFixture(t)
+	addDestinationBase(&view)
+	intermediate := view.Source.Objects[2].Name
+	endpoint := addOwnedSnapshot(t, &view.Source, 6)
+	backend := &localBackend{inventory: slices.Clone(view.Inventory), source: view.Source, destination: view.Destination, destExists: true}
+	backend.beforeSend = func() {
+		backend.source.Objects = slices.DeleteFunc(backend.source.Objects, func(object zfs.Object) bool { return object.Name == intermediate })
+	}
+	engine, err := NewLocal(backend, intermediateStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Apply(t.Context(), request, nil)
+	if err != nil || !result.Verified || result.Plan.Snapshot != endpoint || !result.Plan.Send.Intermediates {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if slices.ContainsFunc(result.Plan.Expected, func(expected Expected) bool { return expected.Source == intermediate }) {
+		t.Fatalf("pruned intermediate still expected: %+v", result.Plan.Expected)
+	}
+}
+
+// An intermediate the source still has must arrive.
+func TestApplyRefusesIntermediateMissingFromTheReplica(t *testing.T) {
+	t.Parallel()
+	request, view := testFixture(t)
+	addDestinationBase(&view)
+	intermediate := view.Source.Objects[2].Name
+	addOwnedSnapshot(t, &view.Source, 6)
+	backend := &localBackend{inventory: slices.Clone(view.Inventory), source: view.Source, destination: view.Destination, destExists: true}
+	stream := droppingStream{intermediateStream{backend: backend}, "backup/data" + strings.TrimPrefix(intermediate, "tank/data")}
+	engine, err := NewLocal(backend, stream, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := engine.Apply(t.Context(), request, nil); err == nil || result.Verified {
+		t.Fatalf("replica missing an intermediate verified: result=%+v err=%v", result, err)
+	}
+}
+
+// droppingStream loses one received snapshot.
+type droppingStream struct {
+	intermediateStream
+	lost string
+}
+
+func (s droppingStream) Run(ctx context.Context, send zfs.SendOptions, receive zfs.ReceiveOptions, estimate zfs.Estimate, report func(zfs.Progress)) (zfs.Progress, error) {
+	progress, err := s.intermediateStream.Run(ctx, send, receive, estimate, report)
+	s.backend.destination.Objects = slices.DeleteFunc(s.backend.destination.Objects, func(object zfs.Object) bool { return object.Name == s.lost })
+	return progress, err
 }
 
 func TestApplyChecksBothEndpointsBeforeMutation(t *testing.T) {

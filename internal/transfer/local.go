@@ -822,6 +822,11 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 		}
 	}
 	destination = ownTokens(destination, plan.Destination, plan.Send.Recursive)
+	plan, err = l.settleIntermediates(ctx, plan, destination)
+	if err != nil {
+		return result, err
+	}
+	result.Plan = plan
 	if err := verifyGUIDs(plan, destination); err != nil {
 		return result, err
 	}
@@ -1036,6 +1041,41 @@ func (l *Local) adoptPlaceholderChildren(ctx context.Context, request Request, s
 		}
 	}
 	return replicas.DestroyDataset(ctx, aside, false)
+}
+
+// settleIntermediates leaves out of plan.Expected each intermediate of a send -I
+// that neither end has. Only endpoints and the base are held, and the root's
+// prune job locks the root, not the target, so it may destroy an intermediate
+// after preparation read it; send -I then carries the intermediates that still
+// exist, and one gone from the source was never sent. An intermediate the
+// source still has must have arrived. The source is read only when the replica
+// lacks one.
+func (l *Local) settleIntermediates(ctx context.Context, plan Plan, destination zfs.State) (Plan, error) {
+	if !plan.Send.Intermediates {
+		return plan, nil
+	}
+	received := objectMap(destination)
+	endpoints := make(map[string]bool, len(plan.Endpoints))
+	for _, endpoint := range plan.Endpoints {
+		endpoints[endpoint.Source] = true
+	}
+	absent := func(expected Expected) bool {
+		_, arrived := received[expected.Destination]
+		return !arrived && !endpoints[expected.Source]
+	}
+	if !slices.ContainsFunc(plan.Expected, absent) {
+		return plan, nil
+	}
+	source, err := l.backend.InspectState(ctx, plan.Send.Source, plan.Send.Recursive)
+	if err != nil {
+		return plan, err
+	}
+	remaining := objectMap(source)
+	plan.Expected = slices.DeleteFunc(slices.Clone(plan.Expected), func(expected Expected) bool {
+		_, kept := remaining[expected.Source]
+		return absent(expected) && !kept
+	})
+	return plan, nil
 }
 
 func verifyGUIDs(plan Plan, state zfs.State) error {
