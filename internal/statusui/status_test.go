@@ -149,3 +149,53 @@ func TestTailNamesWhatEachTransitionActedOn(t *testing.T) {
 		}
 	}
 }
+
+func TestTerminalAndJSONReportDestinationPermissionWarnings(t *testing.T) {
+	t.Parallel()
+	snapshot := &controlrpc.StatusSnapshot{Destinations: []*controlrpc.DestinationPermissions{
+		{Destination: "offsite", Remote: true, Error: "list destination datasets: connection refused"},
+		{Destination: "backup/boomerangz", Dataset: "backup/boomerangz", Account: "boomerangz", Missing: []string{"canmount", "rename"}},
+		{Destination: "backup/complete", Dataset: "backup/complete"},
+	}}
+	var terminal bytes.Buffer
+	// Warnings are never cut to width: the operator needs every name.
+	if err := Terminal(&terminal, snapshot, 24); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"WARNINGS\nlocal destination backup/boomerangz: boomerangz lacks delegated ZFS permissions on backup/boomerangz: canmount,rename\n",
+		"remote destination offsite: permissions not checked: list destination datasets: connection refused\n",
+	} {
+		if !strings.Contains(terminal.String(), want) {
+			t.Fatalf("terminal output = %q, want %q", terminal.String(), want)
+		}
+	}
+	if strings.Contains(terminal.String(), "backup/complete") {
+		t.Fatalf("a destination with nothing missing was warned about: %q", terminal.String())
+	}
+	var structured bytes.Buffer
+	if err := JSON(&structured, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Destinations []struct {
+			Destination string   `json:"destination"`
+			Remote      bool     `json:"remote"`
+			Missing     []string `json:"missing"`
+			Error       string   `json:"error"`
+		} `json:"destinations"`
+	}
+	if err := json.Unmarshal(structured.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Destinations) != 3 || decoded.Destinations[0].Destination != "backup/boomerangz" || !slices.Equal(decoded.Destinations[0].Missing, []string{"canmount", "rename"}) || decoded.Destinations[2].Destination != "offsite" || !decoded.Destinations[2].Remote || decoded.Destinations[2].Error == "" {
+		t.Fatalf("JSON destinations = %+v", decoded.Destinations)
+	}
+	structured.Reset()
+	if err := JSON(&structured, &controlrpc.StatusSnapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(structured.String(), `"destinations":[]`) {
+		t.Fatalf("JSON before any check = %s", structured.String())
+	}
+}

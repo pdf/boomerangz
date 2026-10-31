@@ -47,6 +47,15 @@ and named permission sets. Remote checks run on the receiving endpoint, so local
 restricted-shell, direct-SSH, and native destinations apply the same rules to
 their actual execution account.
 
+Each operation checks only what it needs, so a destination missing a
+permission that only a rare operation uses, such as `rename` for placeholder
+replacement, would otherwise work until that operation runs. The daemon
+therefore also checks each destination against the full set above, plus any
+receive-property permissions your policies need, when it first reaches the
+destination, and reports what is missing as a warning in `boomerangz status`
+and in its log. See
+[Destination permissions](/operations/#destination-permissions).
+
 ## SSH
 
 - use the packaged `boomerangz` account and its

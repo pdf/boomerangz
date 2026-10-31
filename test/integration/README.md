@@ -107,6 +107,8 @@ failure attributable to the transport instead of to the test.
 | One root job snapshotting the root and its member atomically; excluding the member stops its snapshots without marking it inactive; retiring the root clears the whole subtree - checked against the snapshots, marker action, and destroyed snapshots the jobs name | `TestGuestDaemonSchedulingAndRetirement` |
 | Independent roots sharing a target: setup serialized while they share a destination ancestor, the held job reporting `waiting-lock`; concurrent once established; a member sent after its root within the root's job; triggering a member names its root | `TestGuestLocalTransferConcurrency` |
 | Remote outage: `waiting-retry` with reason retained, pending-snapshot coalescing, reconnection, canonical target identity | `TestGuestRemoteOutageReconnection` |
+| A local destination missing `rename` reported in status from its real delegation, account and dataset named, while transfers there go on | `TestGuestDaemonReportsMissingDestinationPermissions` |
+| A remote's delegation checked through the endpoint that opens after an outage, over the real transport | `TestGuestRemoteOutageReconnection` |
 | Daemon-driven native replication through an imported pairing credential | `TestGuestDaemonNativeReplication` |
 | `prune:<dataset>` jobs reaching `succeeded`, and destroying what falls outside the grid | `TestGuestDaemonPruneJob` |
 | Retry and backoff state sequence, rather than its endpoints | `TestGuestDaemonRemoteBackoff` |

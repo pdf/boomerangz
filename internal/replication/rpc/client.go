@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/pdf/boomerangz/internal/zfs"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ErrorMapper lets a transport classify connection failures without coupling
@@ -82,6 +84,13 @@ func (e *clientExecutor) InspectState(ctx context.Context, dataset string, recur
 
 func (e *clientExecutor) CheckPermissions(ctx context.Context, dataset string, permissions []string) error {
 	_, err := e.client.remote.CheckPermissions(ctx, &CheckPermissionsRequest{Dataset: dataset, Permissions: slices.Clone(permissions)})
+	if failed, ok := status.FromError(err); ok && failed.Code() == codes.FailedPrecondition {
+		for _, detail := range failed.Details() {
+			if missing, ok := detail.(*MissingPermissions); ok {
+				return &zfs.MissingPermissionsError{Account: missing.GetAccount(), Dataset: missing.GetDataset(), Missing: slices.Clone(missing.GetPermissions())}
+			}
+		}
+	}
 	return e.client.mapError(err)
 }
 

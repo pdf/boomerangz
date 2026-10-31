@@ -99,6 +99,11 @@ setup() {
 	# placeholder with its dataset's own replica needs.
 	zfs allow -u "$service_user" bookmark,change-key,create,destroy,encryption,hold,keyformat,keylocation,load-key,mount,pbkdf2iters,refreservation,release,send,snapshot,userprop,volblocksize,volsize "$source_pool/data"
 	zfs allow -u "$service_user" canmount,compression,create,destroy,encryption,keyformat,keylocation,load-key,mount,mountpoint,pbkdf2iters,quota,readonly,rename,receive,receive:append,snapshot,userprop "$destination_pool/data"
+	# limited holds every destination permission boomerangz needs except
+	# rename, which only placeholder replacement exercises: the daemon must
+	# report it missing at startup while its transfers there go on.
+	zfs create -o mountpoint=none "$destination_pool/limited"
+	zfs allow -u "$service_user" canmount,create,destroy,mount,receive:append,userprop "$destination_pool/limited"
 	if [[ $direct_ssh_user != "$service_user" ]]; then
 		# Direct SSH runs ZFS as the remote login identity. Grant that dedicated,
 		# non-administrative account destination permissions only.

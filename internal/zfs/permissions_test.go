@@ -2,7 +2,9 @@ package zfs
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -76,6 +78,10 @@ func TestCheckPermissionsReportsSortedMissingPermissions(t *testing.T) {
 	err = direct.CheckPermissions(t.Context(), "tank/data", []string{"userprop", "send", "hold"})
 	if err == nil || err.Error() != "effective account boomerangz lacks delegated ZFS permissions on tank/data: hold,userprop" {
 		t.Fatalf("error = %v", err)
+	}
+	var missing *MissingPermissionsError
+	if !errors.As(err, &missing) || missing.Account != "boomerangz" || missing.Dataset != "tank/data" || !slices.Equal(missing.Missing, []string{"hold", "userprop"}) {
+		t.Fatalf("missing permissions = %#v", missing)
 	}
 }
 

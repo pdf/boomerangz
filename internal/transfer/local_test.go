@@ -443,7 +443,7 @@ func TestApplyChecksBothEndpointsBeforeMutation(t *testing.T) {
 	if len(source.writes) != 0 || len(destination.writes) != 0 {
 		t.Fatalf("preflight failure followed by mutation: source=%v destination=%v", source.writes, destination.writes)
 	}
-	if !slices.Equal(source.checks[request.Source], sourcePermissions) {
+	if !slices.Equal(source.checks[request.Source], sendPermissions) {
 		t.Fatalf("source permissions = %v", source.checks[request.Source])
 	}
 	wantDestination := []string{"canmount", "create", "destroy", "mount", "readonly", "receive:append", "userprop"}

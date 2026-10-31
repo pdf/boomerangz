@@ -140,6 +140,19 @@ func TestJobStatusCarriesEveryIdentityField(t *testing.T) {
 	}
 }
 
+func TestStatusSnapshotCarriesDestinationPermissions(t *testing.T) {
+	t.Parallel()
+	checked := time.Unix(1700000000, 5).UTC()
+	got := toSnapshot(daemonstate.ControlSnapshot{Destinations: []daemonstate.DestinationPermissions{
+		{Destination: "offsite", Remote: true, Dataset: "tank/backups", Account: "boomerangz", Missing: []string{"rename"}, Error: "", Checked: checked},
+		{Destination: "backup/off", Error: "no existing dataset", Checked: checked},
+	}}).GetDestinations()
+	if len(got) != 2 || got[0].GetDestination() != "offsite" || !got[0].GetRemote() || got[0].GetDataset() != "tank/backups" || got[0].GetAccount() != "boomerangz" ||
+		!reflect.DeepEqual(got[0].GetMissing(), []string{"rename"}) || got[0].GetCheckedUnixNano() != checked.UnixNano() || got[1].GetError() != "no existing dataset" || got[1].GetRemote() {
+		t.Fatalf("destinations = %v", got)
+	}
+}
+
 func TestWatchStatusSendsEachUpdateWithItsTransitions(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

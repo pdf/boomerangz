@@ -137,7 +137,14 @@ func (s *Server) CheckPermissions(ctx context.Context, request *CheckPermissions
 		return nil, status.Error(codes.PermissionDenied, "dataset is outside the configured destination scope")
 	}
 	if err := s.backend.CheckPermissions(ctx, request.GetDataset(), slices.Clone(request.GetPermissions())); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
+		failed := status.New(codes.FailedPrecondition, err.Error())
+		var missing *zfs.MissingPermissionsError
+		if errors.As(err, &missing) {
+			if detailed, detailErr := failed.WithDetails(&MissingPermissions{Account: missing.Account, Dataset: missing.Dataset, Permissions: slices.Clone(missing.Missing)}); detailErr == nil {
+				failed = detailed
+			}
+		}
+		return nil, failed.Err()
 	}
 	return &CheckPermissionsResponse{}, nil
 }

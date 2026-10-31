@@ -9,8 +9,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"errors"
 	"math/big"
 	"net"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -33,7 +35,15 @@ func (testBackend) InspectDatasetIdentity(_ context.Context, dataset string) (zf
 func (testBackend) InspectState(context.Context, string, bool) (zfs.State, error) {
 	return zfs.State{Received: map[string]map[string]string{}, ResumeTokens: map[string]string{}}, nil
 }
-func (testBackend) CheckPermissions(context.Context, string, []string) error       { return nil }
+
+// CheckPermissions grants everything but rename, so a check can show the
+// missing permissions crossing the transport.
+func (testBackend) CheckPermissions(_ context.Context, dataset string, permissions []string) error {
+	if slices.Contains(permissions, "rename") {
+		return &zfs.MissingPermissionsError{Account: "boomerangz", Dataset: dataset, Missing: []string{"rename"}}
+	}
+	return nil
+}
 func (testBackend) SetProperties(context.Context, string, map[string]string) error { return nil }
 func (testBackend) InheritProperty(context.Context, string, string) error          { return nil }
 func (testBackend) AbortReceive(context.Context, string) error                     { return nil }
@@ -93,6 +103,10 @@ func TestAuthenticatedNativeEndpointNegotiatesSharedService(t *testing.T) {
 	}
 	if err := endpoint.Executor().CheckPermissions(ctx, "tank/a", []string{"receive:append"}); err != nil {
 		t.Fatalf("permission preflight: %v", err)
+	}
+	var missing *zfs.MissingPermissionsError
+	if err := endpoint.Executor().CheckPermissions(ctx, "tank/a", []string{"receive:append", "rename"}); !errors.As(err, &missing) || missing.Account != "boomerangz" || missing.Dataset != "tank/a" || !slices.Equal(missing.Missing, []string{"rename"}) {
+		t.Fatalf("missing permission preflight: %v", err)
 	}
 	reseed, ok := endpoint.Executor().(zfs.ReseedExecutor)
 	if !ok {
