@@ -1,0 +1,22 @@
+#!/bin/sh
+
+set -e
+
+shell_path=/usr/lib/boomerangz/boomerangz-shell
+
+# Removal and purge leave the account, /var/lib/boomerangz and the identity in
+# it alone: they are what a reinstall needs to continue as the same
+# installation. Purge removes the dpkg-owned configuration only.
+case "$1" in
+remove)
+	remove-shell "$shell_path"
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload || true
+	fi
+	;;
+purge)
+	rm -f /etc/systemd/system/multi-user.target.wants/boomerangz.service
+	;;
+esac
+
+exit 0

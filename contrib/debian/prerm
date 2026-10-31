@@ -1,0 +1,16 @@
+#!/bin/sh
+
+set -e
+
+# The service is never enabled or started by the package, but one the operator
+# started must not outlive its executable. An upgrade leaves it running; the
+# upgrade notes say when it must be stopped first.
+case "$1" in
+remove)
+	if [ -d /run/systemd/system ]; then
+		systemctl stop boomerangz.service || true
+	fi
+	;;
+esac
+
+exit 0
