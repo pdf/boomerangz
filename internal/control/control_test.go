@@ -77,8 +77,8 @@ func (f *fakeRuntime) Trigger(names []string) ([]string, error) {
 	return names, nil
 }
 func (*fakeRuntime) Reconcile() {}
-func (*fakeRuntime) Clean(_ context.Context, names []string, recursive, _, destroy, apply bool) ([]lifecycle.CleanPlan, error) {
-	return []lifecycle.CleanPlan{{Dataset: names[0], Options: lifecycle.CleanOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy}, Applied: map[bool]int{true: 1}[apply]}}, nil
+func (*fakeRuntime) Clean(_ context.Context, names []string, recursive, _, destroy bool, forget []string, apply bool) ([]lifecycle.CleanPlan, error) {
+	return []lifecycle.CleanPlan{{Dataset: names[0], Options: lifecycle.CleanOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy, ForgetTargets: forget}, Applied: map[bool]int{true: 1}[apply]}}, nil
 }
 
 func TestUnixControlAPI(t *testing.T) {
@@ -113,8 +113,8 @@ func TestUnixControlAPI(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(trigger.GetAccepted(), []string{"tank/data"}) {
 		t.Fatalf("trigger=%v err=%v", trigger, err)
 	}
-	clean, err := client.Control.Clean(t.Context(), &controlrpc.CleanRequest{Datasets: []string{"tank/data"}, Apply: true})
-	if err != nil || clean.GetPlans()[0].GetApplied() != 1 {
+	clean, err := client.Control.Clean(t.Context(), &controlrpc.CleanRequest{Datasets: []string{"tank/data"}, ForgetTargets: []string{"gone"}, Apply: true})
+	if err != nil || clean.GetPlans()[0].GetApplied() != 1 || !reflect.DeepEqual(clean.GetPlans()[0].GetForgetTargets(), []string{"gone"}) {
 		t.Fatalf("clean=%v err=%v", clean, err)
 	}
 	reload, err := client.Control.Reload(t.Context(), &controlrpc.ReloadRequest{})

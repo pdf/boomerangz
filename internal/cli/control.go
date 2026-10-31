@@ -136,7 +136,7 @@ func runConfigReload(ctx context.Context, out io.Writer, socket string) error {
 	}{Generation: response.GetGeneration(), Applied: response.GetApplied(), RestartRequired: response.GetRestartRequired()})
 }
 
-func runDaemonClean(ctx context.Context, out io.Writer, cfg config.Config, names []string, recursive, all, destroy, apply bool) (bool, error) {
+func runDaemonClean(ctx context.Context, out io.Writer, cfg config.Config, names []string, recursive, all, destroy bool, forget []string, apply bool) (bool, error) {
 	_, err := os.Lstat(cfg.Paths.SocketPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -149,7 +149,7 @@ func runDaemonClean(ctx context.Context, out io.Writer, cfg config.Config, names
 		return true, fmt.Errorf("connect to daemon control socket: %w", err)
 	}
 	defer func() { _ = client.Connection.Close() }()
-	response, err := client.Control.Clean(ctx, &controlrpc.CleanRequest{Datasets: names, Recursive: recursive, All: all, DestroyOwnedSnapshots: destroy, Apply: apply})
+	response, err := client.Control.Clean(ctx, &controlrpc.CleanRequest{Datasets: names, Recursive: recursive, All: all, DestroyOwnedSnapshots: destroy, ForgetTargets: forget, Apply: apply})
 	if err != nil {
 		return true, err
 	}
@@ -160,8 +160,9 @@ func runDaemonClean(ctx context.Context, out io.Writer, cfg config.Config, names
 		GUID      uint64 `json:"guid,omitempty"`
 	}
 	type options struct {
-		Recursive bool `json:"recursive"`
-		Destroy   bool `json:"destroy_owned_snapshots"`
+		Recursive bool     `json:"recursive"`
+		Destroy   bool     `json:"destroy_owned_snapshots"`
+		Forget    []string `json:"forget_targets,omitempty"`
 	}
 	type plan struct {
 		Dataset  string   `json:"dataset"`
@@ -173,7 +174,7 @@ func runDaemonClean(ctx context.Context, out io.Writer, cfg config.Config, names
 	}
 	plans := make([]plan, 0, len(response.GetPlans()))
 	for _, source := range response.GetPlans() {
-		item := plan{Dataset: source.GetDataset(), Options: options{Recursive: source.GetRecursive(), Destroy: source.GetDestroyOwnedSnapshots()}, Blockers: source.GetBlockers(), Warnings: source.GetWarnings(), Applied: source.GetApplied()}
+		item := plan{Dataset: source.GetDataset(), Options: options{Recursive: source.GetRecursive(), Destroy: source.GetDestroyOwnedSnapshots(), Forget: source.GetForgetTargets()}, Blockers: source.GetBlockers(), Warnings: source.GetWarnings(), Applied: source.GetApplied()}
 		for _, sourceAction := range source.GetActions() {
 			item.Actions = append(item.Actions, action{sourceAction.GetOperation(), sourceAction.GetObject(), sourceAction.GetProperty(), sourceAction.GetGuid()})
 		}

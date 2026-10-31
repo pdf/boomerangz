@@ -12,7 +12,6 @@ import (
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
-	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
@@ -75,8 +74,7 @@ func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) 
 	const lineage = "22222222-2222-4222-8222-222222222222"
 	metadata := lifecycle.Metadata{Lineage: lineage, Snapshot: "33333333-3333-4333-8333-333333333333", Created: time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)}
 	canonical := "local:backup/data"
-	binding := transfer.TargetBinding{Version: 1, Transport: "local", CanonicalTarget: canonical, DestinationRoot: "backup/data", MappedDataset: "backup/data", Pool: "backup", PoolGUID: 90, Anchor: "backup/data", AnchorGUID: 91}
-	encoded, err := json.Marshal(binding)
+	encoded, err := json.Marshal(map[string]any{"version": 2, "pool_guid": 90, "mapped": "backup/data", "anchor_guid": 91})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,13 +90,14 @@ func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) 
 				{Dataset: "backup/data", Name: lifecycle.LineageProperty, Value: lineage, Source: zfs.SourceLocal},
 				{Dataset: owned, Name: lifecycle.LineageProperty, Value: lineage, Source: zfs.SourceLocal},
 				{Dataset: owned, Name: lifecycle.SnapshotProperty, Value: metadata.Snapshot, Source: zfs.SourceLocal},
-				{Dataset: owned, Name: lifecycle.CreatedProperty, Value: metadata.Created.Format(time.RFC3339Nano), Source: zfs.SourceLocal},
 			},
 		}},
 	}
 	runtime := &Runtime{backend: backend, installation: installation, config: config.Defaults()}
 	effective := policy.Effective{Local: []string{"backup/data"}, Discard: policy.DiscardOff}
-	reference := lifecycle.Reference{Target: canonical, Dataset: "tank/data", Metadata: metadata, Sources: []lifecycle.ReferenceSource{{Dataset: "tank/data", GUID: 20, Metadata: metadata}}}
+	reference := lifecycle.Reference{TargetID: lifecycle.TargetID(canonical), Dataset: "tank/data", Metadata: metadata}
+	// The source snapshot was pruned once checkpointed; its bookmark remains.
+	sourceState.Objects = append(sourceState.Objects, zfs.Object{Name: reference.BookmarkName(), Type: "bookmark", GUID: 20})
 	if err := runtime.retireReference(t.Context(), "tank/data", effective, sourceState, lineage, reference); err != nil {
 		t.Fatal(err)
 	}

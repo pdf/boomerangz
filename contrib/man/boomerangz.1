@@ -105,7 +105,19 @@ or
 .BR --all .
 Snapshots are retained unless
 .B --destroy-owned-snapshots
-is supplied. Add
+is supplied.
+.B --forget-target
+.I TARGET
+instead cleans only one target's state from each named source root, without
+checking the target: its recovery proofs, the holds and bookmarks they record,
+its binding and its suspension marker. Name the target by configured remote,
+local destination root, or the target ID a clean blocker reports; repeat the
+flag for more than one. It takes neither
+.BR --recursive ,
+.B --all
+nor
+.BR --destroy-owned-snapshots .
+Add
 .B --apply
 to apply after revalidation.
 .TP

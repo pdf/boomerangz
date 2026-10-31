@@ -11,12 +11,12 @@ import (
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
-// SnapshotPrefix and metadata keys define the ownership contract.
+// SnapshotPrefix and metadata keys define the ownership contract. The
+// creation time is part of the snapshot name, so it is not stored again.
 const (
 	SnapshotPrefix   = "boomerangz-"
 	LineageProperty  = policy.StateNamespace + "lineage"
 	SnapshotProperty = policy.StateNamespace + "snapshot"
-	CreatedProperty  = policy.StateNamespace + "created"
 	nameTimeFormat   = "20060102T150405.000000000Z"
 )
 
@@ -26,7 +26,8 @@ func NewID() (string, error) { return identity.New() }
 // ValidID accepts canonical UUIDs used as lineage and snapshot identities.
 func ValidID(value string) bool { return identity.Valid(value) }
 
-// Metadata is explicitly stored snapshot ownership information.
+// Metadata is snapshot ownership information: Lineage and Snapshot are stored
+// on the snapshot, and Created is read from its name.
 type Metadata struct {
 	Lineage  string    `json:"lineage"`
 	Snapshot string    `json:"snapshot"`
@@ -55,7 +56,7 @@ func (m Metadata) Name() string {
 
 // Properties returns a fresh map of metadata to attach at snapshot creation.
 func (m Metadata) Properties() map[string]string {
-	return map[string]string{LineageProperty: m.Lineage, SnapshotProperty: m.Snapshot, CreatedProperty: m.Created.UTC().Format(time.RFC3339Nano)}
+	return map[string]string{LineageProperty: m.Lineage, SnapshotProperty: m.Snapshot}
 }
 
 // Snapshot is the operational inventory needed for safe pruning. Properties
@@ -81,7 +82,7 @@ func Ownership(snapshot Snapshot, lineage string) (Metadata, error) {
 	}
 	values := make(map[string]string)
 	for _, property := range snapshot.Properties {
-		if property.Name != LineageProperty && property.Name != SnapshotProperty && property.Name != CreatedProperty {
+		if property.Name != LineageProperty && property.Name != SnapshotProperty {
 			continue
 		}
 		if property.Dataset != snapshot.Name || (property.Source != zfs.SourceLocal && property.Source != zfs.SourceReceived) {
@@ -96,12 +97,12 @@ func Ownership(snapshot Snapshot, lineage string) (Metadata, error) {
 	if m.Lineage != lineage || !ValidID(m.Snapshot) {
 		return Metadata{}, fmt.Errorf("missing or mismatched ownership UUIDs")
 	}
+	stamp, _, _ := strings.Cut(strings.TrimPrefix(component, SnapshotPrefix), "-")
 	var err error
-	m.Created, err = time.Parse(time.RFC3339Nano, values[CreatedProperty])
+	m.Created, err = time.Parse(nameTimeFormat, stamp)
 	if err != nil || m.Created.IsZero() || m.Created.Year() < 1 || m.Created.Year() > 9999 {
 		return Metadata{}, fmt.Errorf("invalid ownership creation time")
 	}
-	m.Created = m.Created.UTC()
 	if component != m.Name() {
 		return Metadata{}, fmt.Errorf("snapshot name does not match its metadata")
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -40,7 +41,7 @@ func TestCleanPreviewApply(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.Checkpoint(t.Context(), "tank/data", r, r.GUID()); err != nil {
+		if err := s.Checkpoint(t.Context(), "tank/data", r, guidOf(b, r.SnapshotName())); err != nil {
 			t.Fatal(err)
 		}
 		b.writes = nil
@@ -157,7 +158,7 @@ func TestCleanStopsOnUnexpectedMutation(t *testing.T) {
 
 func TestCleanTransitionNamesWhatDiffered(t *testing.T) {
 	t.Parallel()
-	property := zfs.Property{Dataset: "tank/data@a", Name: "org.boomerangz:state:created", Value: "2026", Source: zfs.SourceLocal}
+	property := zfs.Property{Dataset: "tank/data@a", Name: "org.boomerangz:state:snapshot", Value: "2026", Source: zfs.SourceLocal}
 	before := zfs.State{Objects: []zfs.Object{{Name: "tank/data@a", Type: "snapshot", GUID: 1}}, Properties: []zfs.Property{property}}
 	action := CleanAction{Operation: "inherit", Object: "tank/data@a", Property: property.Name}
 	after := zfs.State{Objects: before.Objects}
@@ -169,4 +170,120 @@ func TestCleanTransitionNamesWhatDiffered(t *testing.T) {
 	if difference := cleanTransition(before, after, action); !strings.Contains(difference, "state:lineage") || !strings.Contains(difference, "appeared") {
 		t.Fatalf("difference = %q, want the property that appeared", difference)
 	}
+}
+
+// Forgetting a target removes that target's state and nothing else, without
+// checking the target: it is for a target that can no longer be checked.
+func TestCleanForgetsOnlyTheNamedTarget(t *testing.T) {
+	t.Parallel()
+	const gone, kept = "ssh://gone/backup", "local:backup/data"
+	setup := func(t *testing.T) (*memoryBackend, *Service) {
+		t.Helper()
+		b := backendWithSnapshots(t)
+		addTestAuthority(b)
+		b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal})
+		s, _ := NewService(b, testInstallation)
+		for _, target := range []string{gone, kept} {
+			r, err := s.Protect(t.Context(), "tank/data", b.state.Objects[1].Name, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Checkpoint(t.Context(), "tank/data", r, guidOf(b, r.SnapshotName())); err != nil {
+				t.Fatal(err)
+			}
+			b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: TargetStatePrefix + TargetID(target), Value: "{}", Source: zfs.SourceLocal})
+		}
+		b.state.Properties = append(b.state.Properties,
+			zfs.Property{Dataset: "tank/data", Name: TargetStatePrefix + TargetID(gone) + ":suspended", Value: "unverified", Source: zfs.SourceLocal},
+			// The sending installation's binding for the same target is not this root's.
+			zfs.Property{Dataset: "tank/data", Name: TargetStatePrefix + TargetID(gone), Value: "{}", Source: zfs.SourceReceived})
+		b.writes = nil
+		return b, s
+	}
+	mentions := func(b *memoryBackend, id string) []string {
+		var found []string
+		for _, p := range b.state.Properties {
+			if p.Source == zfs.SourceLocal && strings.Contains(p.Name, id) {
+				found = append(found, p.Name)
+			}
+		}
+		for _, o := range b.state.Objects {
+			if strings.Contains(o.Name, id) {
+				found = append(found, o.Name)
+			}
+		}
+		for snapshot, tags := range b.state.Holds {
+			for _, tag := range tags {
+				if strings.Contains(tag, id) {
+					found = append(found, snapshot+" "+tag)
+				}
+			}
+		}
+		return found
+	}
+
+	t.Run("forgets", func(t *testing.T) {
+		b, s := setup(t)
+		// Control arm: an ordinary clean cannot get past the gone target.
+		if plan, _ := s.Clean(t.Context(), "tank/data", CleanOptions{}, false, testCleanSafety{offline: true}); len(plan.Blockers) == 0 {
+			t.Fatal("an unreachable target did not block clean")
+		}
+		keptBefore := mentions(b, TargetID(kept))
+		if len(mentions(b, TargetID(gone))) < 4 || len(keptBefore) < 4 {
+			t.Fatalf("fixture: gone=%v kept=%v", mentions(b, TargetID(gone)), keptBefore)
+		}
+		snapshots := len(snapshotsIn(b.state, "tank/data"))
+		options := CleanOptions{ForgetTargets: []string{TargetID(gone)}}
+		preview, err := s.Clean(t.Context(), "tank/data", options, false, testCleanSafety{offline: true})
+		if err != nil || len(preview.Blockers) != 0 || len(b.writes) != 0 {
+			t.Fatalf("preview=%+v err=%v writes=%v", preview, err, b.writes)
+		}
+		// One inherit per local property: the received binding gets none.
+		if !slices.EqualFunc(preview.Actions, slices.CompactFunc(slices.Clone(preview.Actions), func(a, b CleanAction) bool { return a == b }), func(a, b CleanAction) bool { return a == b }) {
+			t.Fatalf("repeated actions: %+v", preview.Actions)
+		}
+		applied, err := s.Clean(t.Context(), "tank/data", options, true, testCleanSafety{offline: true})
+		if err != nil || applied.Applied != len(preview.Actions) {
+			t.Fatalf("applied=%+v err=%v", applied, err)
+		}
+		if left := mentions(b, TargetID(gone)); len(left) != 0 {
+			t.Fatalf("forgotten target's state remains: %v", left)
+		}
+		if after := mentions(b, TargetID(kept)); !reflect.DeepEqual(after, keptBefore) {
+			t.Fatalf("other target's state changed: %v, was %v", after, keptBefore)
+		}
+		if lineage, err := storedLineage(b.state, "tank/data"); err != nil || lineage == "" || len(snapshotsIn(b.state, "tank/data")) != snapshots {
+			t.Fatalf("ownership or snapshots changed: lineage=%q err=%v", lineage, err)
+		}
+		if b.state.Received != nil && b.state.Received["tank/data"] != nil {
+			t.Fatal("received state was touched")
+		}
+	})
+	t.Run("refuses", func(t *testing.T) {
+		for name, test := range map[string]struct {
+			options CleanOptions
+			prepare func(*memoryBackend)
+			blocked bool
+		}{
+			"unknown target": {options: CleanOptions{ForgetTargets: []string{TargetID("local:elsewhere")}}, blocked: true},
+			"unproven hold": {options: CleanOptions{ForgetTargets: []string{TargetID(gone)}}, blocked: true, prepare: func(b *memoryBackend) {
+				b.state.Holds[b.state.Objects[2].Name] = append(b.state.Holds[b.state.Objects[2].Name], SnapshotPrefix+TargetID(gone))
+			}},
+			"busy":      {options: CleanOptions{ForgetTargets: []string{TargetID(gone)}}, blocked: true, prepare: func(b *memoryBackend) { b.state.ResumeTokens = map[string]string{"tank/data": "token"} }},
+			"recursive": {options: CleanOptions{Recursive: true, ForgetTargets: []string{TargetID(gone)}}},
+			"destroy":   {options: CleanOptions{DestroyOwnedSnapshots: true, ForgetTargets: []string{TargetID(gone)}}},
+			"not an ID": {options: CleanOptions{ForgetTargets: []string{gone}}},
+		} {
+			t.Run(name, func(t *testing.T) {
+				b, s := setup(t)
+				if test.prepare != nil {
+					test.prepare(b)
+				}
+				plan, err := s.Clean(t.Context(), "tank/data", test.options, true, testCleanSafety{offline: true})
+				if err == nil || len(b.writes) != 0 || test.blocked != (len(plan.Blockers) > 0) {
+					t.Fatalf("plan=%+v err=%v writes=%v", plan, err, b.writes)
+				}
+			})
+		}
+	})
 }

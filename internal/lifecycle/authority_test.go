@@ -12,7 +12,7 @@ func TestRootAuthority(t *testing.T) {
 	t.Parallel()
 	const owner = "11111111-1111-4111-8111-111111111111"
 	const lineage = "22222222-2222-4222-8222-222222222222"
-	for _, kind := range []string{"local", "foreign", "received", "inherited", "absent", "duplicate", "hidden-conflict", "invalid-installation"} {
+	for _, kind := range []string{"local", "foreign", "received", "inherited", "absent", "duplicate", "hidden-lineage", "hidden-owner", "invalid-installation"} {
 		t.Run(kind, func(t *testing.T) {
 			state := zfs.State{Properties: []zfs.Property{
 				{Dataset: "tank/data", Name: OwnerProperty, Value: owner, Source: zfs.SourceLocal},
@@ -30,13 +30,16 @@ func TestRootAuthority(t *testing.T) {
 				state.Properties = state.Properties[:1]
 			case "duplicate":
 				state.Properties = append(state.Properties, state.Properties[0])
-			case "hidden-conflict":
-				state.Received = map[string]map[string]string{"tank/data": {OwnerProperty: lineage}}
+			case "hidden-lineage":
+				state.Received = map[string]map[string]string{"tank/data": {LineageProperty: owner}}
+			case "hidden-owner":
+				// A promoted replica keeps its source installation's owner.
+				state.Received = map[string]map[string]string{"tank/data": {OwnerProperty: lineage, LineageProperty: lineage}}
 			case "invalid-installation":
 				installation = ""
 			}
 			actual, err := RootAuthority(state, "tank/data", installation)
-			if kind == "local" {
+			if kind == "local" || kind == "hidden-owner" {
 				if err != nil || actual != lineage {
 					t.Fatalf("lineage=%s err=%v", actual, err)
 				}

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+	"slices"
 	"sync"
 
 	"github.com/pdf/boomerangz/internal/config"
+	"github.com/pdf/boomerangz/internal/discovery"
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/transfer"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
@@ -105,6 +107,17 @@ func (s *Safety) CheckTarget(ctx context.Context, source, target string) error {
 	return targets.CheckTarget(ctx, source, target)
 }
 
+// TargetID resolves an operator's name for a target, as TargetChecker does.
+func (s *Safety) TargetID(name string) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("target resolution is unavailable")
+	}
+	s.mu.RLock()
+	targets := s.targets
+	s.mu.RUnlock()
+	return targets.TargetID(name)
+}
+
 func (s *Safety) setTargets(targets *TargetChecker) {
 	s.mu.Lock()
 	s.targets = targets
@@ -112,7 +125,12 @@ func (s *Safety) setTargets(targets *TargetChecker) {
 }
 
 // CheckTarget verifies one recorded target without changing either endpoint.
-func (s *TargetChecker) CheckTarget(ctx context.Context, source, target string) error {
+// A recovery proof records only the hash of its target's canonical identity, so
+// targetID is matched against each configured remote and each local target the
+// source's policy, or a member's, configures. A target no longer configured
+// cannot be checked. The binding is rebuilt from the source's policy, which
+// says where the replica is mapped.
+func (s *TargetChecker) CheckTarget(ctx context.Context, source, targetID string) error {
 	if s == nil || s.local == nil {
 		return fmt.Errorf("target verification is unavailable")
 	}
@@ -120,18 +138,13 @@ func (s *TargetChecker) CheckTarget(ctx context.Context, source, target string) 
 	if err != nil {
 		return err
 	}
-	if root, local := strings.CutPrefix(target, "local:"); local {
-		if err := zfs.ValidateDataset(root); err != nil {
-			return err
-		}
-		binding, err := transfer.VerifyTargetBinding(ctx, s.local, sourceState, source, target, root)
-		if err != nil {
-			return err
-		}
-		return checkResumeState(ctx, s.local, binding.MappedDataset)
+	effective, locals, err := s.sourcePolicy(ctx, source)
+	if err != nil {
+		return err
 	}
 	for name, client := range s.remotes {
-		if client.CanonicalTarget() != target {
+		target := client.CanonicalTarget()
+		if lifecycle.TargetID(target) != targetID {
 			continue
 		}
 		setting := s.settings[name]
@@ -139,7 +152,8 @@ func (s *TargetChecker) CheckTarget(ctx context.Context, source, target string) 
 		if err != nil {
 			return err
 		}
-		binding, bindingErr := transfer.VerifyTargetBinding(ctx, endpoint.executor, sourceState, source, target, setting.Root)
+		request := transfer.Request{Source: source, DestinationRoot: setting.Root, Policy: effective, Transport: client.Transport(), RemoteName: name, CanonicalTarget: target}
+		binding, bindingErr := transfer.VerifyTargetBinding(ctx, endpoint.executor, sourceState, request)
 		checkErr := bindingErr
 		if bindingErr == nil {
 			checkErr = checkResumeState(ctx, endpoint.executor, binding.MappedDataset)
@@ -149,7 +163,72 @@ func (s *TargetChecker) CheckTarget(ctx context.Context, source, target string) 
 		}
 		return checkErr
 	}
+	for _, root := range locals {
+		if lifecycle.TargetID("local:"+root) != targetID {
+			continue
+		}
+		binding, err := transfer.VerifyTargetBinding(ctx, s.local, sourceState, transfer.Request{Source: source, DestinationRoot: root, Policy: effective})
+		if err != nil {
+			return err
+		}
+		return checkResumeState(ctx, s.local, binding.MappedDataset)
+	}
 	return fmt.Errorf("recorded target is not configured")
+}
+
+// TargetID resolves an operator's name for a target to the ID its state is
+// recorded under, without needing the target to be reachable: a target ID is
+// taken as it is, a configured remote's name is its canonical target's ID, and
+// any other dataset name is a local destination root, configured or not. A
+// remote no longer configured can only be named by its ID, which a clean
+// blocker for it reports.
+func (s *TargetChecker) TargetID(name string) (string, error) {
+	if lifecycle.ValidTargetID(name) {
+		return name, nil
+	}
+	if s != nil {
+		if client, ok := s.remotes[name]; ok {
+			return lifecycle.TargetID(client.CanonicalTarget()), nil
+		}
+	}
+	if err := zfs.ValidateDataset(name); err != nil {
+		return "", fmt.Errorf("target %q is neither a target ID, a configured remote nor a local destination root", name)
+	}
+	return lifecycle.TargetID("local:" + name), nil
+}
+
+// sourcePolicy resolves source's policy, and the local destinations it and
+// its members configure. A root's members may send where the root itself does
+// not, and their proofs are on the root.
+func (s *TargetChecker) sourcePolicy(ctx context.Context, source string) (policy.Effective, []string, error) {
+	reader, ok := s.local.(discovery.Reader)
+	if !ok {
+		return policy.Effective{}, nil, fmt.Errorf("source policy is unavailable")
+	}
+	var remotes []string
+	for name := range s.settings {
+		remotes = append(remotes, name)
+	}
+	scanner, err := discovery.New(reader, discovery.Options{Remotes: remotes})
+	if err != nil {
+		return policy.Effective{}, nil, err
+	}
+	generation, err := scanner.Scan(ctx, []string{source})
+	if err != nil {
+		return policy.Effective{}, nil, err
+	}
+	entry, exists := generation.Inspect(source)
+	if !exists || !entry.Inspected {
+		return policy.Effective{}, nil, fmt.Errorf("source policy inspection is incomplete")
+	}
+	locals := slices.Clone(entry.Policy.Local)
+	for _, member := range entry.Members {
+		if memberEntry, exists := generation.Inspect(member); exists {
+			locals = append(locals, memberEntry.Policy.Local...)
+		}
+	}
+	slices.Sort(locals)
+	return entry.Policy, slices.Compact(locals), nil
 }
 
 // OpenConfigured opens one named remote using the same transport construction

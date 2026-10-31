@@ -165,6 +165,9 @@ message CleanRequest {
   bool all = 3;
   bool destroy_owned_snapshots = 4;
   bool apply = 5;
+  // Targets whose state alone is cleaned, unchecked: target IDs, configured
+  // remote names or local destination roots.
+  repeated string forget_targets = 6;
 }
 
 message CleanAction {
@@ -182,6 +185,7 @@ message CleanPlan {
   repeated string blockers = 5;
   repeated string warnings = 6;
   uint32 applied = 7;
+  repeated string forget_targets = 8;
 }
 
 message CleanResponse {

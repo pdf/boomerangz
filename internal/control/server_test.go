@@ -30,14 +30,14 @@ func newHeldRuntime() *heldRuntime {
 	return &heldRuntime{fakeRuntime: &fakeRuntime{}, entered: make(chan context.Context, 1), release: make(chan struct{})}
 }
 
-func (r *heldRuntime) Clean(ctx context.Context, names []string, recursive, all, destroy, apply bool) ([]lifecycle.CleanPlan, error) {
+func (r *heldRuntime) Clean(ctx context.Context, names []string, recursive, all, destroy bool, forget []string, apply bool) ([]lifecycle.CleanPlan, error) {
 	r.entered <- ctx
 	select {
 	case <-r.release:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	return r.fakeRuntime.Clean(ctx, names, recursive, all, destroy, apply)
+	return r.fakeRuntime.Clean(ctx, names, recursive, all, destroy, forget, apply)
 }
 
 // startHeldCall starts a Clean call through client and returns its outcome

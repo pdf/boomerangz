@@ -3,23 +3,30 @@ package transfer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
 
 	"github.com/pdf/boomerangz/internal/lifecycle"
-	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
 const (
-	targetBindingVersion = 1
-	targetBindingPrefix  = policy.StateNamespace + "target:"
+	targetBindingVersion = 2
+	targetBindingPrefix  = lifecycle.TargetStatePrefix
 )
 
 // TargetBinding is the persistent source-side identity of one configured
 // destination. Anchor identifies either the existing destination dataset or,
 // for a bootstrap, its nearest existing ancestor.
+//
+// A binding is checked by rebuilding it from configuration and the live
+// identity of its anchor and comparing the two, so only the identity and the
+// mapped dataset it was made for are stored (see bindingRecord). Transport,
+// CanonicalTarget and DestinationRoot are what configuration says about the
+// target, and the property key hashes CanonicalTarget; Pool and RelativePath
+// follow from Anchor.
 type TargetBinding struct {
 	Version         int    `json:"version"`
 	Transport       string `json:"transport"`
@@ -31,6 +38,32 @@ type TargetBinding struct {
 	Anchor          string `json:"anchor"`
 	AnchorGUID      uint64 `json:"anchor_guid"`
 	RelativePath    string `json:"relative_path"`
+}
+
+// bindingRecord is a TargetBinding's stored value. Mapped is the dataset the
+// binding was made for. Configuration names the mapped dataset too, but a
+// changed discard or destination moves that, and only the stored name tells
+// the replica's old place from the new one. Anchor is stored only while it is
+// an ancestor of the mapped dataset: after the first receive the binding moves
+// to the replica itself, which Mapped already names.
+type bindingRecord struct {
+	Version    int    `json:"version"`
+	PoolGUID   uint64 `json:"pool_guid"`
+	Mapped     string `json:"mapped"`
+	AnchorGUID uint64 `json:"anchor_guid"`
+	Anchor     string `json:"anchor,omitempty"`
+}
+
+// MappingChangedError reports a binding made for another mapped dataset than
+// the one configuration now names. Neither transfer nor reseed may proceed: a
+// replica, if there is one, is at Stored, and the binding cannot follow it to
+// Configured.
+type MappingChangedError struct {
+	Stored, Configured string
+}
+
+func (e *MappingChangedError) Error() string {
+	return fmt.Sprintf("target mapping changed from %s to %s since the binding was recorded; restore the previous mapping, or forget the target with boomerangz dataset clean --forget-target and let the next transfer seed it afresh", e.Stored, e.Configured)
 }
 
 // LocalTargetInspection is the adoption-time identity view of one configured
@@ -151,7 +184,11 @@ func InspectTarget(ctx context.Context, reader localIdentityReader, request Requ
 		inspection.Status = "unavailable"
 		return inspection, fmt.Errorf("destination has no existing ancestor")
 	}
-	stored, err := storedTargetBinding(source, request.Source, canonical)
+	stored, err := storedTargetBinding(source, request.Source, bindingTemplate(request, mapped, transport, canonical))
+	if changed := (*MappingChangedError)(nil); errors.As(err, &changed) {
+		inspection.Status = "mismatch"
+		return inspection, err
+	}
 	if err != nil {
 		inspection.Status = "invalid-binding"
 		return inspection, err
@@ -199,9 +236,14 @@ func InspectLocalTarget(ctx context.Context, reader localIdentityReader, request
 }
 
 // VerifyTargetBinding re-resolves the exact stored anchor before lifecycle
-// administration relies on a previously recorded destination.
-func VerifyTargetBinding(ctx context.Context, reader localIdentityReader, source zfs.State, sourceRoot, canonical, configuredRoot string) (TargetBinding, error) {
-	stored, err := storedTargetBinding(source, sourceRoot, canonical)
+// administration relies on a previously recorded destination. request names
+// the source root, its policy and the configured target.
+func VerifyTargetBinding(ctx context.Context, reader localIdentityReader, source zfs.State, request Request) (TargetBinding, error) {
+	target, err := bindingTarget(request)
+	if err != nil {
+		return TargetBinding{}, err
+	}
+	stored, err := storedTargetBinding(source, request.Source, target)
 	if err != nil {
 		return TargetBinding{}, err
 	}
@@ -211,15 +253,11 @@ func VerifyTargetBinding(ctx context.Context, reader localIdentityReader, source
 	if err := validateBinding(*stored); err != nil {
 		return TargetBinding{}, err
 	}
-	if stored.DestinationRoot != configuredRoot {
-		return TargetBinding{}, fmt.Errorf("configured destination root differs from persistent binding")
-	}
 	identity, err := reader.InspectDatasetIdentity(ctx, stored.Anchor)
 	if err != nil {
 		return TargetBinding{}, err
 	}
-	request := Request{Source: sourceRoot, DestinationRoot: stored.DestinationRoot, Transport: stored.Transport, CanonicalTarget: canonical}
-	resolved, err := bindingForTarget(request, stored.MappedDataset, identity, stored.Transport, canonical)
+	resolved, err := target.anchored(identity.Name, identity.PoolGUID, identity.GUID)
 	if err != nil {
 		return TargetBinding{}, err
 	}
@@ -245,16 +283,14 @@ func TargetSuspended(state zfs.State, root, canonical string) (bool, error) {
 	property := targetSuspendedProperty(canonical)
 	found := false
 	for _, row := range state.Properties {
-		if row.Dataset != root || row.Name != property {
+		// A received marker is the sending installation's gate, not this one's.
+		if row.Dataset != root || row.Name != property || row.Source != zfs.SourceLocal {
 			continue
 		}
-		if row.Source != zfs.SourceLocal || found || row.Value != "unverified" {
+		if found || row.Value != "unverified" {
 			return false, fmt.Errorf("target suspension marker is invalid")
 		}
 		found = true
-	}
-	if state.Received[root][property] != "" {
-		return false, fmt.Errorf("hidden received target suspension marker requires explicit resolution")
 	}
 	return found, nil
 }
@@ -276,47 +312,82 @@ func bindingFor(request Request, mapped string, identity zfs.DatasetIdentity) (T
 }
 
 func bindingForTarget(request Request, mapped string, identity zfs.DatasetIdentity, transport, canonical string) (TargetBinding, error) {
-	binding := TargetBinding{
-		Version:         targetBindingVersion,
-		Transport:       transport,
-		CanonicalTarget: canonical,
-		DestinationRoot: request.DestinationRoot,
-		MappedDataset:   mapped,
-		Pool:            identity.Pool,
-		PoolGUID:        identity.PoolGUID,
-		Anchor:          identity.Name,
-		AnchorGUID:      identity.GUID,
+	return bindingTemplate(request, mapped, transport, canonical).anchored(identity.Name, identity.PoolGUID, identity.GUID)
+}
+
+// bindingTemplate is what configuration says about a target: the part of a
+// binding that is never stored, which a stored record is completed from.
+func bindingTemplate(request Request, mapped, transport, canonical string) TargetBinding {
+	return TargetBinding{Version: targetBindingVersion, Transport: transport, CanonicalTarget: canonical, DestinationRoot: request.DestinationRoot, MappedDataset: mapped}
+}
+
+// bindingTarget is bindingTemplate for request's own root and target.
+func bindingTarget(request Request) (TargetBinding, error) {
+	mapped, _, err := request.mapped(request.Source)
+	if err != nil {
+		return TargetBinding{}, err
 	}
-	if identity.Name != mapped {
-		if !inside(mapped, identity.Name) {
+	return bindingTemplate(request, mapped, requestTransport(request), canonicalTarget(request)), nil
+}
+
+// anchored completes target with the identity of the dataset it is anchored
+// on: the mapped dataset itself, or for a bootstrap its nearest existing
+// ancestor.
+func (b TargetBinding) anchored(anchor string, poolGUID, anchorGUID uint64) (TargetBinding, error) {
+	b.Pool, _, _ = strings.Cut(anchor, "/")
+	b.PoolGUID, b.Anchor, b.AnchorGUID, b.RelativePath = poolGUID, anchor, anchorGUID, ""
+	if anchor != b.MappedDataset {
+		if !inside(b.MappedDataset, anchor) {
 			return TargetBinding{}, fmt.Errorf("destination anchor does not contain mapped dataset")
 		}
-		binding.RelativePath = strings.TrimPrefix(mapped, identity.Name+"/")
-		if binding.RelativePath == "" || path.Clean(binding.RelativePath) != binding.RelativePath {
+		b.RelativePath = strings.TrimPrefix(b.MappedDataset, anchor+"/")
+		if b.RelativePath == "" || path.Clean(b.RelativePath) != b.RelativePath {
 			return TargetBinding{}, fmt.Errorf("invalid destination path relative to anchor")
 		}
 	}
-	return binding, nil
+	return b, nil
 }
 
-func storedTargetBinding(state zfs.State, root, canonical string) (*TargetBinding, error) {
-	property := targetBindingProperty(canonical)
+// storedTargetBinding reads root's binding for target, completing the stored
+// identity with what configuration says about the target.
+func storedTargetBinding(state zfs.State, root string, target TargetBinding) (*TargetBinding, error) {
+	property := targetBindingProperty(target.CanonicalTarget)
 	var binding *TargetBinding
 	for _, row := range state.Properties {
-		if row.Dataset != root || row.Name != property {
+		// A received binding names the sending installation's destination,
+		// which says nothing about where this root replicates.
+		if row.Dataset != root || row.Name != property || row.Source != zfs.SourceLocal {
 			continue
 		}
-		if row.Source != zfs.SourceLocal || binding != nil {
-			return nil, fmt.Errorf("target binding must be unambiguous and explicitly local")
+		if binding != nil {
+			return nil, fmt.Errorf("target binding must be unambiguous")
 		}
-		var decoded TargetBinding
-		if err := json.Unmarshal([]byte(row.Value), &decoded); err != nil {
+		var record bindingRecord
+		decoder := json.NewDecoder(strings.NewReader(row.Value))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&record); err != nil || decoder.More() {
+			return nil, fmt.Errorf("invalid target binding")
+		}
+		if record.Version != targetBindingVersion {
+			return nil, fmt.Errorf("target binding version %d is unsupported", record.Version)
+		}
+		if zfs.ValidateDataset(record.Mapped) != nil {
+			return nil, fmt.Errorf("invalid target binding mapping")
+		}
+		if record.Mapped != target.MappedDataset {
+			return nil, &MappingChangedError{Stored: record.Mapped, Configured: target.MappedDataset}
+		}
+		anchor := record.Anchor
+		if anchor == "" {
+			anchor = record.Mapped
+		} else if anchor == record.Mapped || zfs.ValidateDataset(anchor) != nil {
+			return nil, fmt.Errorf("invalid target binding anchor")
+		}
+		decoded, err := target.anchored(anchor, record.PoolGUID, record.AnchorGUID)
+		if err != nil {
 			return nil, fmt.Errorf("invalid target binding: %w", err)
 		}
 		binding = &decoded
-	}
-	if state.Received[root][property] != "" {
-		return nil, fmt.Errorf("hidden received target binding requires explicit resolution")
 	}
 	return binding, nil
 }
@@ -335,6 +406,10 @@ func encodeBinding(binding TargetBinding) (string, error) {
 	if err := validateBinding(binding); err != nil {
 		return "", err
 	}
-	data, err := json.Marshal(binding)
+	record := bindingRecord{Version: binding.Version, PoolGUID: binding.PoolGUID, Mapped: binding.MappedDataset, AnchorGUID: binding.AnchorGUID}
+	if binding.Anchor != binding.MappedDataset {
+		record.Anchor = binding.Anchor
+	}
+	data, err := json.Marshal(record)
 	return string(data), err
 }

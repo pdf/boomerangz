@@ -167,12 +167,12 @@ func TestSnapshotBuildsDeterministicArguments(t *testing.T) {
 	// A sparse set: tank/data/hole is deliberately absent, which -r cannot say.
 	err := direct.Snapshot(context.Background(), []string{"tank/data/hole/deep", "tank/data"}, "boomerangz-test", map[string]string{
 		"org.boomerangz:state:snapshot": "abc",
-		"org.boomerangz:state:created":  "now",
+		"org.boomerangz:state:lineage":  "line",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "-o", "org.boomerangz:state:created=now", "-o", "org.boomerangz:state:snapshot=abc", "tank/data/hole/deep@boomerangz-test", "tank/data@boomerangz-test"}
+	want := []string{"snapshot", "-o", "org.boomerangz:state:lineage=line", "-o", "org.boomerangz:state:snapshot=abc", "tank/data/hole/deep@boomerangz-test", "tank/data@boomerangz-test"}
 	if !reflect.DeepEqual(runner.args, want) {
 		t.Fatalf("arguments = %#v, want %#v", runner.args, want)
 	}
@@ -244,5 +244,19 @@ func TestStoredPropertiesAreCanonical(t *testing.T) {
 	// The same rows in another order are the same stored properties.
 	if a, b := read(rows...), read(rows[2], rows[0], rows[1]); !reflect.DeepEqual(a, b) {
 		t.Fatalf("order changed the result:\n%v\n%v", a, b)
+	}
+}
+
+func TestSetPropertiesRefusesValuesZFSWouldNotStore(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{}
+	direct := &Direct{runner: runner}
+	longest := strings.Repeat("x", MaxUserPropertyValue)
+	if err := direct.SetProperties(t.Context(), "tank/data", map[string]string{propertyNamespace + "state:probe": longest}); err != nil || len(runner.args) == 0 {
+		t.Fatalf("longest storable value refused: %v", err)
+	}
+	runner.args = nil
+	if err := direct.SetProperties(t.Context(), "tank/data", map[string]string{propertyNamespace + "state:probe": longest + "x"}); err == nil || runner.args != nil {
+		t.Fatalf("value ZFS refuses with E2BIG was sent: %v %v", err, runner.args)
 	}
 }

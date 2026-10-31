@@ -127,7 +127,7 @@ func (d *Direct) inspectState(ctx context.Context, dataset string, recursive boo
 		}
 	}
 	// Fixed ownership keys also reveal hidden received metadata omitted by all.
-	queries := []string{"all", propertyNamespace + "state:lineage," + propertyNamespace + "state:snapshot," + propertyNamespace + "state:created"}
+	queries := []string{"all", propertyNamespace + "state:lineage," + propertyNamespace + "state:snapshot"}
 	rows := make(map[string][][][]string, len(names))
 	for _, chunk := range d.inspectionChunks(names) {
 		for query, keys := range queries {
@@ -327,6 +327,9 @@ func (d *Direct) SetProperties(ctx context.Context, object string, properties ma
 		if strings.ContainsRune(properties[key], 0) {
 			return fmt.Errorf("property value contains NUL")
 		}
+		if len(properties[key]) > MaxUserPropertyValue {
+			return fmt.Errorf("property %s value is %d bytes, over the ZFS limit of %d", key, len(properties[key]), MaxUserPropertyValue)
+		}
 		args = append(args, key+"="+properties[key])
 	}
 	_, err := d.runner.Run(ctx, append(args, object)...)
@@ -345,6 +348,10 @@ func (d *Direct) InheritProperty(ctx context.Context, object, property string) e
 	_, err := d.runner.Run(ctx, "inherit", property, object)
 	return err
 }
+
+// MaxUserPropertyValue is the longest user property value ZFS stores. It
+// refuses a value of ZAP_MAXVALUELEN (8192) bytes or more with E2BIG.
+const MaxUserPropertyValue = 8191
 
 func validateUserProperty(name string) error {
 	if !strings.HasPrefix(name, propertyNamespace) || len(name) == len(propertyNamespace) {

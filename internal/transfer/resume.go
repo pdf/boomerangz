@@ -120,7 +120,7 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 	if suspended {
 		return plan, zero, fmt.Errorf("target is suspended pending explicit remote revalidation")
 	}
-	stored, err := storedTargetBinding(view.Source, request.Source, canonical)
+	stored, err := storedTargetBinding(view.Source, request.Source, bindingTemplate(request, mappedRoot, transport, canonical))
 	if err != nil || stored == nil {
 		return plan, zero, fmt.Errorf("resumable transfer lacks a valid target binding")
 	}
@@ -144,19 +144,21 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 	var candidateTXG uint64
 	tied := false
 	for _, ref := range refs {
-		if ref.Target != canonical || ref.Dataset != stream.Dataset {
+		if ref.TargetID != lifecycle.TargetID(canonical) || ref.Dataset != stream.Dataset {
 			continue
 		}
-		valid := true
-		for _, member := range ref.Sources {
-			name := member.Dataset + "@" + member.Metadata.Name()
+		// A resumable endpoint is one whose every snapshot is still held.
+		members, membersErr := ref.Sources(view.Source)
+		valid := membersErr == nil && len(members) > 0 && members[0].Dataset == stream.Dataset
+		for _, member := range members {
+			name := member.Dataset + "@" + ref.Metadata.Name()
 			object, exists := sourceObjects[name]
 			if !exists || object.Type != "snapshot" || object.GUID != member.GUID || !slices.Contains(view.Source.Holds[name], ref.HoldName()) {
 				valid = false
 				break
 			}
 			metadata, ownershipErr := ownership(view.Source, object, lineage)
-			if ownershipErr != nil || !reflect.DeepEqual(metadata, member.Metadata) {
+			if ownershipErr != nil || !reflect.DeepEqual(metadata, ref.Metadata) {
 				valid = false
 				break
 			}
@@ -177,8 +179,12 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 		return plan, zero, fmt.Errorf("resume token does not have an unambiguous newest held source proof")
 	}
 	ref := candidate
+	members, err := ref.Sources(view.Source)
+	if err != nil {
+		return plan, zero, err
+	}
 	tokenCovered := false
-	for _, member := range ref.Sources {
+	for _, member := range members {
 		mappedDataset := mappedRoot + strings.TrimPrefix(member.Dataset, request.Source)
 		if tokenDataset == mappedDataset {
 			tokenCovered = true
@@ -193,8 +199,8 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 				return plan, zero, fmt.Errorf("destination has a conflicting lineage")
 			}
 		}
-		metadata := member.Metadata
-		expected := Expected{Source: member.Dataset + "@" + member.Metadata.Name(), Destination: mappedDataset + "@" + member.Metadata.Name(), GUID: member.GUID, Metadata: &metadata}
+		metadata := ref.Metadata
+		expected := Expected{Source: member.Dataset + "@" + ref.Metadata.Name(), Destination: mappedDataset + "@" + ref.Metadata.Name(), GUID: member.GUID, Metadata: &metadata}
 		plan.Expected = append(plan.Expected, expected)
 		plan.Endpoints = append(plan.Endpoints, expected)
 		if member.Dataset == stream.Dataset {

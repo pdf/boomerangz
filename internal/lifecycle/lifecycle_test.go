@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,8 +33,16 @@ func TestOwnership(t *testing.T) {
 	if err != nil || m.Lineage != testLineage {
 		t.Fatalf("ownership: %v", err)
 	}
+	// The creation time is read back from the name, to the nanosecond.
+	if want := time.Date(2026, 9, 5, 12, 0, 0, 123456789, time.UTC); !m.Created.Equal(want) || m.Created.Location() != time.UTC {
+		t.Fatalf("created = %v, want %v", m.Created, want)
+	}
 	for _, mutate := range []func(*Snapshot){
 		func(s *Snapshot) { s.Name = "tank/data@boomerangz-fake" },
+		// A name whose instant is not in the canonical encoding, or whose
+		// short ID is not the stored snapshot UUID's, proves nothing.
+		func(s *Snapshot) { s.Name = strings.Replace(s.Name, ".123456789Z", ".123Z", 1) },
+		func(s *Snapshot) { s.Name = s.Name[:len(s.Name)-1] + "x" },
 		func(s *Snapshot) { s.GUID = 0 },
 		func(s *Snapshot) { s.Properties = nil },
 		func(s *Snapshot) { s.Properties[0].Dataset = "tank/data" },
@@ -165,9 +174,10 @@ func TestPruneFixedMonthYearBoundaries(t *testing.T) {
 }
 
 func FuzzOwnership(f *testing.F) {
-	f.Add("tank/data@boomerangz-fake", testLineage, "2026-09-05T12:00:00Z")
-	f.Fuzz(func(t *testing.T, name, id, created string) {
-		s := Snapshot{Name: name, GUID: 1, Properties: []zfs.Property{{Dataset: name, Name: LineageProperty, Value: testLineage, Source: zfs.SourceLocal}, {Dataset: name, Name: SnapshotProperty, Value: id, Source: zfs.SourceLocal}, {Dataset: name, Name: CreatedProperty, Value: created, Source: zfs.SourceLocal}}}
+	f.Add("tank/data@boomerangz-fake", testLineage)
+	f.Add("tank/data@boomerangz-20260905T120000.000000000Z-01234567", "01234567-89ab-4def-8123-456789abcdef")
+	f.Fuzz(func(t *testing.T, name, id string) {
+		s := Snapshot{Name: name, GUID: 1, Properties: []zfs.Property{{Dataset: name, Name: LineageProperty, Value: testLineage, Source: zfs.SourceLocal}, {Dataset: name, Name: SnapshotProperty, Value: id, Source: zfs.SourceLocal}}}
 		m, err := Ownership(s, testLineage)
 		if err == nil && (!ValidID(m.Snapshot) || m.Lineage != testLineage) {
 			t.Fatal("invalid ownership accepted")

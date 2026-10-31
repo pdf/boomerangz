@@ -107,9 +107,25 @@ func TestInactiveMarkerRejectsChangedAuthority(t *testing.T) {
 		t.Fatal("accepted inactive marker after dataset replacement")
 	}
 	b.state.Objects[0].GUID--
-	b.state.Received = map[string]map[string]string{"tank/data": {InactiveProperty: "foreign"}}
-	if _, err := s.ReconcileInactive(t.Context(), "tank/data", false, now.Add(time.Hour), time.Hour, false); err == nil {
-		t.Fatal("accepted received inactive marker")
+}
+
+// A promoted replica keeps its source's inactive marker, shown as received or
+// masked by a local one. It is the source's record, never this root's.
+func TestInactiveMarkerIgnoresReceivedMarker(t *testing.T) {
+	t.Parallel()
+	b := backendWithSnapshots(t)
+	addTestAuthority(b)
+	foreign := `{"version":1,"since":"2020-01-01T00:00:00Z","dataset_guid":7,"lineage":"00000000-0000-4000-8000-000000000009","owner":"00000000-0000-4000-8000-000000000009"}`
+	b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: InactiveProperty, Value: foreign, Source: zfs.SourceReceived})
+	b.state.Received = map[string]map[string]string{"tank/data": {InactiveProperty: foreign}}
+	s, _ := NewService(b, testInstallation)
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	plan, err := s.ReconcileInactive(t.Context(), "tank/data", false, now, time.Hour, true)
+	if err != nil {
+		t.Fatalf("received marker refused: %v", err)
+	}
+	if plan.Marker == nil || plan.Marker.DatasetGUID == 7 || plan.Marker.Since != now.Format(time.RFC3339Nano) {
+		t.Fatalf("received marker was read as this root's: %+v", plan)
 	}
 }
 

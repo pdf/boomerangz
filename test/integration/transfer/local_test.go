@@ -551,14 +551,18 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 			}
 			target, found, checkpointed, retained := "local:"+destination, false, false, false
 			for _, reference := range references {
-				if reference.Target != target {
+				if reference.TargetID != lifecycle.TargetID(target) {
 					continue
 				}
 				found = true
+				sources, sourcesErr := reference.Sources(sourceState)
+				if sourcesErr != nil || len(sources) == 0 {
+					t.Fatalf("recovery reference has no sources: %+v err=%v", sources, sourcesErr)
+				}
 				snapshot := reference.SnapshotName()
 				retained = slices.Contains(sourceState.Holds[snapshot], reference.HoldName())
 				checkpointed = slices.ContainsFunc(sourceState.Objects, func(object zfs.Object) bool {
-					return object.Name == reference.BookmarkName() && object.Type == "bookmark" && object.GUID == reference.GUID()
+					return object.Name == reference.BookmarkName() && object.Type == "bookmark" && object.GUID == sources[0].GUID
 				})
 			}
 			if !found || !checkpointed || retained != (mode == "all") {

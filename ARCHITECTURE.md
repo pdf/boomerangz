@@ -231,11 +231,10 @@ ZFS-native recovery/ownership state - there is no separate database.
 | --- | --- | --- |
 | `state:owner` | `lifecycle.RootAuthority` callers (adoption, first management) | Installation UUID that owns a source root ([internal/lifecycle/authority.go](internal/lifecycle/authority.go), `OwnerProperty`). |
 | `state:lineage` | Same as above | Per-root lineage UUID, shared by the root's owned snapshots ([internal/lifecycle/ownership.go](internal/lifecycle/ownership.go), `LineageProperty`). |
-| `state:snapshot` | `lifecycle.Metadata.Properties()` at snapshot creation | Per-snapshot UUID embedded on the snapshot itself, not the dataset. |
-| `state:created` | Same as above | RFC3339Nano creation timestamp, also embedded per snapshot. |
-| `state:reference:<target-id>:<stream-id>:<snapshot-uuid>` | `Service.ProtectSet` | JSON `Reference` proof for one stream's endpoint on one target: the stream's own snapshot, plus its descendants' for a `-R` stream, each held and later bookmarked ([internal/lifecycle/reference.go](internal/lifecycle/reference.go)). One per member stream, so members at different instants advance independently. |
-| `state:target:<target-id>` | `transfer` binding logic | JSON `TargetBinding` recording a source's persistent identity for one configured destination ([internal/transfer/binding.go](internal/transfer/binding.go)). |
-| `state:target:<target-id>:suspended` | `transfer.SetTargetSuspended` | Marks a target unverified/suspended pending adoption revalidation. |
+| `state:snapshot` | `lifecycle.Metadata.Properties()` at snapshot creation | Per-snapshot UUID embedded on the snapshot itself, not the dataset. The creation time is not stored: the snapshot name encodes it to the nanosecond, and `Ownership` reads it from there. |
+| `state:reference:<target-id>:<stream-id>:<snapshot-uuid>` | `Service.ProtectSet` | Recovery proof for one stream's endpoint on one target: the stream's own snapshot, plus its descendants' for a `-R` stream, each held and later bookmarked ([internal/lifecycle/reference.go](internal/lifecycle/reference.go)). One per member stream, so members at different instants advance independently. The value is fixed-size JSON `{stream, created, recursive}`: the stream relative to the root (omitted for the root's own), the snapshot's creation time (bookmarks carry only the UUID, so the snapshot name cannot be rebuilt without it), and whether the stream carries its subtree. Everything else is derived: the lineage is the root's, the target ID and snapshot UUID are in the key, and the endpoint's snapshots and GUIDs are read from ZFS by `Reference.Sources`. |
+| `state:target:<target-id>` | `transfer` binding logic | A source's persistent identity for one configured destination ([internal/transfer/binding.go](internal/transfer/binding.go)). The value is JSON `{version, pool_guid, mapped, anchor_guid, anchor}`: `mapped` is the mapped dataset the binding was made for, and `anchor` is stored only while bootstrapping, when it names the mapped dataset's nearest existing ancestor; after the first receive the binding moves to the replica, which `mapped` already names. The rest of the in-memory `TargetBinding` is what configuration says about the target and is rebuilt from it: the key hashes the canonical target, which also encodes the transport and destination root, and the pool and relative path follow from the anchor. |
+| `state:target:<target-id>:suspended` | `transfer.SetTargetSuspended` | Marks a target unverified/suspended pending adoption revalidation. It stays separate from the binding because adoption suspends a remote it cannot reach, which may have no binding yet. |
 | `state:inactive` | `Service.ReconcileInactive` | JSON `InactiveMarker` recording when an owned root first went inactive, for delayed retirement ([internal/lifecycle/inactive.go](internal/lifecycle/inactive.go)). |
 
 Cross-cutting rules that hold across all of these:
@@ -249,39 +248,84 @@ Cross-cutting rules that hold across all of these:
   pruning, transfer, or recovery-state mutation for that root - this is how
   a moved pool (same properties, different host) fails closed instead of
   auto-adopting.
-- **Per-snapshot metadata (`state:lineage`, `state:snapshot`, `state:created`)
-  proves ownership of one exact snapshot**, independent of the root
-  markers. `Ownership` (ownership.go:74-109) requires all three to be
-  explicitly stored *on the snapshot object itself* (`local` or `received`
+- **Per-snapshot metadata (`state:lineage`, `state:snapshot`, and the
+  creation time in the snapshot name) proves ownership of one exact
+  snapshot**, independent of the root markers. `Ownership` (ownership.go)
+  requires both properties to be explicitly stored *on the snapshot object
+  itself* (`local` or `received`
   source - a received snapshot's own metadata is trusted once its parent
   root's authority checks out), matching lineage, and requires the snapshot
   name to be the exact deterministic encoding of that metadata
   (`Metadata.Name()`). A `boomerangz-`-prefixed name alone proves nothing;
   names and metadata must agree, or the snapshot is treated as foreign.
+  Because the creation time is read from the name and the name's UUID
+  suffix is only its first eight characters, renaming an owned snapshot to
+  another timestamp with the same suffix is not detected: the snapshot
+  keeps its ownership and is aged, for retention, from the new timestamp.
+  This was accepted in exchange for not storing the time twice; do not
+  rename boomerangz snapshots.
 - **Reference proofs (`state:reference:*`) gate hold/bookmark lifecycle,
-  not the transfer itself.** `Protect`/`ProtectSet` write the JSON proof
-  *before* placing the corresponding hold (reference.go:125-243), so an
+  not the transfer itself.** A proof records the hold intent, not the holds:
+  `Reference.Sources` derives the endpoint's snapshots from ZFS as the stream
+  (and, for a recursive proof, each descendant) whose `<ds>@<name>` carries
+  hold `boomerangz-<target-id>`, or, once that hold is released, whose
+  bookmark `<ds>#boomerangz-<target-id>-<uuid>` remains. A source's GUID is
+  its snapshot's, or its bookmark's once the snapshot is pruned (a bookmark
+  keeps its snapshot's GUID, as does the destination's copy); where both
+  exist they must agree. So the proof is the same size however many datasets
+  a `-R` stream carries, and `Direct.SetProperties` and `ProtectSet` still
+  refuse any value over `zfs.MaxUserPropertyValue` as a backstop. The cost,
+  accepted, is that a hold or bookmark forged with the exact tag or name
+  under a proved stream is taken as part of its endpoint. `Protect`/`ProtectSet`
+  write the proof *before* placing the corresponding hold, so an
   interruption between the two leaves a reconstructable, idempotent retry
-  rather than an orphaned hold. `Checkpoint`/`CheckpointSet` only advance a
-  bookmark after the caller supplies a verified destination GUID
-  (reference.go:249-324) - the property never claims verification the
-  daemon hasn't itself confirmed via a completed receive.
-  `ReleaseReference` (reference.go:328-402) is the only path that removes a
-  reference proof, and only after re-confirming the hold/bookmark GUIDs
-  still match; it inherits (clears) the property last, after the ZFS-side
-  hold and bookmark are already gone.
+  rather than an orphaned hold, and a target hold no proof stands behind is
+  refused. `Checkpoint`/`CheckpointSet` only advance a bookmark after the
+  caller supplies a verified destination GUID for every member not yet
+  bookmarked - the property never claims verification the daemon hasn't
+  itself confirmed via a completed receive. `ReleaseReference` is the only
+  path that removes a reference proof, and only after re-confirming the
+  hold/bookmark GUIDs still match; it inherits (clears) the property last,
+  after the ZFS-side hold and bookmark are already gone. Retirement verifies
+  each destination replica against the source GUIDs `Sources` derives, and
+  clean and retirement map a proof's target ID back to a configured target by
+  hashing each configured canonical target; a proof whose target is no
+  longer configured cannot be checked, and blocks clean until it is, or
+  until `dataset clean --forget-target` lets go of that one target
+  (`lifecycle.forgetPlan`): it removes the target's proofs, the holds and
+  bookmarks they record, its binding and its suspension marker, unchecked,
+  and nothing else.
 - **Target bindings (`state:target:*`) pin a source to a specific physical
-  destination, not just a name.** `TargetBinding` records pool GUID, anchor
-  dataset GUID, and relative path (binding.go:23-34); every planned transfer
-  re-resolves and compares against the stored value
-  (`transfer.plan.Build`, plan.go:269-297), and a same-named destination
+  destination, not just a name.** A binding stores the pool GUID and the
+  anchor dataset's GUID; every planned transfer rebuilds the binding from
+  configuration and the live identity of its anchor and compares the two by
+  struct equality (`transfer.plan.Build`), and a same-named destination
   with a different GUID is blocked rather than silently treated as the same
-  target - the operator must explicitly reseed or adopt instead.
-- **All of these reject a "hidden received" value that disagrees with the
-  local one** (`state.Received[dataset][key]` checks in authority.go:55-59,
-  reference.go, inactive.go:94-97, binding.go:191-194, 253-255) - a
-  conflicting received copy of internal state forces an error demanding
-  explicit resolution rather than picking one value silently.
+  target - the operator must explicitly reseed or adopt instead. The
+  binding also stores the mapped dataset it was made for, because
+  configuration alone cannot say where the replica is once the mapping
+  changes: a new `discard` or destination root recomputes the mapped
+  dataset, and a binding made for another one fails with
+  `transfer.MappingChangedError` in transfer, resume, reseed, inspection and
+  live target checks alike, during bootstrap as well as afterwards. The
+  operator restores the old mapping, or forgets the target with
+  `dataset clean --forget-target` so the next transfer seeds the new one.
+  Discovery's overlap detection finds a root's
+  binding for a configured target by hashing that target's canonical
+  identity (`discovery.RemoteDestination.Canonical` for remotes).
+- **On a source root, a received copy of internal state is provenance, not
+  authority.** A replica received with `-R` or `props` keeps the sending
+  installation's owner, inactive marker, target bindings, suspension markers
+  and reference proofs, as received values or, once `receive -x` or a local
+  value masks them, as hidden received values that ZFS keeps whatever the
+  receive asks. Promoting such a replica with `dataset adopt` (PLAN.md 5.3)
+  sets a local owner and lineage over them, and every reader takes only the
+  local value and ignores the received one (`RootAuthority`,
+  `storedTargetBinding`, `TargetSuspended`, `decodeInactiveMarker`,
+  `referenceRecords`, `ProtectSet`). The exception is the lineage: a
+  promoted replica continues its source's history, so a hidden received
+  lineage that disagrees with the local one is refused (`RootAuthority`,
+  `storedLineage`).
 - **Discovery reads only a narrow, fixed slice of this namespace globally.**
   `GetLifecycleProperties` ([internal/zfs/direct.go:186-197](internal/zfs/direct.go#L186-L197))
   fetches only `state:owner`, `state:lineage`, and `state:inactive` across
@@ -435,6 +479,9 @@ treat the plan as historical intent, not a current map:
   the plan's package list.
 - `internal/testutil/commandtest` (named in the plan) does not exist; only
   `internal/testutil/zfstest` is present.
+- Section 5's per-snapshot metadata lists `state:created`. It is no longer
+  stored: the snapshot name already encodes the creation time, and ownership
+  requires the name to match the metadata anyway.
 - The CLI has grown a hidden `ssh-shell` command and `config reload` /
   human-readable `dataset list`/`dataset inspect` output beyond the plan's
   Section 11 initial CLI shape - both are described in the plan itself as

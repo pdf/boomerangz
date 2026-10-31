@@ -1,7 +1,7 @@
 package transfer
 
 import (
-	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -273,11 +273,11 @@ func TestVerifyTargetBindingRejectsSameNamedReplacement(t *testing.T) {
 	})
 	identity := view.DestinationIdentity
 	backend := &localBackend{source: view.Source, identity: &identity}
-	if _, err := VerifyTargetBinding(t.Context(), backend, view.Source, request.Source, plan.TargetBinding.CanonicalTarget, request.DestinationRoot); err != nil {
+	if _, err := VerifyTargetBinding(t.Context(), backend, view.Source, request); err != nil {
 		t.Fatalf("stable target rejected: %v", err)
 	}
 	identity.GUID++
-	if _, err := VerifyTargetBinding(t.Context(), backend, view.Source, request.Source, plan.TargetBinding.CanonicalTarget, request.DestinationRoot); err == nil {
+	if _, err := VerifyTargetBinding(t.Context(), backend, view.Source, request); err == nil {
 		t.Fatal("same-named replacement accepted")
 	}
 }
@@ -291,17 +291,14 @@ func TestBookmarkBaseRequiresRecordedTargetProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := lifecycle.Reference{Target: "local:backup/data", Dataset: request.Source, Metadata: metadata, Sources: []lifecycle.ReferenceSource{{Dataset: request.Source, GUID: base.GUID, Metadata: metadata}}}
+	ref := lifecycle.Reference{TargetID: lifecycle.TargetID("local:backup/data"), Dataset: request.Source, Metadata: metadata}
 	view.Source.Objects[1] = zfs.Object{Name: ref.BookmarkName(), Type: "bookmark", GUID: base.GUID, CreateTXG: base.CreateTXG}
 	request.Policy.Incremental = "latest"
 	if _, err := Build(request, rootStream(view), fixtureInstallation); err == nil {
 		t.Fatal("claimed name-only bookmark")
 	}
-	value, err := json.Marshal(ref)
-	if err != nil {
-		t.Fatal(err)
-	}
-	view.Source.Properties = append(view.Source.Properties, zfs.Property{Dataset: request.Source, Name: ref.PropertyName(), Value: string(value), Source: zfs.SourceLocal})
+	value := fmt.Sprintf(`{"created":%q}`, metadata.Created.Format(time.RFC3339Nano))
+	view.Source.Properties = append(view.Source.Properties, zfs.Property{Dataset: request.Source, Name: ref.PropertyName(), Value: value, Source: zfs.SourceLocal})
 	plan, err := Build(request, rootStream(view), fixtureInstallation)
 	if err != nil || plan.Base != ref.BookmarkName() {
 		t.Fatalf("bookmark=%v err=%v", plan, err)

@@ -56,12 +56,21 @@ permission check.
 | `boomerangz dataset adopt DATASET` | Preview adoption of an actor root; `--apply` performs the revalidated plan. A member is refused with its root named. |
 | `boomerangz dataset reseed DATASET TARGET` | Preview destruction and fresh seeding of one actor root's replica on a local destination root or named remote that the root or any member sends to, resetting every member on it; `--apply` performs the revalidated plan. A member, or a destination blocked by a collision, is refused. |
 | `boomerangz dataset abort-receive DATASET TARGET` | Preview discarding the interrupted receives that a local destination root or named remote holds for one actor root and its members; `--apply` performs the revalidated plan. The replica, its snapshots, the binding and the source's replication history stay. A member, or a destination blocked by a collision, is refused. |
-| `boomerangz dataset clean [DATASET...]` | Preview decommissioning. Use `--recursive`, `--all`, `--destroy-owned-snapshots`, and `--apply` as needed. |
+| `boomerangz dataset clean [DATASET...]` | Preview decommissioning. Use `--recursive`, `--all`, `--destroy-owned-snapshots`, `--forget-target TARGET`, and `--apply` as needed. |
 | `boomerangz identity recover` | Preview recovery. `--owner UUID` resolves multiple candidates; `--apply` performs the revalidated plan. |
 
 `dataset clean --all` cannot be combined with dataset arguments. Named datasets
 are exact unless `--recursive` is supplied. Snapshot destruction is never
 implied by selecting a scope.
+
+`dataset clean --forget-target TARGET` narrows the clean to one target's state
+on each named source root and does not check the target: its recovery proofs,
+the holds and bookmarks they record, its binding and its suspension marker.
+`TARGET` is a configured remote's name, a local destination root, or a target
+ID, which is how a remote no longer configured is named; a clean blocked on it
+reports the ID. Repeat the flag to forget more than one target. It cannot be
+combined with `--recursive`, `--all` or `--destroy-owned-snapshots`, and the
+preview is blocked when a named root keeps no state for the target.
 
 ## Pairing
 

@@ -94,7 +94,7 @@ func TestCleanCLIPreviewAndApply(t *testing.T) {
 	cfg.Paths.IdentityDir = filepath.Join(t.TempDir(), "identity")
 	e := &cleanExecutor{properties: []zfs.Property{{Dataset: "tank/data", Name: "org.boomerangz:enabled", Value: "off", Source: zfs.SourceLocal}}}
 	var out bytes.Buffer
-	if err := runClean(t.Context(), &out, cfg, e, []string{"tank/data"}, false, false, false, false); err != nil {
+	if err := runClean(t.Context(), &out, cfg, e, []string{"tank/data"}, false, false, false, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if e.writes != 0 || !bytes.Contains(out.Bytes(), []byte(`"operation": "inherit"`)) {
@@ -104,7 +104,7 @@ func TestCleanCLIPreviewAndApply(t *testing.T) {
 		t.Fatal("preview created a lock")
 	}
 	out.Reset()
-	if err := runClean(t.Context(), &out, cfg, e, []string{"tank/data"}, false, false, false, true); err != nil {
+	if err := runClean(t.Context(), &out, cfg, e, []string{"tank/data"}, false, false, false, nil, true); err != nil {
 		t.Fatal(err)
 	}
 	if e.writes != 1 {

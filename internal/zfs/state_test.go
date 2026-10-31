@@ -254,7 +254,7 @@ func newRecordedPool() *recordedPool {
 			"tank/data@a": "tank/data@a\t" + ns + "state:lineage\t-\thidden-a\t-\n",
 			"tank/data@b": "tank/data@b\t" + ns + "state:snapshot\tsnap-b\tsnap-b\treceived\n",
 			"tank/data@c": "",
-			"tank/data@d": "tank/data@d\t" + ns + "state:created\t2026\t-\tlocal\n",
+			"tank/data@d": "tank/data@d\t" + ns + "state:lineage\tline\t-\tlocal\n",
 		},
 		holds: map[string]string{
 			"tank/data@a": "tank/data@a\tz-hold\t123\ntank/data@a\ta-hold\t123\n",
@@ -304,9 +304,9 @@ func TestInspectionIgnoresTheOrderZFSListsPropertiesIn(t *testing.T) {
 	t.Parallel()
 	ns := propertyNamespace
 	ordered := newRecordedPool()
-	ordered.all["tank/data@a"] = "tank/data@a\t" + ns + "state:created\t2026\t-\tlocal\n" + "tank/data@a\t" + ns + "state:lineage\tline\t-\tlocal\n" + "tank/data@a\t" + ns + "state:snapshot\tsnap-a\t-\tlocal\n"
+	ordered.all["tank/data@a"] = "tank/data@a\t" + ns + "enabled\ton\t-\tlocal\n" + "tank/data@a\t" + ns + "state:lineage\tline\t-\tlocal\n" + "tank/data@a\t" + ns + "state:snapshot\tsnap-a\t-\tlocal\n"
 	reversed := newRecordedPool()
-	reversed.all["tank/data@a"] = "tank/data@a\t" + ns + "state:snapshot\tsnap-a\t-\tlocal\n" + "tank/data@a\t" + ns + "state:lineage\tline\t-\tlocal\n" + "tank/data@a\t" + ns + "state:created\t2026\t-\tlocal\n"
+	reversed.all["tank/data@a"] = "tank/data@a\t" + ns + "state:snapshot\tsnap-a\t-\tlocal\n" + "tank/data@a\t" + ns + "state:lineage\tline\t-\tlocal\n" + "tank/data@a\t" + ns + "enabled\ton\t-\tlocal\n"
 	want, err := (&Direct{runner: ordered}).InspectState(t.Context(), "tank/data", false)
 	if err != nil {
 		t.Fatal(err)

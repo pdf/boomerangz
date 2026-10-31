@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
@@ -182,6 +183,9 @@ type Options struct {
 type RemoteDestination struct {
 	Namespace string
 	Root      string
+	// Canonical is the remote's canonical target, which a root's binding for
+	// it is keyed by. Without it, no binding can show a replica established.
+	Canonical string
 }
 
 // RemoteDestinationOf derives a remote's destination from its canonical
@@ -197,7 +201,7 @@ func RemoteDestinationOf(canonical string) (RemoteDestination, error) {
 	if parsed.Scheme == "" || parsed.Host == "" || zfs.ValidateDataset(root) != nil {
 		return RemoteDestination{}, fmt.Errorf("canonical target %q does not name a transport, address and root", canonical)
 	}
-	return RemoteDestination{Namespace: parsed.Scheme + "://" + strings.ToLower(parsed.Host), Root: root}, nil
+	return RemoteDestination{Namespace: parsed.Scheme + "://" + strings.ToLower(parsed.Host), Root: root, Canonical: canonical}, nil
 }
 
 // Scanner serializes discovery and exposes the last complete generation to readers.
@@ -695,9 +699,7 @@ func plannedReplicas(names []string, entries map[string]Entry, remotes map[strin
 		slices.Sort(local)
 		for _, target := range slices.Compact(local) {
 			if mapped, err := zfs.MapReceiveDataset(name, target, discard); err == nil {
-				established := slices.ContainsFunc(bound, func(b storedBinding) bool {
-					return b.Transport == "local" && b.DestinationRoot == target && b.MappedDataset == mapped
-				})
+				established := bound[lifecycle.TargetID("local:"+target)]
 				replicas = append(replicas, replica{root: name, target: "local destination " + target, name: target, namespace: "local", mapped: mapped, established: established})
 			}
 		}
@@ -708,9 +710,7 @@ func plannedReplicas(names []string, entries map[string]Entry, remotes map[strin
 				continue
 			}
 			if mapped, err := zfs.MapReceiveDataset(name, destination.Root, discard); err == nil {
-				established := slices.ContainsFunc(bound, func(b storedBinding) bool {
-					return b.Transport != "local" && b.DestinationRoot == destination.Root && b.MappedDataset == mapped
-				})
+				established := destination.Canonical != "" && bound[lifecycle.TargetID(destination.Canonical)]
 				replicas = append(replicas, replica{root: name, target: "remote " + target, name: target, remote: true, namespace: destination.Namespace, mapped: mapped, established: established})
 			}
 		}
@@ -827,25 +827,25 @@ func receivedLineage(entry Entry) string {
 	return lineage
 }
 
-// storedBinding is the part of a root's stored target binding that says where
-// a replica was established.
-type storedBinding struct {
-	Transport       string `json:"transport"`
-	DestinationRoot string `json:"destination_root"`
-	MappedDataset   string `json:"mapped_dataset"`
-}
-
-// storedBindings reads the target bindings stored locally on root. A binding
-// that does not parse proves nothing and is skipped.
-func storedBindings(root Entry) []storedBinding {
-	var bindings []storedBinding
+// storedBindings reads the target bindings stored locally on root, by the
+// target ID their key hashes, so a configured target is matched by hashing its
+// canonical identity. A binding made for a mapping the root's policy has since
+// changed still marks the target established here: transfers refuse it, and
+// the operator decides where the replica belongs. A binding that does not
+// parse proves nothing and is skipped.
+func storedBindings(root Entry) map[string]bool {
+	bindings := make(map[string]bool)
 	for _, row := range root.Stored {
-		if row.Dataset != root.Dataset.Name || row.Source != zfs.SourceLocal || !strings.HasPrefix(row.Name, policy.StateNamespace+"target:") {
+		id, isBinding := strings.CutPrefix(row.Name, policy.StateNamespace+"target:")
+		if row.Dataset != root.Dataset.Name || row.Source != zfs.SourceLocal || !isBinding || strings.Contains(id, ":") {
 			continue
 		}
-		var binding storedBinding
-		if json.Unmarshal([]byte(row.Value), &binding) == nil && binding.MappedDataset != "" {
-			bindings = append(bindings, binding)
+		var binding struct {
+			PoolGUID   uint64 `json:"pool_guid"`
+			AnchorGUID uint64 `json:"anchor_guid"`
+		}
+		if json.Unmarshal([]byte(row.Value), &binding) == nil && binding.PoolGUID != 0 && binding.AnchorGUID != 0 {
+			bindings[id] = true
 		}
 	}
 	return bindings

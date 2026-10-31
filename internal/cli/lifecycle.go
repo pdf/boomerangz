@@ -298,8 +298,8 @@ func cleanScopes(ctx context.Context, executor zfs.Executor, names []string, rec
 	return scopes, recursive, nil
 }
 
-func runClean(ctx context.Context, out io.Writer, cfg config.Config, executor zfs.Executor, names []string, recursive, all, destroy, apply bool) (resultErr error) {
-	if handled, err := runDaemonClean(ctx, out, cfg, names, recursive, all, destroy, apply); handled {
+func runClean(ctx context.Context, out io.Writer, cfg config.Config, executor zfs.Executor, names []string, recursive, all, destroy bool, forget []string, apply bool) (resultErr error) {
+	if handled, err := runDaemonClean(ctx, out, cfg, names, recursive, all, destroy, forget, apply); handled {
 		return err
 	}
 	scopes, recursive, err := cleanScopes(ctx, executor, names, recursive, all)
@@ -321,8 +321,12 @@ func runClean(ctx context.Context, out io.Writer, cfg config.Config, executor zf
 	if err != nil {
 		return err
 	}
+	forgotten, err := daemon.ResolveForgetTargets(targets, forget, recursive, all, destroy)
+	if err != nil {
+		return err
+	}
 	safety := standaloneSafety{socket: cfg.Paths.SocketPath, targets: targets}
-	options := lifecycle.CleanOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy}
+	options := lifecycle.CleanOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy, ForgetTargets: forgotten}
 	var plans []lifecycle.CleanPlan
 	blocked := false
 	for _, name := range scopes {

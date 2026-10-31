@@ -4,6 +4,7 @@ package lifecycle_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,13 @@ type cleanSafety struct{}
 
 func (cleanSafety) Quiescent(context.Context, []string) error         { return nil }
 func (cleanSafety) CheckTarget(context.Context, string, string) error { return nil }
+
+// unreachableSafety is quiescent, but no target it is asked about answers.
+type unreachableSafety struct{ cleanSafety }
+
+func (unreachableSafety) CheckTarget(context.Context, string, string) error {
+	return errors.New("target unreachable")
+}
 
 func activePolicy(dataset string) policy.Effective {
 	row := zfs.Property{Dataset: dataset, Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal}
@@ -148,7 +156,7 @@ func TestGuestLifecycle(t *testing.T) {
 		//
 		// This phase tests the lifecycle hook; actual destination verification is
 		// the responsibility of the transfer implementation in phase 4.
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()); err != nil {
+		if err := service.Checkpoint(t.Context(), root, ref, snapshotGUID(t, direct, ref.SnapshotName())); err != nil {
 			t.Fatal(err)
 		}
 		bookmark := ref.BookmarkName()
@@ -170,7 +178,7 @@ func TestGuestLifecycle(t *testing.T) {
 		if !slices.Contains(checkpointed, bookmark) {
 			t.Fatalf("checkpoint created no versioned bookmark: %v", checkpointed)
 		}
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()+1); err == nil {
+		if err := service.Checkpoint(t.Context(), root, ref, snapshotGUID(t, direct, ref.SnapshotName())+1); err == nil {
 			t.Fatal("accepted wrong destination GUID")
 		}
 		if after := bookmarks(t); !slices.Equal(after, checkpointed) {
@@ -221,13 +229,89 @@ func TestGuestLifecycle(t *testing.T) {
 		}
 	})
 
+	chain("forget-target", func(t *testing.T) {
+		const gone, kept = "ssh://gone/backup", "local:kept-target"
+		refs := map[string]lifecycle.Reference{}
+		for _, target := range []string{gone, kept} {
+			r, err := service.Protect(t.Context(), root, root+"@"+second.Name(), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := service.Checkpoint(t.Context(), root, r, snapshotGUID(t, direct, r.SnapshotName())); err != nil {
+				t.Fatal(err)
+			}
+			refs[target] = r
+		}
+		binding := lifecycle.TargetStatePrefix + lifecycle.TargetID(gone)
+		command(t, "zfs", "set", binding+`={"version":2}`, root)
+		// What stays: everything that is not the gone target's.
+		snapshot := func(t *testing.T) (map[string]bool, []string) {
+			t.Helper()
+			state, err := direct.InspectState(t.Context(), root, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			present := map[string]bool{}
+			for _, object := range state.Objects {
+				present[object.Name] = true
+			}
+			for _, property := range state.Properties {
+				if property.Source == zfs.SourceLocal {
+					present[property.Dataset+" "+property.Name] = true
+				}
+			}
+			for object, tags := range state.Holds {
+				for _, tag := range tags {
+					present[object+" "+tag] = true
+				}
+			}
+			var snapshots []string
+			for _, s := range lifecycle.Snapshots(state, root) {
+				snapshots = append(snapshots, s.Name)
+			}
+			return present, snapshots
+		}
+		goneState := []string{refs[gone].BookmarkName(), root + " " + refs[gone].PropertyName(), root + " " + binding, refs[gone].SnapshotName() + " " + refs[gone].HoldName()}
+		keptState := []string{refs[kept].BookmarkName(), root + " " + refs[kept].PropertyName(), refs[kept].SnapshotName() + " " + refs[kept].HoldName(), root + " " + lifecycle.LineageProperty}
+		before, snapshotsBefore := snapshot(t)
+		for _, name := range append(slices.Clone(goneState), keptState...) {
+			if !before[name] {
+				t.Fatalf("fixture: %s is missing", name)
+			}
+		}
+		// The gone target cannot be checked, which blocks an ordinary clean.
+		options := lifecycle.CleanOptions{ForgetTargets: []string{lifecycle.TargetID(gone)}}
+		preview, err := service.Clean(t.Context(), root, options, false, unreachableSafety{})
+		if err != nil || len(preview.Blockers) > 0 {
+			t.Fatalf("forget preview=%+v err=%v", preview, err)
+		}
+		applied, err := service.Clean(t.Context(), root, options, true, unreachableSafety{})
+		if err != nil || applied.Applied != len(preview.Actions) {
+			t.Fatalf("forget apply=%+v err=%v", applied, err)
+		}
+		after, snapshotsAfter := snapshot(t)
+		for _, name := range goneState {
+			if after[name] {
+				t.Errorf("forgotten target's %s remains", name)
+			}
+		}
+		for _, name := range keptState {
+			if !after[name] {
+				t.Errorf("kept target's %s was removed", name)
+			}
+		}
+		if !slices.Equal(snapshotsAfter, snapshotsBefore) {
+			t.Fatalf("snapshots changed: %v, was %v", snapshotsAfter, snapshotsBefore)
+		}
+	})
+
 	chain("clean", func(t *testing.T) {
 		var err error
 		ref, err = service.Protect(t.Context(), root, root+"@"+second.Name(), "local:disposable-target")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()); err != nil {
+		if err := service.Checkpoint(t.Context(), root, ref, snapshotGUID(t, direct, ref.SnapshotName())); err != nil {
 			t.Fatal(err)
 		}
 		// No transfer has run against this synthetic target; the test knows it has
@@ -281,4 +365,22 @@ func TestGuestLifecycle(t *testing.T) {
 		}
 	})
 	t.Logf("verified lifecycle on %s", root)
+}
+
+// snapshotGUID reads the GUID ZFS reports for one exact snapshot: a proof does
+// not record it, since the snapshot itself carries it.
+func snapshotGUID(t *testing.T, direct *zfs.Direct, snapshot string) uint64 {
+	t.Helper()
+	dataset, _, _ := strings.Cut(snapshot, "@")
+	state, err := direct.InspectState(t.Context(), dataset, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range state.Objects {
+		if object.Name == snapshot {
+			return object.GUID
+		}
+	}
+	t.Fatalf("snapshot %s is missing", snapshot)
+	return 0
 }
