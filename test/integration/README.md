@@ -190,6 +190,20 @@ result no longer says which, so a narrowed run says
 `PARTIAL RUN - NOT VERIFICATION` at both ends and in each stage summary. See
 [AGENTS.md](../../AGENTS.md); an unfiltered run is what "verified" means.
 
+CI runs the suite as parallel shards instead: `BOOMERANGZ_INTEGRATION_SHARD`
+names whole stages, takes neither filter, and each shard boots its own guest.
+`TestCIShardsCoverEveryStage`, a host-safe test in this directory, requires
+the shards in `quality.yml` to run every stage exactly once, so the jobs
+together are an unfiltered run. CI gives each guest the runner's 4 vCPUs with
+`BOOMERANGZ_GUEST_VCPUS`.
+
+The harness provisions a guest once and reuses it. After provisioning it
+flattens the system image into the image cache, keyed by the target's
+`config.sh` and `provision.sh`, and later runs boot a fresh overlay of it
+with a new cloud-init seed, skipping the download and provisioning. A
+provisioned image older than a week is rebuilt, so kernel and OpenZFS updates
+still arrive; CI keeps the cache between runs and keys it by the week too.
+
 A test that waits for an in-process daemon waits on its status subscription,
 through `internal/statuswait`, never by sleeping and re-reading `Status()` or
 the pool. The subscription is lossless from the moment it is taken and has

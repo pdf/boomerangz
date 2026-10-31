@@ -35,7 +35,10 @@ tests that were selected, so a filtered run prints
 `PARTIAL RUN - NOT VERIFICATION` at both ends and in every stage summary. Like
 `integration-test-compile` it is a development aid, not verification, and work
 is not verified against it - only an unfiltered `make integration-test` is.
-CI sets neither variable.
+CI sets neither variable. It splits the suite across parallel jobs with
+`BOOMERANGZ_INTEGRATION_SHARD`, each running whole stages unfiltered;
+`TestCIShardsCoverEveryStage` keeps the shards equal to every stage, so the
+jobs together are the verifying run. A shard alone is not.
 
 Clean up after every run, including interrupted ones. The harness destroys the
 pools inside the guest but never removes its own run root, so each run leaves
@@ -45,8 +48,9 @@ binaries - and nothing prunes it. Only `diagnostics/` is worth keeping
 afterwards: the console logs, the guest environment, and `failure.txt` when a
 run failed. Delete the rest. `RUNNER_TEMP` therefore wants real storage with a
 few GiB free rather than tmpfs, and `~/.cache/boomerangz-integration` is not
-scratch - it is the base image cache, and removing it costs a full image
-download and provision on the next run.
+scratch - it holds the base image and the guest system provisioned from it,
+which runs reuse for up to a week, and removing it costs a full image download
+and provision on the next run.
 
 Stop what you started. A run is a QEMU guest plus whatever is watching its
 log, and neither ends on its own: when a run finishes, is superseded, or is
