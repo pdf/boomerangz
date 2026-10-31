@@ -106,6 +106,11 @@ func (*DestinationUnavailableError) Temporary() bool { return true }
 // to retry.
 type PreparationChangedError struct {
 	Reason string
+	// History reports that only the stream's snapshots moved: its endpoint,
+	// base or the snapshots between them. The root's own snapshot and prune
+	// jobs lock the root, not the target, so they run alongside a transfer's
+	// preparation by design, and the stream plans again from what they left.
+	History bool
 }
 
 func (e *PreparationChangedError) Error() string { return e.Reason }
@@ -557,7 +562,7 @@ func (l *Local) prepareReceiveParents(ctx context.Context, request Request, view
 		return view, plan, err
 	}
 	if fresh.Snapshot != plan.Snapshot || fresh.Base != plan.Base || !reflect.DeepEqual(fresh.Expected, plan.Expected) {
-		return view, plan, &PreparationChangedError{Reason: "transfer history changed while preparing receive ancestors"}
+		return view, plan, &PreparationChangedError{Reason: "transfer history changed while preparing receive ancestors", History: true}
 	}
 	return prepared, fresh, nil
 }
@@ -625,17 +630,36 @@ func (l *Local) Apply(ctx context.Context, request Request, report Reporter) (Re
 	return result, nil
 }
 
+// preparationAttempts bounds how often one stream plans again because its
+// history moved during preparation. Each move needs a snapshot or prune job to
+// land inside a preparation, so a stream still moving after this many is left
+// to the caller's retry.
+const preparationAttempts = 3
+
 // applyStream sends one stream. A stream left resumable by an interrupted
 // receive resumes first and then plans again, so it ends at its newest endpoint.
 func (l *Local) applyStream(ctx context.Context, request Request, stream string, report Reporter) (Result, error) {
-	result, err := l.applyOnce(ctx, request, stream, report)
+	result, err := l.applySettled(ctx, request, stream, report)
 	if err != nil || result.Plan.Mode != "resume" {
 		return result, err
 	}
 	resumed := result.Plan.Snapshot
-	result, err = l.applyOnce(ctx, request, stream, report)
+	result, err = l.applySettled(ctx, request, stream, report)
 	result.Resumed, result.ResumedSnapshot = true, resumed
 	return result, err
+}
+
+// applySettled plans the stream again whenever its history moved during
+// preparation. Nothing has been sent by then, and the abandoned plan's holds
+// are retained recovery state, as they are for any failed attempt.
+func (l *Local) applySettled(ctx context.Context, request Request, stream string, report Reporter) (Result, error) {
+	for attempt := 1; ; attempt++ {
+		result, err := l.applyOnce(ctx, request, stream, report)
+		var changed *PreparationChangedError
+		if attempt == preparationAttempts || !errors.As(err, &changed) || !changed.History || ctx.Err() != nil {
+			return result, err
+		}
+	}
 }
 
 func (l *Local) applyOnce(ctx context.Context, request Request, stream string, report Reporter) (Result, error) {
@@ -738,7 +762,7 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 			return result, buildErr
 		}
 		if fresh.Snapshot != plan.Snapshot || fresh.Base != plan.Base || !reflect.DeepEqual(fresh.Expected, plan.Expected) || fresh.TargetBinding != plan.TargetBinding {
-			return result, &PreparationChangedError{Reason: "transfer history changed during preparation; recovery holds retained"}
+			return result, &PreparationChangedError{Reason: "transfer history changed during preparation; recovery holds retained", History: true}
 		}
 		// Newly written recovery records must also be excluded from property streams.
 		plan = fresh

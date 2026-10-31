@@ -426,6 +426,73 @@ func TestApplyMarksDatasetChangeDuringPreparationRetryable(t *testing.T) {
 	}
 }
 
+// addOwnedSnapshot appends an owned snapshot of the fixture's root at txg.
+func addOwnedSnapshot(t *testing.T, state *zfs.State, txg uint64) string {
+	t.Helper()
+	metadata, err := lifecycle.NewMetadata(fixtureLineage, time.Date(2026, 9, 6, 12, int(txg), 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "tank/data@" + metadata.Name()
+	state.Objects = append(state.Objects, zfs.Object{Name: name, Type: "snapshot", GUID: 100 + txg, CreateTXG: txg})
+	for key, value := range metadata.Properties() {
+		state.Properties = append(state.Properties, zfs.Property{Dataset: name, Name: key, Value: value, Source: zfs.SourceLocal})
+	}
+	return name
+}
+
+// The root's snapshot job locks the root, not the target, so it may land a
+// newer snapshot while a transfer prepares. The stream plans again and sends
+// it, rather than failing an attempt the daemon would only retry.
+func TestApplyPlansAgainWhenSnapshotLandsDuringPreparation(t *testing.T) {
+	t.Parallel()
+	request, view := testFixture(t)
+	addDestinationBase(&view)
+	request.Policy.Incremental = "latest"
+	backend := &localBackend{inventory: slices.Clone(view.Inventory), source: view.Source, destination: view.Destination, destExists: true}
+	var newer string
+	backend.afterSet = func() { newer = addOwnedSnapshot(t, &backend.source, 6) }
+	engine, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Apply(t.Context(), request, nil)
+	if err != nil || !result.Verified || result.Plan.Snapshot != newer || result.Plan.Base != view.Source.Objects[1].Name {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if streams := slices.DeleteFunc(slices.Clone(backend.writes), func(write string) bool { return write != "stream" }); len(streams) != 1 {
+		t.Fatalf("streams=%d writes=%v", len(streams), backend.writes)
+	}
+}
+
+func TestApplyBoundsPlanningAgainWhileHistoryKeepsMoving(t *testing.T) {
+	t.Parallel()
+	request, view := testFixture(t)
+	addDestinationBase(&view)
+	request.Policy.Incremental = "latest"
+	backend := &localBackend{inventory: slices.Clone(view.Inventory), source: view.Source, destination: view.Destination, destExists: true}
+	txg := uint64(5)
+	var land func()
+	land = func() {
+		txg++
+		addOwnedSnapshot(t, &backend.source, txg)
+		backend.afterSet = land
+	}
+	backend.afterSet = land
+	engine, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Apply(t.Context(), request, nil)
+	var changed *PreparationChangedError
+	if !errors.As(err, &changed) || !changed.History || !changed.Temporary() {
+		t.Fatalf("moving history was not left to a retry: %v", err)
+	}
+	if slices.Contains(backend.writes, "stream") {
+		t.Fatal("stream started while its history was still moving")
+	}
+}
+
 func TestApplyChecksBothEndpointsBeforeMutation(t *testing.T) {
 	t.Parallel()
 	source, request := newLocalBackend(t)
