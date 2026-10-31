@@ -4,8 +4,8 @@ Most releases need nothing from you beyond upgrading the package. A release
 that does has a section here, newest first, saying what changed, what to do,
 and how to check it is done. Read every section between the version you run
 and the one you are installing. The GitHub release for such a version leads
-with the same notes, and the Arch package prints a reminder when an upgrade
-crosses it.
+with the same notes, and the Arch and Ubuntu packages print a reminder when an
+upgrade crosses it.
 
 Upgrade through the same package channel you installed, as described in
 [Installation](/getting-started/installation#upgrade-or-remove).

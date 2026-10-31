@@ -2,7 +2,7 @@
 
 ::: code-group
 
-```text [Arch Linux / derivatives]
+```text [Arch Linux / Ubuntu]
 /usr/bin/boomerangz
     Executable.
 

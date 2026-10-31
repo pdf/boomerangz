@@ -19,9 +19,10 @@
 Boomerangz manages OpenZFS snapshots and local or remote replication, including
 systems whose backup destinations are not always online.
 
-The initial supported platform is CachyOS with OpenZFS. Release packaging
-provides source-built `boomerangz` and prebuilt `boomerangz-bin` AUR packages
-for `x86_64` and `aarch64`.
+Supported platforms are CachyOS and Ubuntu (the current LTS and interim
+releases) with OpenZFS. Release packaging provides source-built `boomerangz`
+and prebuilt `boomerangz-bin` AUR packages, and a `.deb` published through an
+apt repository at `https://boomerangz.org/apt`, for `x86_64` and `aarch64`.
 
 ## Get started
 
