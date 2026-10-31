@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/pdf/boomerangz/internal/policy"
@@ -151,5 +152,21 @@ func TestCleanStopsOnUnexpectedMutation(t *testing.T) {
 	plan, err := s.Clean(t.Context(), "tank/data", CleanOptions{}, true, testCleanSafety{})
 	if err == nil || plan.Applied != 1 || len(b.writes) != 1 {
 		t.Fatalf("continued after replacement: %v %v", plan, err)
+	}
+}
+
+func TestCleanTransitionNamesWhatDiffered(t *testing.T) {
+	t.Parallel()
+	property := zfs.Property{Dataset: "tank/data@a", Name: "org.boomerangz:state:created", Value: "2026", Source: zfs.SourceLocal}
+	before := zfs.State{Objects: []zfs.Object{{Name: "tank/data@a", Type: "snapshot", GUID: 1}}, Properties: []zfs.Property{property}}
+	action := CleanAction{Operation: "inherit", Object: "tank/data@a", Property: property.Name}
+	after := zfs.State{Objects: before.Objects}
+	if difference := cleanTransition(before, after, action); difference != "" {
+		t.Fatalf("the expected transition was reported as %q", difference)
+	}
+	stray := zfs.Property{Dataset: "tank/data@a", Name: "org.boomerangz:state:lineage", Value: "x", Source: zfs.SourceLocal}
+	after.Properties = []zfs.Property{stray}
+	if difference := cleanTransition(before, after, action); !strings.Contains(difference, "state:lineage") || !strings.Contains(difference, "appeared") {
+		t.Fatalf("difference = %q, want the property that appeared", difference)
 	}
 }

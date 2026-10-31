@@ -346,8 +346,8 @@ func (s *Service) clean(ctx context.Context, dataset string, options CleanOption
 		if err != nil {
 			return plan, err
 		}
-		if !cleanTransition(current, after, action) {
-			return plan, fmt.Errorf("unexpected state change after clean action on %s", action.Object)
+		if difference := cleanTransition(current, after, action); difference != "" {
+			return plan, fmt.Errorf("unexpected state change after clean action %s on %s: %s", action.Operation, action.Object, difference)
 		}
 		current = after
 		// Unexpected dependencies appearing during apply always stop further work.
@@ -361,7 +361,9 @@ func (s *Service) clean(ctx context.Context, dataset string, options CleanOption
 // Only the exact intended effect may become the baseline for the next command.
 // Received keys may disappear from CLI enumeration after inheritance, but may
 // not appear or change value unnoticed.
-func cleanTransition(before, after zfs.State, action CleanAction) bool {
+// cleanTransition describes how after differs from before with exactly action
+// applied, or returns "" when it does not.
+func cleanTransition(before, after zfs.State, action CleanAction) string {
 	expected := before
 	expected.Objects = slices.Clone(before.Objects)
 	expected.Properties = slices.Clone(before.Properties)
@@ -383,7 +385,7 @@ func cleanTransition(before, after zfs.State, action CleanAction) bool {
 	for object, values := range after.Received {
 		for key, value := range values {
 			if before.Received[object][key] != value {
-				return false
+				return fmt.Sprintf("received %s on %s became %q, was %q", key, object, value, before.Received[object][key])
 			}
 		}
 	}
@@ -418,5 +420,44 @@ func cleanTransition(before, after zfs.State, action CleanAction) bool {
 	}
 	normalize(&expected)
 	normalize(&after)
-	return reflect.DeepEqual(expected, after)
+	if reflect.DeepEqual(expected, after) {
+		return ""
+	}
+	var differences []string
+	for _, object := range expected.Objects {
+		if !slices.Contains(after.Objects, object) {
+			differences = append(differences, "object "+object.Name+" missing")
+		}
+	}
+	for _, object := range after.Objects {
+		if !slices.Contains(expected.Objects, object) {
+			differences = append(differences, "object "+object.Name+" appeared")
+		}
+	}
+	for _, property := range expected.Properties {
+		if !slices.Contains(after.Properties, property) {
+			differences = append(differences, fmt.Sprintf("property %s on %s (%s) missing", property.Name, property.Dataset, property.Source))
+		}
+	}
+	for _, property := range after.Properties {
+		if !slices.Contains(expected.Properties, property) {
+			differences = append(differences, fmt.Sprintf("property %s=%q on %s (%s) appeared", property.Name, property.Value, property.Dataset, property.Source))
+		}
+	}
+	if len(differences) == 0 && (!slices.Equal(expected.Objects, after.Objects) || !slices.Equal(expected.Properties, after.Properties)) {
+		differences = append(differences, "objects or properties reordered")
+	}
+	if !reflect.DeepEqual(expected.Holds, after.Holds) {
+		differences = append(differences, fmt.Sprintf("holds %v, expected %v", after.Holds, expected.Holds))
+	}
+	if !reflect.DeepEqual(expected.Clones, after.Clones) {
+		differences = append(differences, fmt.Sprintf("clones %v, expected %v", after.Clones, expected.Clones))
+	}
+	if !reflect.DeepEqual(expected.ResumeTokens, after.ResumeTokens) {
+		differences = append(differences, "resume tokens changed")
+	}
+	if len(differences) == 0 {
+		differences = append(differences, "state differs")
+	}
+	return strings.Join(differences, "; ")
 }
