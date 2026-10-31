@@ -412,22 +412,23 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	// waiting-lock - the daemon is holding it back. Both are events the daemon
 	// reports, so whichever it does decides the overlap the phase asserts, and
 	// nothing depends on how far apart the two jobs reached their sends.
-	// A sibling counts as held back only while it waits on this root's own
-	// transfer: it may also wait on its own jobs, such as the destination
-	// prune that follows its previous transfer, and that says nothing about
-	// whether the two roots share a lock.
-	awaitSibling := func(from statuswait.Cursor) func(context.Context, string) error {
+	// awaitSibling holds the first root to send until its sibling sends too,
+	// or, when heldBack counts, until the sibling waits for a lock. A lock
+	// wait shows the roots serialized only while they are meant to be: a
+	// sibling may also wait on its own destination prune from the previous
+	// pass, and the pool names only a job's first blocker, so the reason
+	// cannot say whose lock it is.
+	awaitSibling := func(from statuswait.Cursor, heldBack bool) func(context.Context, string) error {
 		other := map[string]string{left: right, right: left}
 		return func(ctx context.Context, source string) error {
 			sibling, gated := other[source]
 			if !gated {
 				return nil
 			}
-			heldBack := "waiting for " + job(source) + " to release its lock"
 			for {
 				changed := waiter.Changed()
 				if slices.ContainsFunc(waiter.Transitions()[from:], func(event daemon.Event) bool {
-					return event.Job == job(sibling) && (event.State == "sending" || (event.State == "waiting-lock" && strings.HasPrefix(event.Reason, heldBack)))
+					return event.Job == job(sibling) && (event.State == "sending" || (heldBack && event.State == "waiting-lock"))
 				}) {
 					return nil
 				}
@@ -445,7 +446,7 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	// may create receive ancestors the other would race. The first to send
 	// waits for the other to be held back on the lock. The gate is in place
 	// before the daemon runs, so no send passes it unobserved.
-	observed.setGate(awaitSibling(0))
+	observed.setGate(awaitSibling(0, true))
 	go func() { done <- runtime.Run(ctx) }()
 
 	// Each phase names the snapshots it transfers: the ones its snapshot jobs
@@ -497,7 +498,7 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	// Once each root's replica exists, the roots no longer share a lock scope
 	// and send concurrently: the first to send waits for the other to send too.
 	from := waiter.Settle(t, 30*time.Second)
-	observed.setGate(awaitSibling(from))
+	observed.setGate(awaitSibling(from, false))
 	accepted, err := runtime.Trigger([]string{left, right})
 	if err != nil || len(accepted) != 2 {
 		t.Fatalf("trigger roots=%v err=%v", accepted, err)
