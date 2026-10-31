@@ -125,7 +125,7 @@ failure attributable to the transport instead of to the test.
 | `ssh-shell` operations outside `ssh_shell.replication_roots` refused | `TestGuestAccessControlRefusals/operation-outside-replication-roots` |
 | A receive root outside `ssh_shell.replication_roots` refused before anything is created | `TestGuestAccessControlRefusals/receive-root-outside-replication-roots` |
 | A missing `zfs allow` grant reported with the account, dataset and permissions | `TestGuestAccessControlRefusals/missing-delegation` |
-| `dataset list` status classification from real pool state, a descendant reading as a member of its root | `TestGuestDatasetCLI/list` |
+| `dataset list` status classification from real pool state, a descendant reading as a member of its root, inactive datasets hidden unless `--status all`, and a received replica reading as a target | `TestGuestDatasetCLI/list` |
 | `dataset inspect` provenance: local authority on the source, and receive isolation plus received state on the replica | `TestGuestDatasetCLI/inspect-source`, `TestGuestDatasetCLI/inspect-received` |
 | `dataset reseed` resolving a configured target, destroying the replica, and leaving the source sendable | `TestGuestDatasetCLI/reseed` |
 | `dataset abort-receive` listing a real interrupted receive, discarding exactly it with `zfs receive -A`, and leaving the source sendable | `TestGuestAbortReceiveCLI` |

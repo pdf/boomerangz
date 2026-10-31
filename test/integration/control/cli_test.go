@@ -172,7 +172,7 @@ func TestGuestDatasetCLI(t *testing.T) {
 	zfsSet(t, "set", policy.Namespace+"enabled=on", policy.Namespace+"remote=absent", invalid)
 
 	t.Run("list", func(t *testing.T) {
-		statuses := datasetStatuses(t, cli(t, "dataset", "list"))
+		statuses := datasetStatuses(t, cli(t, "dataset", "list", "--status", "all"))
 		for dataset, want := range map[string]string{
 			active:   "active",
 			child:    "member",
@@ -182,6 +182,9 @@ func TestGuestDatasetCLI(t *testing.T) {
 			if statuses[dataset] != want {
 				t.Errorf("dataset list reported %s as %q, want %q", dataset, statuses[dataset], want)
 			}
+		}
+		if status, listed := datasetStatuses(t, cli(t, "dataset", "list"))[inactive]; listed {
+			t.Errorf("dataset list showed inactive %s as %q without --status all", inactive, status)
 		}
 		if !strings.Contains(cli(t, "dataset", "list"), "dataset inspect <dataset>") {
 			t.Error("dataset list did not point at inspect despite reporting an invalid dataset")
@@ -286,9 +289,14 @@ func TestGuestDatasetCLI(t *testing.T) {
 		if strings.Contains(output, "(received on") && strings.Contains(output, "enabled = on") {
 			t.Errorf("a public property crossed the receive boundary:\n%s", output)
 		}
+		// The replica is where the root places it, and carries the root's
+		// received lineage besides.
 		statuses := datasetStatuses(t, cli(t, "dataset", "list"))
-		if statuses[destinationRoot] != "inactive" {
-			t.Errorf("dataset list reported the replica as %q, want inactive", statuses[destinationRoot])
+		if statuses[destinationRoot] != "target" {
+			t.Errorf("dataset list reported the replica as %q, want target", statuses[destinationRoot])
+		}
+		if want := "Replica: of " + active + " on local destination " + destinationRoot + "; received lineage " + lineage + "\n"; !strings.Contains(output, want) {
+			t.Errorf("dataset inspect is missing %q:\n%s", want, output)
 		}
 	})
 

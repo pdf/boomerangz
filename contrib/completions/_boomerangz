@@ -3,7 +3,7 @@
 _boomerangz_option_takes_value() {
   case $1 in
     --config|--config-dir|--socket|--credential|--listener|\
-      --client-cert|--client-key|--scope|--expires-in|--owner)
+      --client-cert|--client-key|--scope|--expires-in|--owner|--status)
       return 0
       ;;
   esac
@@ -20,7 +20,8 @@ _boomerangz_options() {
     'version ') reply=(-h --help --json) ;;
     'pairing create') reply=(-h --help --config --config-dir --listener --client-cert --client-key --scope --expires-in) ;;
     'pairing import'|'pairing list'|'pairing revoke') reply=(-h --help --config --config-dir) ;;
-    'dataset list'|'dataset inspect') reply=(-h --help --config --config-dir --json) ;;
+    'dataset list') reply=(-h --help --config --config-dir --status --json) ;;
+    'dataset inspect') reply=(-h --help --config --config-dir --json) ;;
     'dataset adopt'|'dataset reseed'|'dataset abort-receive') reply=(-h --help --config --config-dir --apply) ;;
     'dataset clean') reply=(-h --help --config --config-dir --recursive --all --destroy-owned-snapshots --apply) ;;
     'identity recover') reply=(-h --help --config --config-dir --owner --apply) ;;
@@ -76,6 +77,14 @@ _boomerangz_candidates() {
       reply=("${(@)reply/#/${prefix}}")
       return
       ;;
+    --status=*)
+      local prefix=${current%=*}=
+      local value=${current#*=}
+      reply=(all active member excluded target inactive invalid)
+      reply=(${(M)reply:#${value}*})
+      reply=("${(@)reply/#/${prefix}}")
+      return
+      ;;
   esac
 
   if _boomerangz_option_takes_value "$previous"; then
@@ -83,6 +92,10 @@ _boomerangz_candidates() {
       --config|--config-dir|--socket|--client-cert|--client-key) completion_kind=files ;;
       --scope)
         reply=(status trigger replicate prune admin)
+        reply=(${(M)reply:#${current}*})
+        ;;
+      --status)
+        reply=(all active member excluded target inactive invalid)
         reply=(${(M)reply:#${current}*})
         ;;
     esac
