@@ -727,8 +727,10 @@ func TestGuestDaemonReportsMissingDestinationPermissions(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
 
-	_, created := createdSnapshot(t, waiter, 30*time.Second, 0, source)
-	landed := waitForTransferred(t, waiter, "local:"+source+":"+container, source, created)
+	// The cursor createdSnapshot returns is past the snapshot job's
+	// succeeded; the wait reads that transition to learn the snapshot.
+	_, after := createdSnapshot(t, waiter, 30*time.Second, 0, source)
+	landed := waitForTransferred(t, waiter, "local:"+source+":"+container, source, after-1)
 	if landed.Destination != container+"/"+name {
 		t.Fatalf("transfer landed on %q, want %q", landed.Destination, container+"/"+name)
 	}
