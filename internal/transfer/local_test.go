@@ -27,6 +27,8 @@ type localBackend struct {
 	checks      map[string][]string
 	checkErr    error
 	afterSet    func()
+	// inspections records every InspectState call as dataset, recursive.
+	inspections []string
 	// poolGUID distinguishes another host's backup pool; zero is this host's.
 	poolGUID uint64
 }
@@ -51,7 +53,8 @@ func (b *localBackend) ListDatasets(context.Context) ([]zfs.Dataset, error) {
 	return slices.Clone(b.inventory), nil
 }
 
-func (b *localBackend) InspectState(_ context.Context, dataset string, _ bool) (zfs.State, error) {
+func (b *localBackend) InspectState(_ context.Context, dataset string, recursive bool) (zfs.State, error) {
+	b.inspections = append(b.inspections, fmt.Sprintf("%s %t", dataset, recursive))
 	if dataset == "tank/data" {
 		return cloneState(b.source)
 	}
@@ -622,6 +625,44 @@ func TestApplyRotatesProtectedIncrementalAllBase(t *testing.T) {
 	references, err := lifecycle.References(state, request.Source, fixtureLineage)
 	if err != nil || len(references) != 1 || references[0].SnapshotName() != next {
 		t.Fatalf("references=%+v err=%v", references, err)
+	}
+}
+
+// Each Apply reads a scope again only after something may have changed it:
+// its own preparation, a stream, or a write the read must verify. These counts
+// are what that costs; a change to one should be a deliberate new check.
+func TestApplyInspectsOnlyAfterChange(t *testing.T) {
+	t.Parallel()
+	backend, request := newLocalBackend(t)
+	engine, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply := func(mode string, inspections int) {
+		t.Helper()
+		backend.inspections, backend.writes = nil, nil
+		result, err := engine.Apply(t.Context(), request, nil)
+		if err != nil || !result.Verified || result.Plan.Mode != mode {
+			t.Fatalf("%s: result=%+v err=%v", mode, result, err)
+		}
+		if len(backend.inspections) != inspections {
+			t.Fatalf("%s: %d inspections, want %d: %v", mode, len(backend.inspections), inspections, backend.inspections)
+		}
+	}
+	apply("full", 9)
+	metadata, err := lifecycle.NewMetadata(fixtureLineage, time.Date(2026, 9, 6, 12, 10, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := request.Source + "@" + metadata.Name()
+	backend.source.Objects = append(backend.source.Objects, zfs.Object{Name: next, Type: "snapshot", GUID: 110, CreateTXG: 10})
+	for key, value := range metadata.Properties() {
+		backend.source.Properties = append(backend.source.Properties, zfs.Property{Dataset: next, Name: key, Value: value, Source: zfs.SourceLocal})
+	}
+	apply("incremental-all", 14)
+	apply("up-to-date", 6)
+	if len(backend.writes) != 0 {
+		t.Fatalf("up-to-date apply wrote %v", backend.writes)
 	}
 }
 

@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -488,4 +489,39 @@ func guidOf(b *memoryBackend, name string) uint64 {
 		}
 	}
 	return 0
+}
+
+// A proof already stored and held needs no write, so it is read once. One that
+// still needs a hold is read again before the hold, and a change between the
+// two reads still stops it.
+func TestProtectRereadsOnlyBeforeWriting(t *testing.T) {
+	t.Parallel()
+	b := backendWithSnapshots(t)
+	addTestAuthority(b)
+	s, _ := NewService(b, testInstallation)
+	snapshot := b.state.Objects[1].Name
+	r, err := s.Protect(t.Context(), "tank/data", snapshot, "local:backup/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.reads, b.writes = 0, nil
+	if _, err := s.Protect(t.Context(), "tank/data", snapshot, "local:backup/data"); err != nil || b.reads != 1 || len(b.writes) != 0 {
+		t.Fatalf("held proof: reads=%d writes=%v err=%v", b.reads, b.writes, err)
+	}
+	b.state.Holds[snapshot] = nil
+	b.reads = 0
+	b.beforeRead = func(b *memoryBackend) {
+		if b.reads == 2 {
+			b.state.Properties = append(b.state.Properties, zfs.Property{Dataset: "tank/data", Name: "org.boomerangz:changed", Value: "1", Source: zfs.SourceLocal})
+		}
+	}
+	var changed *StateChangedError
+	if _, err := s.Protect(t.Context(), "tank/data", snapshot, "local:backup/data"); !errors.As(err, &changed) || b.reads != 2 || len(b.writes) != 0 {
+		t.Fatalf("unheld proof: reads=%d writes=%v err=%v", b.reads, b.writes, err)
+	}
+	b.beforeRead = nil
+	b.reads = 0
+	if got, err := s.Protect(t.Context(), "tank/data", snapshot, "local:backup/data"); err != nil || got != r || b.reads != 2 || len(b.writes) != 1 || len(b.state.Holds[snapshot]) != 1 {
+		t.Fatalf("rehold: reads=%d writes=%v err=%v", b.reads, b.writes, err)
+	}
 }

@@ -658,6 +658,8 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 	resuming := len(before.Destination.ResumeTokens) > 0
 	var plan Plan
 	var ref lifecycle.Reference
+	// prepared is both ends as read once preparation has finished writing.
+	var prepared View
 	if resuming {
 		plan, ref, err = BuildResume(request, before, l.installation)
 		if err != nil {
@@ -724,9 +726,9 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 				return result, err
 			}
 		}
-		prepared, loadErr := l.load(ctx, request, stream)
-		if loadErr != nil {
-			return result, loadErr
+		prepared, err = l.load(ctx, request, stream)
+		if err != nil {
+			return result, err
 		}
 		if !sourceStable(before.Source, prepared.Source) || !destinationStable(before.Destination, prepared.Destination) || before.DestinationExists != prepared.DestinationExists {
 			return result, &PreparationChangedError{Reason: "transfer state changed during preparation; recovery holds retained"}
@@ -742,9 +744,9 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 		plan = fresh
 		result.Plan = plan
 	} else {
-		prepared, loadErr := l.load(ctx, request, stream)
-		if loadErr != nil {
-			return result, loadErr
+		prepared, err = l.load(ctx, request, stream)
+		if err != nil {
+			return result, err
 		}
 		if !reflect.DeepEqual(before, prepared) {
 			return result, fmt.Errorf("resumable transfer state changed during preflight")
@@ -780,17 +782,23 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 		}
 		report.phase(PhaseVerifying, nil)
 	}
-	destination, err := l.target.InspectState(ctx, plan.Destination, true)
-	if err != nil {
-		return result, err
+	// With nothing sent, nothing has run since preparation was read back, so
+	// that read is what a fresh one would return. A stream changes the
+	// destination, and takes long enough for anything else to change.
+	destination, sourceAfter := prepared.Destination, prepared.Source
+	if plan.Mode != "up-to-date" || !prepared.DestinationExists {
+		destination, err = l.target.InspectState(ctx, plan.Destination, true)
+		if err != nil {
+			return result, err
+		}
+		// Authority, the binding and every proof are the root's own properties.
+		sourceAfter, err = l.backend.InspectState(ctx, request.Source, false)
+		if err != nil {
+			return result, err
+		}
 	}
 	destination = ownTokens(destination, plan.Destination, plan.Send.Recursive)
 	if err := verifyGUIDs(plan, destination); err != nil {
-		return result, err
-	}
-	// Authority, the binding and every proof are the root's own properties.
-	sourceAfter, err := l.backend.InspectState(ctx, request.Source, false)
-	if err != nil {
 		return result, err
 	}
 	if _, err := lifecycle.RootAuthority(sourceAfter, request.Source, l.installation); err != nil {
@@ -839,16 +847,21 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 		plan.BindingNew = false
 		result.Plan = plan
 	}
-	if err := l.reconcile(ctx, plan, destination); err != nil {
-		return result, err
-	}
-	verified, err := l.target.InspectState(ctx, plan.Destination, true)
+	reconciled, err := l.reconcile(ctx, plan, destination)
 	if err != nil {
 		return result, err
 	}
-	verified = ownTokens(verified, plan.Destination, plan.Send.Recursive)
-	if err := verifyGUIDs(plan, verified); err != nil {
-		return result, err
+	// Only what reconcile wrote needs reading back.
+	verified := destination
+	if reconciled {
+		verified, err = l.target.InspectState(ctx, plan.Destination, true)
+		if err != nil {
+			return result, err
+		}
+		verified = ownTokens(verified, plan.Destination, plan.Send.Recursive)
+		if err := verifyGUIDs(plan, verified); err != nil {
+			return result, err
+		}
 	}
 	for _, expected := range plan.Expected {
 		if expected.Metadata == nil {
@@ -876,11 +889,10 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 			return result, err
 		}
 	}
-	current, err := l.backend.InspectState(ctx, request.Source, false)
-	if err != nil {
-		return result, err
-	}
-	old, err := lifecycle.References(current, request.Source, plan.Lineage)
+	// Nothing since sourceAfter writes a proof record, and ReleaseReference
+	// proves each one again before it releases anything, so sourceAfter
+	// serves to list them.
+	old, err := lifecycle.References(sourceAfter, request.Source, plan.Lineage)
 	if err != nil {
 		return result, err
 	}
@@ -1016,27 +1028,31 @@ func verifyGUIDs(plan Plan, state zfs.State) error {
 	return nil
 }
 
-func (l *Local) reconcile(ctx context.Context, plan Plan, state zfs.State) error {
+// reconcile reports whether it wrote anything to the destination.
+func (l *Local) reconcile(ctx context.Context, plan Plan, state zfs.State) (bool, error) {
+	wrote := false
 	for _, property := range state.Properties {
 		if property.Source == zfs.SourceReceived && (policy.IsPublic(property.Name) || strings.HasPrefix(property.Name, lifecycle.ReferencePrefix) || strings.HasPrefix(property.Name, targetBindingPrefix)) {
 			if err := l.target.InheritProperty(ctx, property.Dataset, property.Name); err != nil {
-				return err
+				return wrote, err
 			}
+			wrote = true
 		}
 	}
 	for _, endpoint := range plan.Endpoints {
 		dataset := datasetOf(endpoint.Destination)
 		lineage, err := lifecycle.DatasetLineage(state, dataset)
 		if err != nil {
-			return err
+			return wrote, err
 		}
 		if lineage != "" && lineage != plan.Lineage {
-			return fmt.Errorf("received dataset lineage conflicts with source")
+			return wrote, fmt.Errorf("received dataset lineage conflicts with source")
 		}
 		if lineage == "" {
 			if err := l.target.SetProperties(ctx, dataset, map[string]string{lifecycle.LineageProperty: plan.Lineage}); err != nil {
-				return err
+				return wrote, err
 			}
+			wrote = true
 		}
 	}
 	for _, expected := range plan.Expected {
@@ -1044,17 +1060,27 @@ func (l *Local) reconcile(ctx context.Context, plan Plan, state zfs.State) error
 			continue
 		}
 		properties := expected.Metadata.Properties()
+		local := make(map[string]bool, len(properties))
 		for _, p := range state.Properties {
 			if p.Dataset != expected.Destination {
 				continue
 			}
-			if wanted, exists := properties[p.Name]; exists && wanted != p.Value {
-				return fmt.Errorf("received snapshot metadata conflicts with source: %s", expected.Destination)
+			wanted, exists := properties[p.Name]
+			if exists && wanted != p.Value {
+				return wrote, fmt.Errorf("received snapshot metadata conflicts with source: %s", expected.Destination)
+			}
+			if exists && p.Source == zfs.SourceLocal {
+				local[p.Name] = true
 			}
 		}
-		if err := l.target.SetProperties(ctx, expected.Destination, properties); err != nil {
-			return err
+		// Metadata an earlier run already stored locally is left as it is.
+		if len(local) == len(properties) {
+			continue
 		}
+		if err := l.target.SetProperties(ctx, expected.Destination, properties); err != nil {
+			return wrote, err
+		}
+		wrote = true
 	}
-	return nil
+	return wrote, nil
 }
