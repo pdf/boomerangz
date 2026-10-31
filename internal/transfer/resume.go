@@ -144,11 +144,13 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 	var candidateTXG uint64
 	tied := false
 	for _, ref := range refs {
-		if ref.Target != canonical || ref.Dataset != stream.Dataset {
+		if ref.TargetID != lifecycle.TargetID(canonical) || ref.Dataset != stream.Dataset {
 			continue
 		}
-		valid := true
-		for _, member := range ref.Sources {
+		// A resumable endpoint is one whose every snapshot is still held.
+		members, membersErr := ref.Sources(view.Source)
+		valid := membersErr == nil && len(members) > 0 && members[0].Dataset == stream.Dataset
+		for _, member := range members {
 			name := member.Dataset + "@" + ref.Metadata.Name()
 			object, exists := sourceObjects[name]
 			if !exists || object.Type != "snapshot" || object.GUID != member.GUID || !slices.Contains(view.Source.Holds[name], ref.HoldName()) {
@@ -177,8 +179,12 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 		return plan, zero, fmt.Errorf("resume token does not have an unambiguous newest held source proof")
 	}
 	ref := candidate
+	members, err := ref.Sources(view.Source)
+	if err != nil {
+		return plan, zero, err
+	}
 	tokenCovered := false
-	for _, member := range ref.Sources {
+	for _, member := range members {
 		mappedDataset := mappedRoot + strings.TrimPrefix(member.Dataset, request.Source)
 		if tokenDataset == mappedDataset {
 			tokenCovered = true

@@ -148,7 +148,7 @@ func TestGuestLifecycle(t *testing.T) {
 		//
 		// This phase tests the lifecycle hook; actual destination verification is
 		// the responsibility of the transfer implementation in phase 4.
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()); err != nil {
+		if err := service.Checkpoint(t.Context(), root, ref, snapshotGUID(t, direct, ref.SnapshotName())); err != nil {
 			t.Fatal(err)
 		}
 		bookmark := ref.BookmarkName()
@@ -170,7 +170,7 @@ func TestGuestLifecycle(t *testing.T) {
 		if !slices.Contains(checkpointed, bookmark) {
 			t.Fatalf("checkpoint created no versioned bookmark: %v", checkpointed)
 		}
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()+1); err == nil {
+		if err := service.Checkpoint(t.Context(), root, ref, snapshotGUID(t, direct, ref.SnapshotName())+1); err == nil {
 			t.Fatal("accepted wrong destination GUID")
 		}
 		if after := bookmarks(t); !slices.Equal(after, checkpointed) {
@@ -227,7 +227,7 @@ func TestGuestLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()); err != nil {
+		if err := service.Checkpoint(t.Context(), root, ref, snapshotGUID(t, direct, ref.SnapshotName())); err != nil {
 			t.Fatal(err)
 		}
 		// No transfer has run against this synthetic target; the test knows it has
@@ -281,4 +281,22 @@ func TestGuestLifecycle(t *testing.T) {
 		}
 	})
 	t.Logf("verified lifecycle on %s", root)
+}
+
+// snapshotGUID reads the GUID ZFS reports for one exact snapshot: a proof does
+// not record it, since the snapshot itself carries it.
+func snapshotGUID(t *testing.T, direct *zfs.Direct, snapshot string) uint64 {
+	t.Helper()
+	dataset, _, _ := strings.Cut(snapshot, "@")
+	state, err := direct.InspectState(t.Context(), dataset, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range state.Objects {
+		if object.Name == snapshot {
+			return object.GUID
+		}
+	}
+	t.Fatalf("snapshot %s is missing", snapshot)
+	return 0
 }

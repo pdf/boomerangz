@@ -438,7 +438,7 @@ func Build(request Request, view View, installation string) (Plan, error) {
 			return plan, err
 		}
 		for _, r := range refs {
-			if r.Target == plan.TargetBinding.CanonicalTarget && r.Dataset != request.Source {
+			if r.TargetID == lifecycle.TargetID(plan.TargetBinding.CanonicalTarget) && r.Dataset != request.Source {
 				return plan, fmt.Errorf("target was last replicated one stream per member, and replicate=on needs a replica of the whole subtree; run boomerangz dataset reseed for this source and target")
 			}
 		}
@@ -579,11 +579,13 @@ func Build(request Request, view View, installation string) (Plan, error) {
 				return plan, err
 			}
 			for _, r := range refs {
-				if r.Target != plan.TargetBinding.CanonicalTarget || r.Dataset != stream.Dataset || r.GUID() != latest.GUID {
+				if r.TargetID != lifecycle.TargetID(plan.TargetBinding.CanonicalTarget) || r.Dataset != stream.Dataset {
 					continue
 				}
+				// The checkpoint bookmark keeps its snapshot's GUID, so it is a
+				// base exactly when it matches the destination's latest.
 				o, exists := source[r.BookmarkName()]
-				if exists && o.Type == "bookmark" && o.GUID == r.GUID() && o.CreateTXG > 0 && o.CreateTXG < endpoint.CreateTXG {
+				if exists && o.Type == "bookmark" && o.GUID == latest.GUID && o.CreateTXG > 0 && o.CreateTXG < endpoint.CreateTXG {
 					plan.Base = o.Name
 					baseTXG = o.CreateTXG
 					break

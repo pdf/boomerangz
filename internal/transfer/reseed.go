@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
-	"strings"
 
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
@@ -179,7 +178,7 @@ func (s *ReseedService) plan(ctx context.Context, request Request) (ReseedPlan, 
 		return ReseedPlan{}, err
 	}
 	for _, reference := range references {
-		if reference.Target == canonical {
+		if reference.TargetID == lifecycle.TargetID(canonical) {
 			plan.References = append(plan.References, reference)
 		}
 	}
@@ -242,7 +241,7 @@ func (s *ReseedService) Apply(ctx context.Context, request Request) (ReseedPlan,
 	}
 	references := slices.Clone(plan.References)
 	slices.SortFunc(references, func(a, b lifecycle.Reference) int {
-		return strings.Compare(a.Metadata.Created.String(), b.Metadata.Created.String())
+		return a.Metadata.Created.Compare(b.Metadata.Created)
 	})
 	lifecycleService, err := lifecycle.NewService(s.source, s.installation)
 	if err != nil {

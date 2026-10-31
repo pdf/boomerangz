@@ -16,7 +16,8 @@ import (
 // CleanSafety must establish quiescence for the duration of apply, and reject
 // inaccessible, identity-mismatched, or resumable targets. Neither check may
 // abandon a receive or release a hold as a side effect. Preview uses the same
-// checks.
+// checks. CheckTarget is given a proof's TargetID, which it must resolve to a
+// configured target: a proof records only the hash of its canonical target.
 type CleanSafety interface {
 	Quiescent(context.Context, []string) error
 	CheckTarget(context.Context, string, string) error
@@ -170,11 +171,16 @@ func (s *Service) cleanPlan(ctx context.Context, dataset string, options CleanOp
 		}
 		for _, r := range refs {
 			if safety == nil {
-				plan.Blockers = append(plan.Blockers, "target not verified: "+r.Target)
-			} else if err := safety.CheckTarget(ctx, name, r.Target); err != nil {
-				plan.Blockers = append(plan.Blockers, fmt.Sprintf("target %s: %v", r.Target, err))
+				plan.Blockers = append(plan.Blockers, "target not verified: "+r.TargetID)
+			} else if err := safety.CheckTarget(ctx, name, r.TargetID); err != nil {
+				plan.Blockers = append(plan.Blockers, fmt.Sprintf("target %s: %v", r.TargetID, err))
 			}
-			for _, source := range r.sources() {
+			sources, err := r.Sources(state)
+			if err != nil {
+				plan.Blockers = append(plan.Blockers, fmt.Sprintf("reference proof %s: %v", r.property(), err))
+				continue
+			}
+			for _, source := range sources {
 				snapshot := r.sourceSnapshot(source)
 				if slices.Contains(state.Holds[snapshot], r.hold()) {
 					owned, metadata, err := findOwned(state, source.Dataset, snapshot, lineage)
@@ -185,15 +191,10 @@ func (s *Service) cleanPlan(ctx context.Context, dataset string, options CleanOp
 						plan.Actions = append(plan.Actions, CleanAction{Operation: "release", Object: snapshot, Property: r.hold(), GUID: source.GUID})
 					}
 				}
-				for _, o := range state.Objects {
-					if o.Name == r.sourceBookmark(source) {
-						if o.Type != "bookmark" || o.GUID != source.GUID {
-							plan.Blockers = append(plan.Blockers, "bookmark ownership changed: "+o.Name)
-						} else {
-							provedBookmarks[o.Name] = true
-							plan.Actions = append(plan.Actions, CleanAction{Operation: "destroy-bookmark", Object: o.Name, GUID: o.GUID})
-						}
-					}
+				// Sources has already matched the bookmark to its snapshot.
+				if bookmark := r.sourceBookmark(source); hasObject(state, bookmark) {
+					provedBookmarks[bookmark] = true
+					plan.Actions = append(plan.Actions, CleanAction{Operation: "destroy-bookmark", Object: bookmark, GUID: source.GUID})
 				}
 			}
 		}

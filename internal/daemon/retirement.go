@@ -19,9 +19,12 @@ type retirementEndpoint struct {
 	close    func() error
 }
 
-func (r *Runtime) retirementEndpoint(ctx context.Context, source string, effective policy.Effective, canonical string) (retirementEndpoint, error) {
+// retirementEndpoint opens the configured target a proof or a binding names.
+// Both record only the hash of a target's canonical identity, so each target
+// the source's policy configures is hashed to find it.
+func (r *Runtime) retirementEndpoint(ctx context.Context, source string, effective policy.Effective, targetID string) (retirementEndpoint, error) {
 	for _, root := range effective.Local {
-		if "local:"+root == canonical {
+		if lifecycle.TargetID("local:"+root) == targetID {
 			return retirementEndpoint{executor: r.backend, request: transfer.Request{Source: source, DestinationRoot: root, Policy: effective}, close: func() error { return nil }}, nil
 		}
 	}
@@ -30,9 +33,10 @@ func (r *Runtime) retirementEndpoint(ctx context.Context, source string, effecti
 		client := r.remotes[name]
 		setting := r.config.Remotes[name]
 		r.mu.Unlock()
-		if client == nil || client.CanonicalTarget() != canonical {
+		if client == nil || lifecycle.TargetID(client.CanonicalTarget()) != targetID {
 			continue
 		}
+		canonical := client.CanonicalTarget()
 		endpoint, err := client.Open(ctx)
 		if err != nil {
 			return retirementEndpoint{}, err
@@ -92,7 +96,7 @@ func ownedReplicas(state zfs.State, lineage string) ([]string, []string, error) 
 }
 
 func (r *Runtime) retireReference(ctx context.Context, source string, effective policy.Effective, sourceState zfs.State, lineage string, reference lifecycle.Reference) (resultErr error) {
-	endpoint, err := r.retirementEndpoint(ctx, source, effective, reference.Target)
+	endpoint, err := r.retirementEndpoint(ctx, source, effective, reference.TargetID)
 	if err != nil {
 		return err
 	}
@@ -108,8 +112,22 @@ func (r *Runtime) retireReference(ctx context.Context, source string, effective 
 	if len(state.ResumeTokens) > 0 {
 		return fmt.Errorf("target has resumable receive state")
 	}
+	// The proof's snapshots are read from the source: a recursive stream's
+	// descendants may lie outside what the caller inspected.
+	scope := sourceState
+	if reference.Recursive {
+		subtree, inspectErr := r.backend.InspectState(ctx, reference.Dataset, true)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		scope = zfs.MergeStates(sourceState, subtree)
+	}
+	sources, err := reference.Sources(scope)
+	if err != nil {
+		return err
+	}
 	members := make(map[string]lifecycle.ReferenceSource)
-	for _, member := range reference.Sources {
+	for _, member := range sources {
 		name := mappedSnapshot(source, inspection.MappedDataset, reference, member)
 		if err := verifyReplica(state, name, lineage, member.GUID, reference.Metadata); err != nil {
 			return err
@@ -180,7 +198,7 @@ func (r *Runtime) retireTargets(ctx context.Context, dataset string, recursive b
 	}
 	for _, reference := range references {
 		if err := r.retireReference(ctx, dataset, effective, state, lineage, reference); err != nil {
-			return fmt.Errorf("retire target %s: %w", reference.Target, err)
+			return fmt.Errorf("retire target %s: %w", reference.TargetID, err)
 		}
 	}
 	return nil
@@ -191,7 +209,7 @@ func (r *Runtime) retireTargets(ctx context.Context, dataset string, recursive b
 // the root's grid; datasets nothing was sent for, such as placeholders for
 // holes, are left alone.
 func (r *Runtime) pruneDestination(ctx context.Context, dataset string, effective policy.Effective, canonical string, members []transfer.Member) (resultErr error) {
-	endpoint, err := r.retirementEndpoint(ctx, dataset, effective, canonical)
+	endpoint, err := r.retirementEndpoint(ctx, dataset, effective, lifecycle.TargetID(canonical))
 	if err != nil {
 		return err
 	}

@@ -40,7 +40,7 @@ func TestCleanPreviewApply(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.Checkpoint(t.Context(), "tank/data", r, r.GUID()); err != nil {
+		if err := s.Checkpoint(t.Context(), "tank/data", r, guidOf(b, r.SnapshotName())); err != nil {
 			t.Fatal(err)
 		}
 		b.writes = nil

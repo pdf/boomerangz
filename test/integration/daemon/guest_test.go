@@ -632,7 +632,7 @@ func TestGuestRemoteOutageReconnection(t *testing.T) {
 			t.Fatal(referenceErr)
 		}
 		if !slices.ContainsFunc(references, func(reference lifecycle.Reference) bool {
-			return reference.Target == failure.Target && reference.SnapshotName() == snapshot && slices.Contains(state.Holds[snapshot], reference.HoldName())
+			return reference.TargetID == lifecycle.TargetID(failure.Target) && reference.SnapshotName() == snapshot && slices.Contains(state.Holds[snapshot], reference.HoldName())
 		}) {
 			t.Fatalf("%s holds no pending reference for %s, and no later snapshot job had started", snapshot, failure.Target)
 		}

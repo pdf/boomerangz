@@ -51,7 +51,7 @@ func TestReplicationRootPendingProtectionHoldsTheSubtree(t *testing.T) {
 			t.Errorf("%s is not held for the target", snapshot)
 		}
 	}
-	state, err := source.InspectState(t.Context(), reportSource, false)
+	state, err := source.InspectState(t.Context(), reportSource, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,10 @@ func TestReplicationRootPendingProtectionHoldsTheSubtree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(references) != 1 || references[0].Dataset != reportSource || len(references[0].Sources) != 2 {
+	if len(references) != 1 || references[0].Dataset != reportSource || !references[0].Recursive {
+		t.Fatalf("the root stream's proof should cover its subtree: %+v", references)
+	}
+	if sources, err := references[0].Sources(state); err != nil || len(sources) != 2 {
 		t.Fatalf("the root stream's proof should cover its subtree: %+v", references)
 	}
 }

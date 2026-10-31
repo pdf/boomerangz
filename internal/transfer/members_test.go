@@ -1081,7 +1081,15 @@ func TestUnresumableReceiveNamesTheAbortCommand(t *testing.T) {
 		if ref.Dataset != "tank/home/slow" {
 			continue
 		}
-		for _, source := range ref.Sources {
+		state, err := pool.InspectState(t.Context(), "tank/home", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources, err := ref.Sources(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, source := range sources {
 			if err := pool.Release(t.Context(), ref.HoldName(), source.Dataset+"@"+ref.Metadata.Name()); err != nil {
 				t.Fatal(err)
 			}

@@ -53,50 +53,28 @@ func (s *Service) ReleaseCompletedHold(ctx context.Context, dataset string, r Re
 	if !ok {
 		return fmt.Errorf("reference operations unavailable")
 	}
-	if err := zfs.ValidateDataset(dataset); err != nil {
-		return err
-	}
-	state, err := s.proofScope(ctx, dataset, sourceDatasets(r))
+	state, lineage, sources, err := s.referenceState(ctx, dataset, r)
 	if err != nil {
 		return err
-	}
-	if err := scopeReady(state, dataset); err != nil {
-		return err
-	}
-	lineage, err := RootAuthority(state, dataset, s.installation)
-	if err != nil {
-		return err
-	}
-	refs, err := referenceRecords(state, dataset, lineage)
-	if err != nil {
-		return err
-	}
-	if !containsReference(refs, r) {
-		return fmt.Errorf("reference proof changed")
 	}
 	var held []ReferenceSource
-	for _, source := range r.sources() {
+	for _, source := range sources {
+		if !slices.Contains(state.Holds[r.sourceSnapshot(source)], r.hold()) {
+			continue
+		}
 		snapshot, metadata, findErr := findOwned(state, source.Dataset, r.sourceSnapshot(source), lineage)
 		if findErr != nil || snapshot.GUID != source.GUID || metadata != r.Metadata {
 			return fmt.Errorf("held snapshot proof changed")
 		}
-		found := false
-		for _, object := range state.Objects {
-			if object.Name == r.sourceBookmark(source) && object.Type == "bookmark" && object.GUID == source.GUID {
-				found = true
-			}
-		}
-		if !found {
+		if !hasObject(state, r.sourceBookmark(source)) {
 			return fmt.Errorf("verified checkpoint is missing")
 		}
-		if slices.Contains(snapshot.Holds, r.hold()) {
-			held = append(held, source)
-		}
+		held = append(held, source)
 	}
 	if len(held) == 0 {
 		return nil
 	}
-	if err := s.proofUnchanged(ctx, dataset, sourceDatasets(r), state); err != nil {
+	if err := s.proofUnchanged(ctx, dataset, []string{r.Dataset}, r.subtree(), state); err != nil {
 		return err
 	}
 	for _, source := range held {

@@ -696,12 +696,12 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 				return result, err
 			}
 		}
-		targetID := plan.TargetBinding.CanonicalTarget
+		canonical := plan.TargetBinding.CanonicalTarget
 		endpointSnapshots := make([]string, 0, len(plan.Endpoints))
 		for _, endpoint := range plan.Endpoints {
 			endpointSnapshots = append(endpointSnapshots, endpoint.Source)
 		}
-		ref, err = l.lifecycle.ProtectSet(ctx, request.Source, stream, endpointSnapshots, targetID)
+		ref, err = l.lifecycle.ProtectSet(ctx, request.Source, stream, endpointSnapshots, canonical)
 		if err != nil {
 			return result, err
 		}
@@ -720,7 +720,7 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 					}
 				}
 			}
-			if _, err := l.lifecycle.ProtectSet(ctx, request.Source, stream, baseSnapshots, targetID); err != nil {
+			if _, err := l.lifecycle.ProtectSet(ctx, request.Source, stream, baseSnapshots, canonical); err != nil {
 				return result, err
 			}
 		}
@@ -757,7 +757,7 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 			return result, fmt.Errorf("resumable transfer proof changed during preflight")
 		}
 	}
-	targetID := plan.TargetBinding.CanonicalTarget
+	canonical := plan.TargetBinding.CanonicalTarget
 	if plan.Mode != "up-to-date" {
 		sending := plan
 		report.phase(PhaseSending, &sending)
@@ -887,7 +887,7 @@ func (l *Local) applyOnce(ctx context.Context, request Request, stream string, r
 	// Only this stream's older proofs are retired: every other member's base
 	// on this target is its own, at its own instant.
 	for _, prior := range old {
-		if prior.Target == targetID && prior.Dataset == stream && prior.Metadata.Created.Before(ref.Metadata.Created) {
+		if prior.TargetID == lifecycle.TargetID(canonical) && prior.Dataset == stream && prior.Metadata.Created.Before(ref.Metadata.Created) {
 			if err := l.lifecycle.ReleaseReference(ctx, request.Source, prior); err != nil {
 				return result, err
 			}

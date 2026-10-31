@@ -597,7 +597,7 @@ func TestApplyRetainsNewerPendingRecoveryReference(t *testing.T) {
 	}
 	references, err := lifecycle.References(state, request.Source, fixtureLineage)
 	if err != nil || !slices.ContainsFunc(references, func(reference lifecycle.Reference) bool {
-		return reference.Target == newer.Target && reference.SnapshotName() == newer.SnapshotName()
+		return reference.TargetID == newer.TargetID && reference.SnapshotName() == newer.SnapshotName()
 	}) {
 		t.Fatalf("newer pending reference was released: refs=%+v err=%v", references, err)
 	}

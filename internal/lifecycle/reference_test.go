@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,16 +25,16 @@ func TestReferenceLifecycle(t *testing.T) {
 	if len(b.writes) != 2 || len(b.state.Holds[snapshot]) != 1 {
 		t.Fatal("missing protection")
 	}
-	if _, err := s.Protect(t.Context(), "tank/data", snapshot, r.Target); err != nil || len(b.writes) != 2 {
+	if _, err := s.Protect(t.Context(), "tank/data", snapshot, "local:backup/data"); err != nil || len(b.writes) != 2 {
 		t.Fatal("protection not idempotent", err)
 	}
-	if err := s.Checkpoint(t.Context(), "tank/data", r, r.GUID()+1); err == nil || len(b.writes) != 2 {
+	if err := s.Checkpoint(t.Context(), "tank/data", r, guidOf(b, snapshot)+1); err == nil || len(b.writes) != 2 {
 		t.Fatal("checkpointed mismatched receive")
 	}
-	if err := s.Checkpoint(t.Context(), "tank/data", r, r.GUID()); err != nil {
+	if err := s.Checkpoint(t.Context(), "tank/data", r, guidOf(b, snapshot)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Checkpoint(t.Context(), "tank/data", r, r.GUID()); err != nil || len(b.writes) != 3 {
+	if err := s.Checkpoint(t.Context(), "tank/data", r, guidOf(b, snapshot)); err != nil || len(b.writes) != 3 {
 		t.Fatal("checkpoint not idempotent", err)
 	}
 	b.state.ResumeTokens = map[string]string{"tank/data": "token"}
@@ -79,10 +80,10 @@ func TestReplicationStreamUsesOneProofForItsSubtree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Sources) != 2 || len(b.state.Holds[rootSnapshot]) != 1 || len(b.state.Holds[childSnapshot]) != 1 {
+	if !r.Recursive || len(sourcesOf(t, b, r)) != 2 || len(b.state.Holds[rootSnapshot]) != 1 || len(b.state.Holds[childSnapshot]) != 1 {
 		t.Fatalf("recursive proof=%+v holds=%v", r, b.state.Holds)
 	}
-	verified := map[string]uint64{rootSnapshot: r.Sources[0].GUID, childSnapshot: 21}
+	verified := map[string]uint64{rootSnapshot: guidOf(b, rootSnapshot), childSnapshot: 21}
 	if err := s.CheckpointSet(t.Context(), "tank/data", r, verified); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +124,7 @@ func TestRootStreamInheritsItsSubtreeProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CheckpointSet(t.Context(), "tank/data", recursive, map[string]uint64{rootSnapshot: recursive.Sources[0].GUID, childSnapshot: 21}); err != nil {
+	if err := s.CheckpointSet(t.Context(), "tank/data", recursive, map[string]uint64{rootSnapshot: guidOf(b, rootSnapshot), childSnapshot: 21}); err != nil {
 		t.Fatal(err)
 	}
 	// While the subtree's holds stand, the root's own stream must see the
@@ -144,10 +145,10 @@ func TestRootStreamInheritsItsSubtreeProof(t *testing.T) {
 		t.Fatalf("proof = %+v, want the stored %+v", own, recursive)
 	}
 	// Only the root's snapshot was sent; the child's was verified before.
-	if err := s.CheckpointSet(t.Context(), "tank/data", own, map[string]uint64{rootSnapshot: own.Sources[0].GUID}); err != nil {
+	if err := s.CheckpointSet(t.Context(), "tank/data", own, map[string]uint64{rootSnapshot: guidOf(b, rootSnapshot)}); err != nil {
 		t.Fatalf("checkpoint of the inherited proof: %v", err)
 	}
-	if err := s.CheckpointSet(t.Context(), "tank/data", own, map[string]uint64{rootSnapshot: own.Sources[0].GUID + 1}); err == nil {
+	if err := s.CheckpointSet(t.Context(), "tank/data", own, map[string]uint64{rootSnapshot: guidOf(b, rootSnapshot) + 1}); err == nil {
 		t.Fatal("a mismatched verified GUID was accepted")
 	}
 }
@@ -245,27 +246,16 @@ func TestMemberStreamsKeepIndependentProofs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(refs) != 2 || !containsReference(refs, slow) || !containsReference(refs, fastNew) {
+	if len(refs) != 2 || !slices.Contains(refs, slow) || !slices.Contains(refs, fastNew) {
 		t.Fatalf("releasing one member's old proof disturbed another: %+v", refs)
 	}
 	if holds := b.state.Holds["tank/data/slow@"+both.Name()]; len(holds) != 1 {
 		t.Fatalf("slow lost its hold: %v", holds)
 	}
-	// One member, one source: the same shape as any other proof, with no
-	// singular copy of the stream's snapshot to drift from it.
-	encoded, err := json.Marshal(slow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &fields); err != nil {
-		t.Fatal(err)
-	}
-	if _, singular := fields["guid"]; singular || len(slow.Sources) != 1 {
-		t.Fatalf("serialized proof = %s", encoded)
-	}
-	if slow.GUID() != slow.Sources[0].GUID || slow.SnapshotName() != "tank/data/slow@"+both.Name() {
-		t.Fatalf("stream accessors disagree with sources: %+v", slow)
+	// A member's own stream is not recursive: the endpoint is its snapshot
+	// alone, even though the root's snapshot of the same instant is held too.
+	if sources := sourcesOf(t, b, slow); slow.Recursive || len(sources) != 1 || slow.SnapshotName() != "tank/data/slow@"+both.Name() || sources[0].GUID != guidOf(b, slow.SnapshotName()) {
+		t.Fatalf("stream accessors disagree with sources: %+v %+v", slow, sources)
 	}
 }
 
@@ -334,43 +324,105 @@ func rootSnapshotMetadata(t *testing.T, b *memoryBackend) (string, Metadata) {
 	return "", Metadata{}
 }
 
-func TestReferenceProofStoresEachSourceOnlyByDatasetAndGUID(t *testing.T) {
+// TestRecursiveProofDoesNotGrowWithItsSubtree pins the proof's stored form:
+// the stream, the instant and whether it is recursive, and nothing per
+// dataset. Which snapshots the endpoint consists of is read back from their
+// holds, so a subtree of any size fits one ZFS property. 300 children is well
+// past the 8191 bytes a record listing each source used to reach.
+func TestRecursiveProofDoesNotGrowWithItsSubtree(t *testing.T) {
 	t.Parallel()
-	b := backendWithSnapshots(t)
-	addTestAuthority(b)
-	root, metadata := rootSnapshotMetadata(t, b)
-	snapshots := append(withChildren(b, 2, metadata), root)
+	stored := map[int]string{}
+	for _, children := range []int{2, 300} {
+		b := backendWithSnapshots(t)
+		addTestAuthority(b)
+		root, metadata := rootSnapshotMetadata(t, b)
+		snapshots := append(withChildren(b, children, metadata), root)
+		s, _ := NewService(b, testInstallation)
+		r, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", snapshots, "local:backup/data")
+		if err != nil {
+			t.Fatalf("%d children: %v", children, err)
+		}
+		for _, p := range b.state.Properties {
+			if p.Dataset == "tank/data" && p.Name == r.PropertyName() {
+				stored[children] = p.Value
+			}
+		}
+		var record map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(stored[children]), &record); err != nil {
+			t.Fatal(err)
+		}
+		if len(record) != 2 || record["created"] == nil || string(record["recursive"]) != "true" {
+			t.Fatalf("stored proof = %s", stored[children])
+		}
+		state, _ := b.InspectState(t.Context(), "tank/data", true)
+		refs, err := References(state, "tank/data", testLineage)
+		if err != nil || len(refs) != 1 || refs[0] != r {
+			t.Fatalf("stored proof does not read back as written: %+v %v", refs, err)
+		}
+		sources, err := r.Sources(state)
+		if err != nil || len(sources) != children+1 || sources[0].Dataset != "tank/data" {
+			t.Fatalf("%d children: sources=%d err=%v", children, len(sources), err)
+		}
+	}
+	if stored[2] == "" || len(stored[2]) != len(stored[300]) {
+		t.Fatalf("proof grew with its subtree: %q vs %q", stored[2], stored[300])
+	}
+}
+
+// A member stream's proof names the member relative to the root, so it can be
+// read, and released, without listing the datasets under the root.
+func TestMemberProofNamesItsStream(t *testing.T) {
+	t.Parallel()
+	b := &memoryBackend{state: zfs.State{Objects: []zfs.Object{
+		{Name: "tank/data", Type: "filesystem", GUID: 1},
+		{Name: "tank/data/a", Type: "filesystem", GUID: 2},
+	}}}
 	s, _ := NewService(b, testInstallation)
-	r, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", snapshots, "local:backup/data")
+	metadata, err := s.CreateSnapshot(t.Context(), "tank/data", []string{"tank/data/a"}, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), activeTestPolicy("tank/data"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stored string
-	for _, p := range b.state.Properties {
-		if p.Dataset == "tank/data" && p.Name == r.PropertyName() {
-			stored = p.Value
-		}
-	}
-	var record struct {
-		Metadata json.RawMessage              `json:"metadata"`
-		Sources  []map[string]json.RawMessage `json:"sources"`
-	}
-	if err := json.Unmarshal([]byte(stored), &record); err != nil {
+	r, err := s.Protect(t.Context(), "tank/data", "tank/data/a@"+metadata.Name(), "local:backup/data")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(record.Metadata) == 0 || len(record.Sources) != 3 {
-		t.Fatalf("stored proof = %s", stored)
-	}
-	// The instant is said once; every source is of it.
-	for _, source := range record.Sources {
-		if len(source) != 2 || source["dataset"] == nil || source["guid"] == nil {
-			t.Fatalf("source carries more than its dataset and GUID: %s", stored)
+	var value string
+	for _, p := range b.state.Properties {
+		if p.Name == r.PropertyName() {
+			value = p.Value
 		}
 	}
+	if want := `{"stream":"a","created":"2026-10-01T00:00:00Z"}`; value != want {
+		t.Fatalf("stored proof = %s, want %s", value, want)
+	}
+	// The root's own state alone reads it back.
 	state, _ := b.InspectState(t.Context(), "tank/data", false)
-	refs, err := References(state, "tank/data", testLineage)
-	if err != nil || len(refs) != 1 || !reflect.DeepEqual(refs[0], r) {
-		t.Fatalf("stored proof does not read back as written: %+v %v", refs, err)
+	refs, err := References(state, "tank/data", r.Metadata.Lineage)
+	if err != nil || len(refs) != 1 || refs[0] != r {
+		t.Fatalf("refs=%+v err=%v", refs, err)
+	}
+}
+
+// A proof's key and value must agree, and nothing else may be in the value.
+func TestReferenceRecordsRejectInconsistentProofs(t *testing.T) {
+	t.Parallel()
+	b := backendWithSnapshots(t)
+	addTestAuthority(b)
+	s, _ := NewService(b, testInstallation)
+	r, err := s.Protect(t.Context(), "tank/data", b.state.Objects[1].Name, "local:backup/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"another stream": `{"stream":"other","created":"2026-09-05T12:00:00Z"}`,
+		"unknown field":  `{"created":"2026-09-05T12:00:00Z","sources":[]}`,
+		"no instant":     `{}`,
+		"trailing data":  `{"created":"2026-09-05T12:00:00Z"} {}`,
+	} {
+		state := zfs.State{Properties: []zfs.Property{{Dataset: "tank/data", Name: r.PropertyName(), Value: value, Source: zfs.SourceLocal}}}
+		if refs, err := References(state, "tank/data", testLineage); err == nil {
+			t.Errorf("%s: accepted %+v", name, refs)
+		}
 	}
 }
 
@@ -388,22 +440,6 @@ func TestProtectSetRefusesSourcesOfDifferentInstants(t *testing.T) {
 	if _, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", snapshots, "local:backup/data"); err == nil || !strings.Contains(err.Error(), "instant") {
 		t.Fatalf("mixed-instant proof accepted: %v", err)
 	}
-	if len(b.writes) != 0 {
-		t.Fatalf("refused proof wrote %v", b.writes)
-	}
-}
-
-func TestProtectSetRefusesProofOverThePropertyLimit(t *testing.T) {
-	t.Parallel()
-	b := backendWithSnapshots(t)
-	addTestAuthority(b)
-	root, metadata := rootSnapshotMetadata(t, b)
-	snapshots := append(withChildren(b, 200, metadata), root)
-	s, _ := NewService(b, testInstallation)
-	if _, err := s.ProtectSet(t.Context(), "tank/data", "tank/data", snapshots, "local:backup/data"); err == nil || !strings.Contains(err.Error(), "property limit") {
-		t.Fatalf("oversized proof accepted: %v", err)
-	}
-	// Refused before the record or any hold, so nothing needs undoing.
 	if len(b.writes) != 0 {
 		t.Fatalf("refused proof wrote %v", b.writes)
 	}
@@ -433,4 +469,23 @@ func TestProtectIgnoresReceivedProofs(t *testing.T) {
 	if len(b.state.Holds[snapshot]) != 1 {
 		t.Fatalf("holds = %v", b.state.Holds)
 	}
+}
+
+// sourcesOf derives r's sources from everything the backend holds.
+func sourcesOf(t *testing.T, b *memoryBackend, r Reference) []ReferenceSource {
+	t.Helper()
+	sources, err := r.Sources(b.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sources
+}
+
+func guidOf(b *memoryBackend, name string) uint64 {
+	for _, object := range b.state.Objects {
+		if object.Name == name {
+			return object.GUID
+		}
+	}
+	return 0
 }

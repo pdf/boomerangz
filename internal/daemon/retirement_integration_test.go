@@ -97,7 +97,9 @@ func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) 
 	}
 	runtime := &Runtime{backend: backend, installation: installation, config: config.Defaults()}
 	effective := policy.Effective{Local: []string{"backup/data"}, Discard: policy.DiscardOff}
-	reference := lifecycle.Reference{Target: canonical, Dataset: "tank/data", Metadata: metadata, Sources: []lifecycle.ReferenceSource{{Dataset: "tank/data", GUID: 20}}}
+	reference := lifecycle.Reference{TargetID: lifecycle.TargetID(canonical), Dataset: "tank/data", Metadata: metadata}
+	// The source snapshot was pruned once checkpointed; its bookmark remains.
+	sourceState.Objects = append(sourceState.Objects, zfs.Object{Name: reference.BookmarkName(), Type: "bookmark", GUID: 20})
 	if err := runtime.retireReference(t.Context(), "tank/data", effective, sourceState, lineage, reference); err != nil {
 		t.Fatal(err)
 	}

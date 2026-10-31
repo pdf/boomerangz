@@ -1121,7 +1121,7 @@ func (r *Runtime) releaseSupersededPending(dataset, stream, target, snapshot str
 		return err
 	}
 	for _, reference := range references {
-		if reference.Target == target && reference.Dataset == stream && reference.SnapshotName() == snapshot {
+		if reference.TargetID == lifecycle.TargetID(target) && reference.Dataset == stream && reference.SnapshotName() == snapshot {
 			service, serviceErr := r.service()
 			if serviceErr != nil {
 				return serviceErr
