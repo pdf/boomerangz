@@ -290,9 +290,11 @@ func TestGuestRootActorScope(t *testing.T) {
 		if inspectErr != nil {
 			t.Fatal(inspectErr)
 		}
+		// A binding names its anchor only while bootstrapping; once promoted
+		// to the replica, which the mapping names, it carries none.
 		bound := false
 		for _, property := range state.Properties {
-			if property.Dataset == root && strings.HasPrefix(property.Name, policy.StateNamespace+"target:") && strings.Contains(property.Value, `"anchor":"`+mapped+`"`) {
+			if property.Dataset == root && strings.HasPrefix(property.Name, policy.StateNamespace+"target:") && !strings.HasSuffix(property.Name, ":suspended") && !strings.Contains(property.Value, `"anchor"`) {
 				bound = true
 			}
 		}

@@ -75,8 +75,10 @@ func TestGuestReplicaPromotion(t *testing.T) {
 	const successor = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	suffix := time.Now().UTC().Format("150405")
 	tree := sourcePool + "/data/promote-" + suffix
-	receiveRoot := destinationPool + "/data/promote-" + suffix
-	onward := sourcePool + "/data/promoted-" + suffix
+	// The replica becomes a source, so it lands where the service account may
+	// send as well as receive; its own replica lands beside it there.
+	receiveRoot := destinationPool + "/promote/replica-" + suffix
+	onward := destinationPool + "/promote/onward-" + suffix
 	command(t, "create", "-u", tree)
 	command(t, "create", "-u", tree+"/child")
 	zfstest.RegisterCleanup(t, tree)

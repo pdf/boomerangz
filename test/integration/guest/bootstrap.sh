@@ -104,6 +104,10 @@ setup() {
 	# report it missing at startup while its transfers there go on.
 	zfs create -o mountpoint=none "$destination_pool/limited"
 	zfs allow -u "$service_user" canmount,create,destroy,mount,receive:append,userprop "$destination_pool/limited"
+	# promote holds a replica that is then promoted to a source of its own,
+	# so the service account may both receive into it and send from it.
+	zfs create -o mountpoint=none "$destination_pool/promote"
+	zfs allow -u "$service_user" bookmark,canmount,compression,create,destroy,hold,mount,mountpoint,readonly,receive,receive:append,release,rename,send,snapshot,userprop "$destination_pool/promote"
 	if [[ $direct_ssh_user != "$service_user" ]]; then
 		# Direct SSH runs ZFS as the remote login identity. Grant that dedicated,
 		# non-administrative account destination permissions only.
