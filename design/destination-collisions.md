@@ -56,15 +56,30 @@ natural split is:
 ### 3.1 As implemented
 
 Discovery checks every actor root's replica on every target its root or any
-member sends to, and invalidates every root on each side of an overlap with a
-policy error naming the other side, so neither is scheduled. Three cases share
-one containment rule:
+member sends to, and blocks that target for each side of an overlap, with a
+reason naming the other side (`Entry.Blocked`). Only the target stops: the
+root stays valid and scheduled, so its snapshots, pruning and other targets
+go on, and the daemon reports the blocked target as that transfer job's
+outcome without protecting anything as pending for it. `dataset reseed` and
+`dataset abort-receive` refuse a blocked target. Three cases share one
+containment rule:
 
 - two roots whose replicas in one destination namespace contain one another;
 - one root whose replicas on two of its own targets do, since a reseed of the
   outer one destroys the inner;
 - a local replica that overlaps any actor root on this host, which would
   inherit that root's activation and be snapshotted as its members.
+
+A replica the root has already established at the overlapping location keeps
+its target: when one side's stored binding proves a replica at its mapped
+dataset on that target and the other's does not, only the other is blocked,
+so new configuration cannot stop a working replica. With that evidence on
+neither side or both, both are blocked.
+
+An earlier version invalidated every root involved. That stopped snapshots and
+pruning along with every other target, and let a mistake in a newly added
+root stop an established one; the safety property - nothing is written into an
+overlapping location - needs only the target blocked.
 
 A destination namespace is `local` for local targets, and for a remote the
 transport and address its canonical target names, without the user: two
@@ -77,8 +92,8 @@ A local target and a remote that reach the same pool, such as an SSH remote
 pointed at this host, are not tied together by configuration. They are caught
 when the remote is first reached instead: its pool GUID matches a local pool,
 and the remote's replicas are revalidated in the local namespace before
-anything is received. See root-actor-scope.md section 9.7. Identity recovery scans without destinations on purpose: marking a
-root invalid there would hide its owner markers from the recovery.
+anything is received. See root-actor-scope.md section 9.7. Identity recovery scans without destinations: it restores owner
+markers and sends nothing, so blocked targets do not concern it.
 
 ## 4. Out of scope
 

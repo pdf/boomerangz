@@ -1110,6 +1110,33 @@ func (r *Runtime) transferStreams(root string, effective policy.Effective) (loca
 	return local, remote
 }
 
+// refuseBlocked reports a target that discovery blocked for the root as the
+// job's outcome, in place of a transfer, and says whether it did. Nothing is
+// protected as pending for a blocked target, so the root's snapshots go on
+// being pruned on their grid.
+func (r *Runtime) refuseBlocked(pool *Pool, jobID, startState, dataset, target string, remote bool) bool {
+	r.mu.Lock()
+	generation := r.generation
+	r.mu.Unlock()
+	if generation == nil {
+		return false
+	}
+	entry, found := generation.Inspect(dataset)
+	if !found {
+		return false
+	}
+	blocked := entry.ErrBlocked(target, remote)
+	if blocked == nil {
+		return false
+	}
+	job := Job{RunID: nextRunID(), ID: jobID, Group: dataset, Scope: dataset, StartState: startState}
+	job.Run = func(context.Context) Outcome { return Outcome{State: "blocked", Reason: blocked.Error()} }
+	if _, err := pool.Submit(job); err != nil {
+		r.logger.Error("report blocked target", "dataset", dataset, "target", target, "error", err)
+	}
+	return true
+}
+
 // streamDatasets names the datasets a target's transfer sends from.
 func streamDatasets(root string, members []transfer.Member) []string {
 	if len(members) == 0 {
@@ -1173,6 +1200,9 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 		return true
 	}
 	jobID := "local:" + dataset + ":" + target
+	if r.refuseBlocked(r.local, jobID, "planning", dataset, target, false) {
+		return true
+	}
 	mapped, mapErr := zfs.MapReceiveDataset(dataset, target, zfs.ReceiveDiscard(effective.Discard))
 	if mapErr != nil {
 		r.logger.Error("map local transfer lock scope", "dataset", dataset, "target", target, "error", mapErr)
@@ -1326,6 +1356,9 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 	_, remotes := r.transferStreams(dataset, effective)
 	members, configured := remotes[remote]
 	if !configured {
+		return true
+	}
+	if r.refuseBlocked(r.remote, "remote:"+dataset+":"+remote, "probing", dataset, remote, true) {
 		return true
 	}
 	road, err := r.road(dataset, remote, effective, members)

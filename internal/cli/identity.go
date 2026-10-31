@@ -49,8 +49,8 @@ func recoveryInventory(ctx context.Context, reader discovery.Reader, executor zf
 	for _, dataset := range datasets {
 		names = append(names, dataset.Name)
 	}
-	// No destinations: recovery restores owner markers on every root, and a
-	// replica collision would only make a root invalid and hide it from that.
+	// No destinations: recovery restores owner markers and sends nothing, so
+	// blocked targets do not concern it.
 	scanner, err := discovery.New(reader, discovery.Options{Remotes: remotes})
 	if err != nil {
 		return nil, nil, err

@@ -19,21 +19,49 @@ func writeDatasetList(writer io.Writer, entries []discovery.Entry) error {
 	}
 	var output strings.Builder
 	table := tabwriter.NewWriter(&output, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(table, "STATUS\tDATASET")
+	blocked := slices.ContainsFunc(entries, func(entry discovery.Entry) bool { return len(entry.Blocked) > 0 })
+	if blocked {
+		_, _ = fmt.Fprintln(table, "STATUS\tDATASET\tBLOCKED TARGETS")
+	} else {
+		_, _ = fmt.Fprintln(table, "STATUS\tDATASET")
+	}
 	invalid := false
 	for _, entry := range entries {
 		status := datasetStatus(entry)
 		invalid = invalid || status == "invalid"
-		_, _ = fmt.Fprintf(table, "%s\t%s\n", status, entry.Dataset.Name)
+		if len(entry.Blocked) > 0 {
+			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\n", status, entry.Dataset.Name, strings.Join(blockedNames(entry), ", "))
+		} else {
+			_, _ = fmt.Fprintf(table, "%s\t%s\n", status, entry.Dataset.Name)
+		}
 	}
 	if err := table.Flush(); err != nil {
 		return err
 	}
-	if invalid {
+	switch {
+	case invalid && blocked:
+		output.WriteString("\nInspect invalid datasets and blocked targets with: boomerangz dataset inspect <dataset>\n")
+	case invalid:
 		output.WriteString("\nInspect invalid datasets with: boomerangz dataset inspect <dataset>\n")
+	case blocked:
+		output.WriteString("\nInspect blocked targets with: boomerangz dataset inspect <dataset>\n")
 	}
 	_, err := io.WriteString(writer, output.String())
 	return err
+}
+
+// blockedNames names an actor root's blocked targets: a local destination root
+// as configured, a remote as "remote <name>".
+func blockedNames(entry discovery.Entry) []string {
+	names := make([]string, 0, len(entry.Blocked))
+	for _, blocked := range entry.Blocked {
+		if blocked.Remote {
+			names = append(names, "remote "+blocked.Target)
+		} else {
+			names = append(names, blocked.Target)
+		}
+	}
+	return names
 }
 
 func datasetStatus(entry discovery.Entry) string {
@@ -95,6 +123,11 @@ func writeDatasetInspection(writer io.Writer, entry discovery.Entry) error {
 		}
 	}
 
+	var blocked []string
+	for i, name := range blockedNames(entry) {
+		blocked = append(blocked, name+": "+entry.Blocked[i].Reason)
+	}
+	writeMessages(&output, "Blocked targets", blocked)
 	writeMessages(&output, "Warnings", entry.Policy.Warnings)
 	writeMessages(&output, "Errors", entry.Policy.Errors)
 	_, err := io.WriteString(writer, output.String())

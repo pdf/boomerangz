@@ -24,9 +24,13 @@ These commands are read-only and produce human-readable output by default.
 | `inactive` | not enabled and not inside any root |
 | `invalid` | its policy has errors; inspect it for the reported errors |
 
+A root with a destination blocked by a collision stays `active`; `dataset list`
+names the blocked destination beside it.
+
 `dataset inspect` shows activation and validation status, the actor root the
-dataset belongs to and, for a root, its members, together with the effective
-policy, property provenance, warnings, and errors.
+dataset belongs to and, for a root, its members and blocked destinations,
+together with the effective policy, property provenance, warnings, and
+errors.
 
 Add `--json` when a script or other structured consumer needs the stable JSON
 representation:
@@ -157,17 +161,28 @@ selecting it.
 
 Each root's replica on a destination must be its own. If two roots' replicas
 would overlap - `tank/a/data` and `tank/b/data` both under `discard=all`, say,
-or one root's two destinations nested inside each other - every root involved
-becomes `invalid`, and `dataset inspect` names what it collides with. A local
-destination inside an active root is refused the same way, because the
-received replicas would become that root's members. Two remotes collide when
-they reach the same host's pools, whatever account they connect as.
+or one root's two destinations nested inside each other - that destination is
+blocked for the roots involved: nothing is sent there, and `dataset reseed` and
+`dataset abort-receive` refuse it. Only the destination stops. Each root stays
+`active`, keeps snapshotting and pruning, and keeps sending to its other
+destinations. `dataset list` shows blocked destinations beside the root, and
+`dataset inspect` names what each collides with.
+
+A replica a root has already established - one its stored binding proves -
+keeps its destination, and only the newly configured root that would overlap
+it is blocked, so a mistake in new configuration cannot stop a working
+backup. When neither side, or both, has an established replica there, both
+are blocked. A local destination inside an active root is blocked the same
+way, because the received replicas would become that root's members. Two
+remotes collide when they reach the same host's pools, whatever account they
+connect as.
 
 A remote that turns out to receive into one of this host's own pools - an SSH
 remote addressed back at this machine, say - is recognised by its pool's GUID
 the first time it is reached, before anything is received. Its replicas are
 then checked like a local destination's, against this host's actor roots and
-local replicas, and the transfer goes ahead only if nothing overlaps.
+local replicas, and the transfer goes ahead only if that destination is not
+blocked.
 `dataset list` and `dataset inspect` do not connect to remotes, so they cannot
 show this case; the daemon reports it, and so does `dataset reseed`.
 

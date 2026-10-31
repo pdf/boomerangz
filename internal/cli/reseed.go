@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strings"
 
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/daemon"
@@ -91,6 +90,12 @@ func runTargetOperation(ctx context.Context, out io.Writer, cfg config.Config, r
 	if err != nil {
 		return err
 	}
+	// A blocked target's replica location overlaps another replica or an
+	// actor root, so destroying or aborting anything there is refused until
+	// the configuration is fixed.
+	if err := entry.ErrBlocked(target, !local); err != nil {
+		return err
+	}
 	destination := zfs.ReseedExecutor(nil)
 	closeTarget := func() error { return nil }
 	if local {
@@ -129,8 +134,8 @@ func runTargetOperation(ctx context.Context, out io.Writer, cfg config.Config, r
 	var loopback *transfer.HostLocalError
 	if errors.As(err, &loopback) {
 		// The remote receives into one of this host's own pools: rescan with
-		// its replicas in the local namespace, and go on only if the root
-		// remains valid there.
+		// its replicas in the local namespace, and go on only if the target
+		// is not blocked there.
 		destination := destinations[target]
 		destination.Namespace = "local"
 		destinations[target] = destination
@@ -140,8 +145,8 @@ func runTargetOperation(ctx context.Context, out io.Writer, cfg config.Config, r
 			return scanErr
 		}
 		revalidated, _ := rescanned.Inspect(dataset)
-		if !revalidated.Policy.Valid() {
-			return fmt.Errorf("%w: %s", loopback, strings.Join(revalidated.Policy.Errors, "; "))
+		if blocked := revalidated.ErrBlocked(target, true); blocked != nil {
+			return fmt.Errorf("%w: %w", loopback, blocked)
 		}
 		request.HostLocal = true
 		plan, err = operation(service, request)

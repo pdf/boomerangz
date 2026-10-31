@@ -331,8 +331,10 @@ Retained:
 
 ### 9.1 Colliding destination mappings
 
-Fixed after this document was first written: discovery now invalidates roots
-whose replicas overlap. See [destination-collisions.md](destination-collisions.md).
+Fixed after this document was first written: discovery now blocks, for each
+root involved, the target on which replicas overlap, leaving the root itself
+running; an established replica keeps its target over a newcomer. See
+[destination-collisions.md](destination-collisions.md).
 
 ### 9.2 A placeholder blocks its dataset's own later replica
 
@@ -436,6 +438,7 @@ reseed paths now compare the remote destination's pool GUID with this host's
 pools before any change, and refuse with `HostLocalError` until the request
 records that its replicas were validated as local. The daemon learns such a
 remote, rescans with its replicas in the local namespace - so every collision
-rule applies, including against actor roots - and retries; `dataset reseed`
-and `dataset abort-receive` rescan the same way. `dataset list` and `dataset
+rule applies, including against actor roots, and an overlapping remote is
+blocked as a target - and retries; `dataset reseed` and `dataset
+abort-receive` rescan the same way. `dataset list` and `dataset
 inspect` do not connect to remotes and cannot see this case.

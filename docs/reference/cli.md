@@ -47,11 +47,11 @@ continuing with changes missing. See
 
 | Command | Options and arguments |
 | --- | --- |
-| `boomerangz dataset list` | Print a readable inventory with each dataset's management status: `active` for an actor root, `member` or `excluded` within a root, `inactive`, or `invalid`. Add `--json` for structured output, which carries `covered_by` and `member` on datasets within a root and `members` on a root. |
-| `boomerangz dataset inspect DATASET` | Print readable effective policy, provenance, activation, the actor root it belongs to or a root's members, warnings, and errors for one exact dataset. Add `--json` for structured output. |
+| `boomerangz dataset list` | Print a readable inventory with each dataset's management status: `active` for an actor root, `member` or `excluded` within a root, `inactive`, or `invalid`, with a root's blocked destinations beside it. Add `--json` for structured output, which carries `covered_by` and `member` on datasets within a root, and `members` and `blocked` on a root. |
+| `boomerangz dataset inspect DATASET` | Print readable effective policy, provenance, activation, the actor root it belongs to or a root's members, blocked destinations with what each collides with, warnings, and errors for one exact dataset. Add `--json` for structured output. |
 | `boomerangz dataset adopt DATASET` | Preview adoption of an actor root; `--apply` performs the revalidated plan. A member is refused with its root named. |
-| `boomerangz dataset reseed DATASET TARGET` | Preview destruction and fresh seeding of one actor root's replica on a local destination root or named remote that the root or any member sends to, resetting every member on it; `--apply` performs the revalidated plan. A member is refused with its root named. |
-| `boomerangz dataset abort-receive DATASET TARGET` | Preview discarding the interrupted receives that a local destination root or named remote holds for one actor root and its members; `--apply` performs the revalidated plan. The replica, its snapshots, the binding and the source's replication history stay. A member is refused with its root named. |
+| `boomerangz dataset reseed DATASET TARGET` | Preview destruction and fresh seeding of one actor root's replica on a local destination root or named remote that the root or any member sends to, resetting every member on it; `--apply` performs the revalidated plan. A member, or a destination blocked by a collision, is refused. |
+| `boomerangz dataset abort-receive DATASET TARGET` | Preview discarding the interrupted receives that a local destination root or named remote holds for one actor root and its members; `--apply` performs the revalidated plan. The replica, its snapshots, the binding and the source's replication history stay. A member, or a destination blocked by a collision, is refused. |
 | `boomerangz dataset clean [DATASET...]` | Preview decommissioning. Use `--recursive`, `--all`, `--destroy-owned-snapshots`, and `--apply` as needed. |
 | `boomerangz identity recover` | Preview recovery. `--owner UUID` resolves multiple candidates; `--apply` performs the revalidated plan. |
 

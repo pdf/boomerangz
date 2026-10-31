@@ -3,6 +3,7 @@ package discovery
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/url"
@@ -48,13 +49,37 @@ type Entry struct {
 	Members   []string         `json:"members,omitempty"`
 	Policy    policy.Effective `json:"policy"`
 	Stored    []zfs.Property   `json:"stored,omitempty"`
+	// Blocked lists the targets an actor root may not send to, because its
+	// replica there would overlap another replica or an actor root. Only
+	// those targets stop: snapshots, pruning and every other target go on.
+	Blocked []BlockedTarget `json:"blocked,omitempty"`
+}
+
+// BlockedTarget is one target an actor root may not send to, and why.
+// Target is a local destination root or, with Remote, a remote's name.
+type BlockedTarget struct {
+	Target string `json:"target"`
+	Remote bool   `json:"remote,omitempty"`
+	Reason string `json:"reason"`
 }
 
 func (e Entry) clone() Entry {
 	e.Policy = e.Policy.Clone()
 	e.Stored = slices.Clone(e.Stored)
 	e.Members = slices.Clone(e.Members)
+	e.Blocked = slices.Clone(e.Blocked)
 	return e
+}
+
+// ErrBlocked reports why the root may not send to target, a local destination
+// root or, with remote, a remote's name; nil when it may.
+func (e Entry) ErrBlocked(target string, remote bool) error {
+	for _, blocked := range e.Blocked {
+		if blocked.Target == target && blocked.Remote == remote {
+			return fmt.Errorf("%s may not send to %s: %s", e.Dataset.Name, target, blocked.Reason)
+		}
+	}
+	return nil
 }
 
 // ErrCovered reports that a dataset sits inside another actor root's subtree
@@ -605,17 +630,22 @@ func markRoots(names []string, entries map[string]Entry) {
 type replica struct {
 	root      string
 	target    string
+	name      string
+	remote    bool
 	namespace string
 	mapped    string
+	// established is set when the root's stored binding for this target
+	// already proves a replica at mapped.
+	established bool
 }
 
 func overlaps(a, b string) bool {
 	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
-// markCollisions invalidates every actor root whose replica on some target
-// would overlap another replica in the same destination namespace, or would
-// land inside an actor root on this host.
+// markCollisions blocks each actor root's target whose replica would overlap
+// another replica in the same destination namespace, or would land inside an
+// actor root on this host.
 //
 // A root owns its replica's whole subtree: its members are received beneath
 // it, and a reseed destroys it recursively. Two replicas where one contains
@@ -623,8 +653,14 @@ func overlaps(a, b string) bool {
 // safe: the first sign would be a lineage or GUID failure after a stream had
 // already run, and a reseed of one would destroy the other. A local replica
 // inside a root's source is no safer: it would inherit that root's activation
-// and be snapshotted as one of its members. Every side of a collision is
-// invalid, because neither is safe while the other exists.
+// and be snapshotted as one of its members.
+//
+// Only the target is blocked, never the root: its snapshots, pruning and other
+// targets have nothing to do with where one replica lands. A replica the root
+// has already established there, by a stored binding, keeps its target and the
+// newcomer that would overlap it is blocked, so a mistake in new configuration
+// cannot stop a working replica. Without that evidence, or with it on both
+// sides, both are blocked.
 func markCollisions(names []string, entries map[string]Entry, remotes map[string]RemoteDestination) {
 	var replicas []replica
 	var roots []string
@@ -644,11 +680,15 @@ func markCollisions(names []string, entries map[string]Entry, remotes map[string
 				remote = append(remote, entries[member].Policy.Remote...)
 			}
 		}
+		bound := storedBindings(root)
 		discard := zfs.ReceiveDiscard(root.Policy.Discard)
 		slices.Sort(local)
 		for _, target := range slices.Compact(local) {
 			if mapped, err := zfs.MapReceiveDataset(name, target, discard); err == nil {
-				replicas = append(replicas, replica{root: name, target: "local destination " + target, namespace: "local", mapped: mapped})
+				established := slices.ContainsFunc(bound, func(b storedBinding) bool {
+					return b.Transport == "local" && b.DestinationRoot == target && b.MappedDataset == mapped
+				})
+				replicas = append(replicas, replica{root: name, target: "local destination " + target, name: target, namespace: "local", mapped: mapped, established: established})
 			}
 		}
 		slices.Sort(remote)
@@ -658,32 +698,66 @@ func markCollisions(names []string, entries map[string]Entry, remotes map[string
 				continue
 			}
 			if mapped, err := zfs.MapReceiveDataset(name, destination.Root, discard); err == nil {
-				replicas = append(replicas, replica{root: name, target: "remote " + target, namespace: destination.Namespace, mapped: mapped})
+				established := slices.ContainsFunc(bound, func(b storedBinding) bool {
+					return b.Transport != "local" && b.DestinationRoot == destination.Root && b.MappedDataset == mapped
+				})
+				replicas = append(replicas, replica{root: name, target: "remote " + target, name: target, remote: true, namespace: destination.Namespace, mapped: mapped, established: established})
 			}
 		}
 	}
-	conflict := func(root, reason string) {
-		entry := entries[root]
-		if !slices.Contains(entry.Policy.Errors, reason) {
-			entry.Policy.Errors = append(entry.Policy.Errors, reason)
+	block := func(r replica, reason string) {
+		entry := entries[r.root]
+		if !slices.ContainsFunc(entry.Blocked, func(b BlockedTarget) bool { return b.Target == r.name && b.Remote == r.remote }) {
+			entry.Blocked = append(entry.Blocked, BlockedTarget{Target: r.name, Remote: r.remote, Reason: reason})
 		}
-		entries[root] = entry
+		entries[r.root] = entry
+	}
+	describe := func(r, other replica) string {
+		return fmt.Sprintf("%s places this root's replica at %s, which overlaps %s's replica %s from %s", r.target, r.mapped, other.root, other.mapped, other.target)
 	}
 	for i, a := range replicas {
 		for _, b := range replicas[i+1:] {
 			if a.namespace != b.namespace || !overlaps(a.mapped, b.mapped) {
 				continue
 			}
-			conflict(a.root, fmt.Sprintf("%s places this root's replica at %s, which overlaps %s's replica %s from %s", a.target, a.mapped, b.root, b.mapped, b.target))
-			conflict(b.root, fmt.Sprintf("%s places this root's replica at %s, which overlaps %s's replica %s from %s", b.target, b.mapped, a.root, a.mapped, a.target))
+			if !b.established || a.established {
+				block(b, describe(b, a))
+			}
+			if !a.established || b.established {
+				block(a, describe(a, b))
+			}
 		}
 		if a.namespace != "local" {
 			continue
 		}
 		for _, root := range roots {
 			if overlaps(a.mapped, root) {
-				conflict(a.root, fmt.Sprintf("%s places this root's replica at %s, which overlaps actor root %s on this host", a.target, a.mapped, root))
+				block(a, fmt.Sprintf("%s places this root's replica at %s, which overlaps actor root %s on this host", a.target, a.mapped, root))
 			}
 		}
 	}
+}
+
+// storedBinding is the part of a root's stored target binding that says where
+// a replica was established.
+type storedBinding struct {
+	Transport       string `json:"transport"`
+	DestinationRoot string `json:"destination_root"`
+	MappedDataset   string `json:"mapped_dataset"`
+}
+
+// storedBindings reads the target bindings stored locally on root. A binding
+// that does not parse proves nothing and is skipped.
+func storedBindings(root Entry) []storedBinding {
+	var bindings []storedBinding
+	for _, row := range root.Stored {
+		if row.Dataset != root.Dataset.Name || row.Source != zfs.SourceLocal || !strings.HasPrefix(row.Name, policy.StateNamespace+"target:") {
+			continue
+		}
+		var binding storedBinding
+		if json.Unmarshal([]byte(row.Value), &binding) == nil && binding.MappedDataset != "" {
+			bindings = append(bindings, binding)
+		}
+	}
+	return bindings
 }

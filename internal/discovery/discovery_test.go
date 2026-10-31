@@ -499,22 +499,29 @@ func collisionScan(t *testing.T, destinations map[string]RemoteDestination, data
 	return g
 }
 
-func requireCollision(t *testing.T, g *Generation, root, other string) {
+// requireCollision requires root to stay valid with exactly target blocked, for
+// a reason naming other.
+func requireCollision(t *testing.T, g *Generation, root, target string, remote bool, other string) {
 	t.Helper()
 	entry, _ := g.Inspect(root)
-	if entry.Policy.Valid() || !slices.ContainsFunc(entry.Policy.Errors, func(e string) bool { return strings.Contains(e, other) }) {
-		t.Errorf("%s should be invalid, naming %s: %q", root, other, entry.Policy.Errors)
+	if !entry.Policy.Valid() {
+		t.Errorf("%s should stay valid, with only its target blocked: %q", root, entry.Policy.Errors)
+	}
+	err := entry.ErrBlocked(target, remote)
+	if err == nil || !strings.Contains(err.Error(), other) {
+		t.Errorf("%s should be blocked from %s, naming %s: %v (blocked %+v)", root, target, other, err, entry.Blocked)
 	}
 }
 
-func requireValid(t *testing.T, g *Generation, root string) {
+// requireUnblocked requires root to be valid with no target blocked.
+func requireUnblocked(t *testing.T, g *Generation, root string) {
 	t.Helper()
-	if entry, _ := g.Inspect(root); !entry.Policy.Valid() {
-		t.Errorf("%s should be valid: %q", root, entry.Policy.Errors)
+	if entry, _ := g.Inspect(root); !entry.Policy.Valid() || len(entry.Blocked) != 0 {
+		t.Errorf("%s should be valid and unblocked: errors %q, blocked %+v", root, entry.Policy.Errors, entry.Blocked)
 	}
 }
 
-func TestCollidingReplicasInvalidateEveryRootInvolved(t *testing.T) {
+func TestCollidingReplicasBlockTheirTargets(t *testing.T) {
 	t.Parallel()
 	datasets := []string{"tank", "tank/a", "tank/a/home", "tank/a/home/docs", "tank/b", "tank/b/home", "tank/c", "tank/c/data", "tank/x", "tank/x/data", "backup"}
 	enabled := func(root string, extra ...string) []zfs.Property {
@@ -530,8 +537,8 @@ func TestCollidingReplicasInvalidateEveryRootInvolved(t *testing.T) {
 		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "all")...)
 		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
 		g := collisionScan(t, nil, datasets, rows...)
-		requireCollision(t, g, "tank/a/home", "tank/b/home")
-		requireCollision(t, g, "tank/b/home", "tank/a/home")
+		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
+		requireCollision(t, g, "tank/b/home", "backup", false, "tank/a/home")
 	})
 	t.Run("one replica inside another", func(t *testing.T) {
 		t.Parallel()
@@ -541,8 +548,8 @@ func TestCollidingReplicasInvalidateEveryRootInvolved(t *testing.T) {
 		rows = append(rows, enabled("tank/c/data", "local", "backup", "discard", "first")...)
 		rows = append(rows, enabled("tank/x/data", "local", "backup/c/data", "discard", "all")...)
 		g := collisionScan(t, nil, datasets, rows...)
-		requireCollision(t, g, "tank/c/data", "tank/x/data")
-		requireCollision(t, g, "tank/x/data", "tank/c/data")
+		requireCollision(t, g, "tank/c/data", "backup", false, "tank/x/data")
+		requireCollision(t, g, "tank/x/data", "backup/c/data", false, "tank/c/data")
 	})
 	t.Run("disjoint siblings", func(t *testing.T) {
 		t.Parallel()
@@ -550,15 +557,16 @@ func TestCollidingReplicasInvalidateEveryRootInvolved(t *testing.T) {
 		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "first")...)
 		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "first")...)
 		g := collisionScan(t, nil, datasets, rows...)
-		requireValid(t, g, "tank/a/home")
-		requireValid(t, g, "tank/b/home")
+		requireUnblocked(t, g, "tank/a/home")
+		requireUnblocked(t, g, "tank/b/home")
 	})
 	t.Run("one root's own targets", func(t *testing.T) {
 		t.Parallel()
 		// backup/home and backup/home/home: reseeding the first would
 		// destroy the second.
 		g := collisionScan(t, nil, datasets, enabled("tank/a/home", "local", "backup,backup/home", "discard", "all")...)
-		requireCollision(t, g, "tank/a/home", "backup/home/home")
+		requireCollision(t, g, "tank/a/home", "backup", false, "backup/home/home")
+		requireCollision(t, g, "tank/a/home", "backup/home", false, "backup/home")
 	})
 	t.Run("replica inside an actor root", func(t *testing.T) {
 		t.Parallel()
@@ -568,7 +576,8 @@ func TestCollidingReplicasInvalidateEveryRootInvolved(t *testing.T) {
 		rows = append(rows, enabled("tank/a")...)
 		rows = append(rows, enabled("tank/c/data", "local", "tank/a/home", "discard", "all")...)
 		g := collisionScan(t, nil, datasets, rows...)
-		requireCollision(t, g, "tank/c/data", "actor root tank/a")
+		requireCollision(t, g, "tank/c/data", "tank/a/home", false, "actor root tank/a")
+		requireUnblocked(t, g, "tank/a")
 	})
 	t.Run("a member's target", func(t *testing.T) {
 		t.Parallel()
@@ -579,8 +588,8 @@ func TestCollidingReplicasInvalidateEveryRootInvolved(t *testing.T) {
 		rows = append(rows, local("tank/a/home/docs", "local", "backup"))
 		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
 		g := collisionScan(t, nil, datasets, rows...)
-		requireCollision(t, g, "tank/a/home", "tank/b/home")
-		requireCollision(t, g, "tank/b/home", "tank/a/home")
+		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
+		requireCollision(t, g, "tank/b/home", "backup", false, "tank/a/home")
 	})
 	t.Run("remotes sharing a namespace", func(t *testing.T) {
 		t.Parallel()
@@ -592,8 +601,8 @@ func TestCollidingReplicasInvalidateEveryRootInvolved(t *testing.T) {
 		rows = append(rows, enabled("tank/a/home", "remote", "near", "discard", "all")...)
 		rows = append(rows, enabled("tank/b/home", "remote", "far", "discard", "all")...)
 		g := collisionScan(t, destinations, datasets, rows...)
-		requireCollision(t, g, "tank/a/home", "remote far")
-		requireCollision(t, g, "tank/b/home", "remote near")
+		requireCollision(t, g, "tank/a/home", "near", true, "remote far")
+		requireCollision(t, g, "tank/b/home", "far", true, "remote near")
 	})
 	t.Run("remotes in different namespaces", func(t *testing.T) {
 		t.Parallel()
@@ -607,8 +616,60 @@ func TestCollidingReplicasInvalidateEveryRootInvolved(t *testing.T) {
 		// A local target at the same path is a different namespace too.
 		rows = append(rows, enabled("tank/c/data", "local", "pool/backup", "discard", "all")...)
 		g := collisionScan(t, destinations, datasets, rows...)
-		requireValid(t, g, "tank/a/home")
-		requireValid(t, g, "tank/b/home")
+		requireUnblocked(t, g, "tank/a/home")
+		requireUnblocked(t, g, "tank/b/home")
+	})
+	// bound records a stored binding proving root's replica at mapped on a
+	// local target.
+	bound := func(root, target, mapped string) zfs.Property {
+		return local(root, "state:target:"+target, `{"version":1,"transport":"local","destination_root":"`+target+`","mapped_dataset":"`+mapped+`"}`)
+	}
+	t.Run("an established replica keeps its target", func(t *testing.T) {
+		t.Parallel()
+		// tank/a/home has been replicating to backup/home; tank/b/home is
+		// new configuration that would land on the same dataset.
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "all")...)
+		rows = append(rows, bound("tank/a/home", "backup", "backup/home"))
+		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
+		g := collisionScan(t, nil, datasets, rows...)
+		requireUnblocked(t, g, "tank/a/home")
+		requireCollision(t, g, "tank/b/home", "backup", false, "tank/a/home")
+	})
+	t.Run("a binding elsewhere proves nothing here", func(t *testing.T) {
+		t.Parallel()
+		// The stored binding is for a different mapping, so neither side is
+		// established at backup/home.
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "all")...)
+		rows = append(rows, bound("tank/a/home", "backup", "backup/a/home"))
+		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
+		g := collisionScan(t, nil, datasets, rows...)
+		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
+		requireCollision(t, g, "tank/b/home", "backup", false, "tank/a/home")
+	})
+	t.Run("both established", func(t *testing.T) {
+		t.Parallel()
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "all")...)
+		rows = append(rows, bound("tank/a/home", "backup", "backup/home"))
+		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
+		rows = append(rows, bound("tank/b/home", "backup", "backup/home"))
+		g := collisionScan(t, nil, datasets, rows...)
+		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
+		requireCollision(t, g, "tank/b/home", "backup", false, "tank/a/home")
+	})
+	t.Run("only the colliding target is blocked", func(t *testing.T) {
+		t.Parallel()
+		destinations := map[string]RemoteDestination{"near": {Namespace: "ssh://host:22", Root: "pool/backup"}}
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "local", "backup", "remote", "near", "discard", "all")...)
+		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
+		g := collisionScan(t, destinations, datasets, rows...)
+		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
+		if entry, _ := g.Inspect("tank/a/home"); entry.ErrBlocked("near", true) != nil {
+			t.Errorf("the remote target was blocked by a collision on another: %+v", entry.Blocked)
+		}
 	})
 }
 
@@ -644,14 +705,9 @@ func TestRemoteOnThisHostIsCheckedAgainstLocalDatasets(t *testing.T) {
 	// Both map to backup/near/data: tank/data on the remote, tank/x/data on
 	// this host. Only a remote known to be this host shares the namespace.
 	elsewhere := map[string]RemoteDestination{"near": {Namespace: "ssh://backup.example.net:22", Root: "backup/near"}}
-	if root, _ := collisionScan(t, elsewhere, datasets, properties...).Inspect("tank/data"); !root.Policy.Valid() {
-		t.Fatalf("a remote elsewhere collided with a local replica: %q", root.Policy.Errors)
-	}
+	requireUnblocked(t, collisionScan(t, elsewhere, datasets, properties...), "tank/data")
 	here := map[string]RemoteDestination{"near": {Namespace: "local", Root: "backup/near"}}
 	g := collisionScan(t, here, datasets, properties...)
-	for _, name := range []string{"tank/data", "tank/x/data"} {
-		if root, _ := g.Inspect(name); root.Policy.Valid() {
-			t.Errorf("%s stayed valid although its replica overlaps on this host", name)
-		}
-	}
+	requireCollision(t, g, "tank/data", "near", true, "tank/x/data")
+	requireCollision(t, g, "tank/x/data", "backup/near", false, "tank/data")
 }
