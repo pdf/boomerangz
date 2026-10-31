@@ -69,7 +69,9 @@ Then continue with [Getting started](./).
 
 ## Upgrade or remove
 
-Upgrade through the same package channel you installed. Preserve the configured
+Upgrade through the same package channel you installed, after reading the
+[upgrade notes](/operations/upgrading) for every release between your version
+and the new one; most need nothing. Preserve the configured
 `identity_dir` (by default `/var/lib/boomerangz/identity`) when upgrading or
 restoring the same installation; never clone that identity directory to another
 active host.

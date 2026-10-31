@@ -32,12 +32,23 @@ jobs:
         with:
           go-version: 1.26.8
           cache: true
+      # A release that needs operators to act leads with its upgrade notes;
+      # one that needs nothing gets no header.
+      - name: Extract upgrade notes for this release
+        id: upgrade-notes
+        run: |
+          set -euo pipefail
+          header=$RUNNER_TEMP/upgrade-notes.md
+          bash .github/scripts/upgrade-notes.sh "$GITHUB_REF_NAME" >"$header"
+          if [[ -s $header ]]; then
+            echo "args=--release-header=$header" >>"$GITHUB_OUTPUT"
+          fi
       - name: Build draft release with GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: v2.17.1
-          args: release --clean
+          args: release --clean ${{ steps.upgrade-notes.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - name: Stage AUR install script
