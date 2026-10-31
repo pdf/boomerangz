@@ -490,7 +490,7 @@ func TestInspectTargetRetainsVerifiedBootstrapAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := zfs.State{Properties: []zfs.Property{{Dataset: request.Source, Name: targetBindingProperty(binding.CanonicalTarget), Value: encoded, Source: zfs.SourceLocal}}}
+	source := boundState(request.Source, binding.CanonicalTarget, encoded)
 	backend := &localBackend{
 		inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem}, {Name: "backup/projects", Type: zfs.Filesystem}},
 		identities: map[string]zfs.DatasetIdentity{
@@ -550,7 +550,7 @@ func TestChangedMappingIsRefused(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		source := zfs.State{Properties: []zfs.Property{{Dataset: request.Source, Name: targetBindingProperty(binding.CanonicalTarget), Value: encoded, Source: zfs.SourceLocal}}}
+		source := boundState(request.Source, binding.CanonicalTarget, encoded)
 		backend := &localBackend{
 			inventory:  []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem}},
 			identities: map[string]zfs.DatasetIdentity{"backup": anchor},
@@ -748,8 +748,11 @@ func TestReceivedTargetStateIsProvenance(t *testing.T) {
 		t.Fatalf("received suspension was read as this root's: %v err=%v", suspended, err)
 	}
 	masked := zfs.State{
-		Properties: []zfs.Property{{Dataset: request.Source, Name: bindingKey, Value: encoded, Source: zfs.SourceLocal}},
-		Received:   received.Received,
+		Properties: []zfs.Property{
+			{Dataset: request.Source, Name: bindingKey, Value: encoded, Source: zfs.SourceLocal},
+			{Dataset: request.Source, Name: lifecycle.VersionProperty, Value: "2", Source: zfs.SourceLocal},
+		},
+		Received: received.Received,
 	}
 	if stored, err := storedTargetBinding(masked, request.Source, binding); err != nil || stored == nil || *stored != binding {
 		t.Fatalf("local binding over a hidden received one: %+v err=%v", stored, err)
@@ -781,7 +784,7 @@ func TestTargetBindingStoresIdentityAndMapping(t *testing.T) {
 		if err != nil || encoded != test.stored {
 			t.Fatalf("%s: stored %s err=%v, want %s", name, encoded, err, test.stored)
 		}
-		state := zfs.State{Properties: []zfs.Property{{Dataset: request.Source, Name: targetBindingProperty(target.CanonicalTarget), Value: encoded, Source: zfs.SourceLocal}}}
+		state := boundState(request.Source, target.CanonicalTarget, encoded)
 		stored, err := storedTargetBinding(state, request.Source, target)
 		if err != nil || stored == nil || *stored != binding {
 			t.Fatalf("%s: read back %+v err=%v, want %+v", name, stored, err, binding)
@@ -796,9 +799,36 @@ func TestTargetBindingStoresIdentityAndMapping(t *testing.T) {
 		"replica as anchor": `{"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12,"anchor":"backup/projects/data"}`,
 		"trailing data":     `{"pool_guid":11,"mapped":"backup/projects/data","anchor_guid":12} {}`,
 	} {
-		state := zfs.State{Properties: []zfs.Property{{Dataset: request.Source, Name: targetBindingProperty(target.CanonicalTarget), Value: value, Source: zfs.SourceLocal}}}
+		state := boundState(request.Source, target.CanonicalTarget, value)
 		if stored, err := storedTargetBinding(state, request.Source, target); err == nil {
 			t.Errorf("%s: accepted %+v", name, stored)
 		}
+	}
+}
+
+// boundState is a root in the current format holding one binding.
+func boundState(root, canonical, value string) zfs.State {
+	return zfs.State{Properties: []zfs.Property{
+		{Dataset: root, Name: targetBindingProperty(canonical), Value: value, Source: zfs.SourceLocal},
+		{Dataset: root, Name: lifecycle.VersionProperty, Value: "2", Source: zfs.SourceLocal},
+	}}
+}
+
+// A binding on a root in an older format is reported as needing migration,
+// not as an invalid binding, wherever transfer reads it.
+func TestBindingOnAnUnmigratedRootNamesMigrate(t *testing.T) {
+	t.Parallel()
+	backend, request := newLocalBackend(t)
+	backend.source.Properties = slices.DeleteFunc(backend.source.Properties, func(p zfs.Property) bool { return p.Name == lifecycle.VersionProperty })
+	backend.source.Properties = append(backend.source.Properties, zfs.Property{Dataset: request.Source, Name: targetBindingProperty(canonicalLocalTarget(request.DestinationRoot)), Value: `{"version":1,"transport":"local"}`, Source: zfs.SourceLocal})
+	engine, err := NewLocal(backend, localTestStream{backend: backend}, fixtureInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Preview(t.Context(), request); err == nil || !strings.Contains(err.Error(), "boomerangz migrate") {
+		t.Fatalf("preview: %v", err)
+	}
+	if _, err := InspectTarget(t.Context(), backend, request, backend.source); err == nil || !strings.Contains(err.Error(), "boomerangz migrate") {
+		t.Fatalf("inspection: %v", err)
 	}
 }

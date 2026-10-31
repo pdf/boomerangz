@@ -79,7 +79,7 @@ func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) 
 		t.Fatal(err)
 	}
 	bindingProperty := policy.StateNamespace + "target:" + lifecycle.TargetID(canonical)
-	sourceState := zfs.State{Objects: []zfs.Object{{Name: "tank/data", Type: "filesystem", GUID: 10}}, Properties: []zfs.Property{{Dataset: "tank/data", Name: bindingProperty, Value: string(encoded), Source: zfs.SourceLocal}}}
+	sourceState := zfs.State{Objects: []zfs.Object{{Name: "tank/data", Type: "filesystem", GUID: 10}}, Properties: []zfs.Property{{Dataset: "tank/data", Name: bindingProperty, Value: string(encoded), Source: zfs.SourceLocal}, {Dataset: "tank/data", Name: lifecycle.VersionProperty, Value: "2", Source: zfs.SourceLocal}}}
 	owned := "backup/data@" + metadata.Name()
 	backend := &targetBackend{
 		datasets:   []zfs.Dataset{{Name: "backup/data", Type: zfs.Filesystem}},

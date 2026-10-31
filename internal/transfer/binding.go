@@ -359,6 +359,10 @@ func storedTargetBinding(state zfs.State, root string, target TargetBinding) (*T
 		if binding != nil {
 			return nil, fmt.Errorf("target binding must be unambiguous")
 		}
+		// A binding in an older format is not misread as an invalid one.
+		if err := lifecycle.CurrentState(state, root); err != nil {
+			return nil, err
+		}
 		var record bindingRecord
 		decoder := json.NewDecoder(strings.NewReader(row.Value))
 		decoder.DisallowUnknownFields()

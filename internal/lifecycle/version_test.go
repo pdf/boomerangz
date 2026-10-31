@@ -98,3 +98,13 @@ func TestAuthorityIsWrittenWithTheCurrentFormat(t *testing.T) {
 		}
 	})
 }
+
+// A proof on a root in an older format is reported as needing migration, not
+// as an invalid proof.
+func TestProofOnAnUnmigratedRootNamesMigrate(t *testing.T) {
+	t.Parallel()
+	state := zfs.State{Properties: []zfs.Property{{Dataset: "tank/data", Name: ReferencePrefix + "x", Value: `{"target":"local:backup"}`, Source: zfs.SourceLocal}}}
+	if _, err := References(state, "tank/data", testLineage); err == nil || !strings.Contains(err.Error(), "boomerangz migrate") {
+		t.Fatalf("err=%v", err)
+	}
+}
