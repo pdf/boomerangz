@@ -412,6 +412,10 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 	// waiting-lock - the daemon is holding it back. Both are events the daemon
 	// reports, so whichever it does decides the overlap the phase asserts, and
 	// nothing depends on how far apart the two jobs reached their sends.
+	// A sibling counts as held back only while it waits on this root's own
+	// transfer: it may also wait on its own jobs, such as the destination
+	// prune that follows its previous transfer, and that says nothing about
+	// whether the two roots share a lock.
 	awaitSibling := func(from statuswait.Cursor) func(context.Context, string) error {
 		other := map[string]string{left: right, right: left}
 		return func(ctx context.Context, source string) error {
@@ -419,10 +423,11 @@ func TestGuestLocalTransferConcurrency(t *testing.T) {
 			if !gated {
 				return nil
 			}
+			heldBack := "waiting for " + job(source) + " to release its lock"
 			for {
 				changed := waiter.Changed()
 				if slices.ContainsFunc(waiter.Transitions()[from:], func(event daemon.Event) bool {
-					return event.Job == job(sibling) && (event.State == "sending" || event.State == "waiting-lock")
+					return event.Job == job(sibling) && (event.State == "sending" || (event.State == "waiting-lock" && strings.HasPrefix(event.Reason, heldBack)))
 				}) {
 					return nil
 				}
