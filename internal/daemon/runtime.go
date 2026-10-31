@@ -1746,7 +1746,9 @@ func (r *Runtime) SubscribeStatus(ctx context.Context) (daemonstate.Subscription
 
 // Clean runs explicit preview-first decommissioning inside the daemon's live
 // lifecycle boundary. Apply never starts when any selected plan is blocked.
-func (r *Runtime) Clean(ctx context.Context, names []string, recursive, all, destroy, apply bool) ([]lifecycle.CleanPlan, error) {
+// forget names targets whose state alone is cleaned, unchecked; it takes
+// exact dataset names only.
+func (r *Runtime) Clean(ctx context.Context, names []string, recursive, all, destroy bool, forget []string, apply bool) ([]lifecycle.CleanPlan, error) {
 	r.lifecycleAdmin.Lock()
 	defer r.lifecycleAdmin.Unlock()
 	r.mu.Lock()
@@ -1760,6 +1762,10 @@ func (r *Runtime) Clean(ctx context.Context, names []string, recursive, all, des
 	}
 	if !all && len(names) == 0 {
 		return nil, fmt.Errorf("specify dataset names or explicit all")
+	}
+	forgotten, err := ResolveForgetTargets(r.safety, forget, recursive, all, destroy)
+	if err != nil {
+		return nil, err
 	}
 	if all {
 		inventory, err := r.backend.ListDatasets(ctx)
@@ -1824,7 +1830,7 @@ func (r *Runtime) Clean(ctx context.Context, names []string, recursive, all, des
 	if err != nil {
 		return nil, err
 	}
-	options := lifecycle.CleanOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy}
+	options := lifecycle.CleanOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy, ForgetTargets: forgotten}
 	plans := make([]lifecycle.CleanPlan, 0, len(scopes))
 	blocked := false
 	for _, name := range scopes {
@@ -1850,6 +1856,28 @@ func (r *Runtime) Clean(ctx context.Context, names []string, recursive, all, des
 	}
 	r.Reconcile()
 	return plans, nil
+}
+
+// ResolveForgetTargets resolves the targets a clean forgets to their IDs,
+// sorted and without duplicates. Forgetting cleans one root's state for those targets
+// alone, so it takes exact dataset names only.
+func ResolveForgetTargets(resolver interface{ TargetID(string) (string, error) }, names []string, recursive, all, destroy bool) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	if recursive || all || destroy {
+		return nil, fmt.Errorf("forgetting a target takes exact source roots, without recursive, all or snapshot destruction")
+	}
+	ids := make([]string, 0, len(names))
+	for _, name := range names {
+		id, err := resolver.TargetID(name)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids), nil
 }
 
 // Status returns the latest transition for each job, with the newest progress

@@ -45,8 +45,8 @@ func (r *cliControlRuntime) Trigger(names []string) ([]string, error) {
 	return names, nil
 }
 func (*cliControlRuntime) Reconcile() {}
-func (*cliControlRuntime) Clean(_ context.Context, names []string, recursive, _, destroy, apply bool) ([]lifecycle.CleanPlan, error) {
-	return []lifecycle.CleanPlan{{Dataset: names[0], Options: lifecycle.CleanOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy}, Applied: map[bool]int{true: 1}[apply]}}, nil
+func (*cliControlRuntime) Clean(_ context.Context, names []string, recursive, _, destroy bool, forget []string, apply bool) ([]lifecycle.CleanPlan, error) {
+	return []lifecycle.CleanPlan{{Dataset: names[0], Options: lifecycle.CleanOptions{Recursive: recursive, DestroyOwnedSnapshots: destroy, ForgetTargets: forget}, Applied: map[bool]int{true: 1}[apply]}}, nil
 }
 
 func TestControlCommandsUseRunningDaemon(t *testing.T) {
@@ -102,11 +102,14 @@ func TestControlCommandsUseRunningDaemon(t *testing.T) {
 		t.Fatalf("triggered=%v", runtime.triggered)
 	}
 	var cleanOutput bytes.Buffer
-	cleanArgs := []string{"dataset", "--config", configPath, "--config-dir", filepath.Join(dir, "missing"), "clean", "--apply", "tank/data"}
+	cleanArgs := []string{"dataset", "--config", configPath, "--config-dir", filepath.Join(dir, "missing"), "clean", "--apply", "--forget-target", "home-backup", "--forget-target", "backup/archive", "tank/data"}
 	if err := runWithReader(t.Context(), cleanArgs, &cleanOutput, io.Discard, BuildInfo{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(cleanOutput.Bytes(), []byte(`"applied": 1`)) {
+	if !bytes.Contains(cleanOutput.Bytes(), []byte(`"applied": 1`)) || !bytes.Contains(cleanOutput.Bytes(), []byte(`"forget_targets": [
+        "home-backup",
+        "backup/archive"
+      ]`)) {
 		t.Fatalf("clean=%s", cleanOutput.String())
 	}
 	var reloadOutput bytes.Buffer

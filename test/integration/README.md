@@ -44,6 +44,7 @@ only worth reading if it is true.
 | Reference protect, checkpoint, release; wrong destination GUID refused | `TestGuestLifecycle/reference-checkpoint` |
 | Pruning respects foreign holds and the newest snapshot | `TestGuestLifecycle/prune-respects-holds` |
 | Adoption after lineage loss, without disturbing descendants | `TestGuestLifecycle/adopt` |
+| Clean forgetting one unreachable target: only that target's proofs, holds, bookmarks and binding go, and the other target's state and the snapshots stay | `TestGuestLifecycle/forget-target` |
 | Clean clears metadata and preserves snapshots | `TestGuestLifecycle/clean` |
 | `dataset adopt` and `dataset clean` over the CLI | `TestGuestLifecycle/cli-adopt-and-clean` (gated on `BOOMERANGZ_LIFECYCLE_GUEST_CLI`) |
 | Received-property layering, and which hidden values reach `State.Received` | `TestGuestReceivedPropertyLayers` |

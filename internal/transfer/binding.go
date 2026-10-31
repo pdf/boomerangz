@@ -9,13 +9,12 @@ import (
 	"strings"
 
 	"github.com/pdf/boomerangz/internal/lifecycle"
-	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
 const (
 	targetBindingVersion = 2
-	targetBindingPrefix  = policy.StateNamespace + "target:"
+	targetBindingPrefix  = lifecycle.TargetStatePrefix
 )
 
 // TargetBinding is the persistent source-side identity of one configured

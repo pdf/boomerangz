@@ -439,6 +439,7 @@ type datasetCleanCommand struct {
 	Recursive             bool     `help:"Include descendants of the selected scopes."`
 	All                   bool     `help:"Explicitly select all local datasets recursively."`
 	DestroyOwnedSnapshots bool     `name:"destroy-owned-snapshots" help:"Also delete fully proven owned snapshots without dependencies."`
+	ForgetTargets         []string `name:"forget-target" placeholder:"TARGET" help:"Clean only this target's state from a source root, without checking the target: a configured remote, a local destination root, or a target ID. Repeat as needed."`
 	Apply                 bool     `help:"Apply clean after revalidation."`
 }
 
@@ -447,14 +448,14 @@ func (c *datasetCleanCommand) Run(env *commandEnvironment) error {
 	if err != nil {
 		return err
 	}
-	if handled, controlErr := runDaemonClean(env.Context, env.Stdout, loaded.Config, c.Datasets, c.Recursive, c.All, c.DestroyOwnedSnapshots, c.Apply); handled {
+	if handled, controlErr := runDaemonClean(env.Context, env.Stdout, loaded.Config, c.Datasets, c.Recursive, c.All, c.DestroyOwnedSnapshots, c.ForgetTargets, c.Apply); handled {
 		return controlErr
 	}
 	_, executor, err := datasetExecutor(env)
 	if err != nil {
 		return err
 	}
-	return runClean(env.Context, env.Stdout, loaded.Config, executor, c.Datasets, c.Recursive, c.All, c.DestroyOwnedSnapshots, c.Apply)
+	return runClean(env.Context, env.Stdout, loaded.Config, executor, c.Datasets, c.Recursive, c.All, c.DestroyOwnedSnapshots, c.ForgetTargets, c.Apply)
 }
 
 type identityCommand struct {

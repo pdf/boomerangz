@@ -102,6 +102,13 @@ Reseed is retryable after partial failure. It refuses to proceed if the bound
 pool identity, configured mapping, source authority, or effective target has
 changed during preflight.
 
+A reseed replaces the replica where the binding says it is, so it refuses a
+target whose mapping has changed since the binding was recorded, for instance
+after a new `discard` or destination root: transfers to it report that the
+target mapping changed. Restore the previous mapping, or
+[forget the target](#forget-a-target) so the next transfer seeds it at the new
+mapping, and destroy the old replica yourself once you no longer need it.
+
 ## Deactivation and automatic retirement
 
 Disable management of an actor root and its whole subtree by setting
@@ -159,6 +166,44 @@ boomerangz dataset clean tank/data --destroy-owned-snapshots --apply
 The operation stops when identity, destination, or recovery evidence is
 ambiguous. It can report partial progress if the environment changes during an
 apply. Review the output before retrying.
+
+## Forget a target
+
+A plain clean checks every target the dataset keeps recovery state for, and is
+blocked while one cannot be checked. When a target is gone for good, such as a
+remote that was decommissioned, or when its mapping has changed, forget that
+one target instead. Stop the daemon or leave it running, then preview:
+
+```sh
+boomerangz dataset clean tank/data --forget-target home-backup
+```
+
+Name the target as configuration names it: a remote's name, or a local
+destination root such as `backup/archive`. A remote removed from configuration
+can only be named by its target ID, which is the 64-character hex string in a
+blocker like `target 3f9c...e1: recorded target is not configured`, and in the
+`org.boomerangz:state:reference:` and `org.boomerangz:state:target:` property
+names on the root.
+
+The preview lists the target's recovery proofs, the holds and bookmarks they
+record on the root's and members' snapshots, its binding and its suspension
+marker, and nothing else. The target is not contacted, and nothing on it
+changes. Apply it:
+
+```sh
+boomerangz dataset clean tank/data --forget-target home-backup --apply
+```
+
+Ownership, the snapshots and every other target's state stay. A forgotten
+target that is still configured is bound afresh by the next transfer: one to
+an existing replica that still shares a snapshot with its source continues
+incrementally, one to a new mapping seeds it, and one that reports that the
+destination has no common base needs a [reseed](#reseed-a-target). To clean the whole dataset after forgetting an
+unreachable target, run a plain `dataset clean` as usual.
+
+Forgetting takes exact source roots: it cannot be combined with `--recursive`,
+`--all` or `--destroy-owned-snapshots`, and a root that keeps no state for the
+named target blocks the preview, which also catches a misspelled name.
 
 ## Adopt a moved or restored dataset
 

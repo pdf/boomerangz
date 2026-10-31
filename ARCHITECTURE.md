@@ -290,7 +290,11 @@ Cross-cutting rules that hold across all of these:
   each destination replica against the source GUIDs `Sources` derives, and
   clean and retirement map a proof's target ID back to a configured target by
   hashing each configured canonical target; a proof whose target is no
-  longer configured cannot be checked, and blocks clean until it is.
+  longer configured cannot be checked, and blocks clean until it is, or
+  until `dataset clean --forget-target` lets go of that one target
+  (`lifecycle.forgetPlan`): it removes the target's proofs, the holds and
+  bookmarks they record, its binding and its suspension marker, unchecked,
+  and nothing else.
 - **Target bindings (`state:target:*`) pin a source to a specific physical
   destination, not just a name.** A binding stores the pool GUID and the
   anchor dataset's GUID; every planned transfer rebuilds the binding from

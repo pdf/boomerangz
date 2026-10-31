@@ -18,7 +18,7 @@ type runtime interface {
 	SubscribeStatus(context.Context) (daemonstate.Subscription, error)
 	Trigger([]string) ([]string, error)
 	Reconcile()
-	Clean(context.Context, []string, bool, bool, bool, bool) ([]lifecycle.CleanPlan, error)
+	Clean(context.Context, []string, bool, bool, bool, []string, bool) ([]lifecycle.CleanPlan, error)
 }
 
 type reloadHandler struct {
@@ -178,13 +178,13 @@ func (s *service) Reload(ctx context.Context, _ *controlrpc.ReloadRequest) (*con
 }
 
 func (s *service) Clean(ctx context.Context, request *controlrpc.CleanRequest) (*controlrpc.CleanResponse, error) {
-	plans, cleanErr := s.runtime.Clean(ctx, request.GetDatasets(), request.GetRecursive(), request.GetAll(), request.GetDestroyOwnedSnapshots(), request.GetApply())
+	plans, cleanErr := s.runtime.Clean(ctx, request.GetDatasets(), request.GetRecursive(), request.GetAll(), request.GetDestroyOwnedSnapshots(), request.GetForgetTargets(), request.GetApply())
 	response := &controlrpc.CleanResponse{}
 	if cleanErr != nil {
 		response.Error = cleanErr.Error()
 	}
 	for _, plan := range plans {
-		item := &controlrpc.CleanPlan{Dataset: plan.Dataset, Recursive: plan.Options.Recursive, DestroyOwnedSnapshots: plan.Options.DestroyOwnedSnapshots, Blockers: plan.Blockers, Warnings: plan.Warnings, Applied: uint32(plan.Applied)}
+		item := &controlrpc.CleanPlan{Dataset: plan.Dataset, Recursive: plan.Options.Recursive, DestroyOwnedSnapshots: plan.Options.DestroyOwnedSnapshots, ForgetTargets: plan.Options.ForgetTargets, Blockers: plan.Blockers, Warnings: plan.Warnings, Applied: uint32(plan.Applied)}
 		for _, action := range plan.Actions {
 			item.Actions = append(item.Actions, &controlrpc.CleanAction{Operation: action.Operation, Object: action.Object, Property: action.Property, Guid: action.GUID})
 		}

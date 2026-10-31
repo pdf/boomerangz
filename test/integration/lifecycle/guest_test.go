@@ -4,6 +4,7 @@ package lifecycle_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,13 @@ type cleanSafety struct{}
 
 func (cleanSafety) Quiescent(context.Context, []string) error         { return nil }
 func (cleanSafety) CheckTarget(context.Context, string, string) error { return nil }
+
+// unreachableSafety is quiescent, but no target it is asked about answers.
+type unreachableSafety struct{ cleanSafety }
+
+func (unreachableSafety) CheckTarget(context.Context, string, string) error {
+	return errors.New("target unreachable")
+}
 
 func activePolicy(dataset string) policy.Effective {
 	row := zfs.Property{Dataset: dataset, Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal}
@@ -218,6 +226,82 @@ func TestGuestLifecycle(t *testing.T) {
 		}
 		if len(lifecycle.Snapshots(state, root)) != 1 || len(lifecycle.Snapshots(state, root+"/child")) != 1 {
 			t.Fatal("pruning changed a descendant snapshot")
+		}
+	})
+
+	chain("forget-target", func(t *testing.T) {
+		const gone, kept = "ssh://gone/backup", "local:kept-target"
+		refs := map[string]lifecycle.Reference{}
+		for _, target := range []string{gone, kept} {
+			r, err := service.Protect(t.Context(), root, root+"@"+second.Name(), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := service.Checkpoint(t.Context(), root, r, snapshotGUID(t, direct, r.SnapshotName())); err != nil {
+				t.Fatal(err)
+			}
+			refs[target] = r
+		}
+		binding := lifecycle.TargetStatePrefix + lifecycle.TargetID(gone)
+		command(t, "zfs", "set", binding+`={"version":2}`, root)
+		// What stays: everything that is not the gone target's.
+		snapshot := func(t *testing.T) (map[string]bool, []string) {
+			t.Helper()
+			state, err := direct.InspectState(t.Context(), root, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			present := map[string]bool{}
+			for _, object := range state.Objects {
+				present[object.Name] = true
+			}
+			for _, property := range state.Properties {
+				if property.Source == zfs.SourceLocal {
+					present[property.Dataset+" "+property.Name] = true
+				}
+			}
+			for object, tags := range state.Holds {
+				for _, tag := range tags {
+					present[object+" "+tag] = true
+				}
+			}
+			var snapshots []string
+			for _, s := range lifecycle.Snapshots(state, root) {
+				snapshots = append(snapshots, s.Name)
+			}
+			return present, snapshots
+		}
+		goneState := []string{refs[gone].BookmarkName(), root + " " + refs[gone].PropertyName(), root + " " + binding, refs[gone].SnapshotName() + " " + refs[gone].HoldName()}
+		keptState := []string{refs[kept].BookmarkName(), root + " " + refs[kept].PropertyName(), refs[kept].SnapshotName() + " " + refs[kept].HoldName(), root + " " + lifecycle.LineageProperty}
+		before, snapshotsBefore := snapshot(t)
+		for _, name := range append(slices.Clone(goneState), keptState...) {
+			if !before[name] {
+				t.Fatalf("fixture: %s is missing", name)
+			}
+		}
+		// The gone target cannot be checked, which blocks an ordinary clean.
+		options := lifecycle.CleanOptions{ForgetTargets: []string{lifecycle.TargetID(gone)}}
+		preview, err := service.Clean(t.Context(), root, options, false, unreachableSafety{})
+		if err != nil || len(preview.Blockers) > 0 {
+			t.Fatalf("forget preview=%+v err=%v", preview, err)
+		}
+		applied, err := service.Clean(t.Context(), root, options, true, unreachableSafety{})
+		if err != nil || applied.Applied != len(preview.Actions) {
+			t.Fatalf("forget apply=%+v err=%v", applied, err)
+		}
+		after, snapshotsAfter := snapshot(t)
+		for _, name := range goneState {
+			if after[name] {
+				t.Errorf("forgotten target's %s remains", name)
+			}
+		}
+		for _, name := range keptState {
+			if !after[name] {
+				t.Errorf("kept target's %s was removed", name)
+			}
+		}
+		if !slices.Equal(snapshotsAfter, snapshotsBefore) {
+			t.Fatalf("snapshots changed: %v, was %v", snapshotsAfter, snapshotsBefore)
 		}
 	})
 

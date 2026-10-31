@@ -1131,8 +1131,11 @@ type CleanRequest struct {
 	All                   bool                   `protobuf:"varint,3,opt,name=all,proto3" json:"all,omitempty"`
 	DestroyOwnedSnapshots bool                   `protobuf:"varint,4,opt,name=destroy_owned_snapshots,json=destroyOwnedSnapshots,proto3" json:"destroy_owned_snapshots,omitempty"`
 	Apply                 bool                   `protobuf:"varint,5,opt,name=apply,proto3" json:"apply,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Targets whose state alone is cleaned, unchecked: target IDs, configured
+	// remote names or local destination roots.
+	ForgetTargets []string `protobuf:"bytes,6,rep,name=forget_targets,json=forgetTargets,proto3" json:"forget_targets,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CleanRequest) Reset() {
@@ -1198,6 +1201,13 @@ func (x *CleanRequest) GetApply() bool {
 		return x.Apply
 	}
 	return false
+}
+
+func (x *CleanRequest) GetForgetTargets() []string {
+	if x != nil {
+		return x.ForgetTargets
+	}
+	return nil
 }
 
 type CleanAction struct {
@@ -1277,6 +1287,7 @@ type CleanPlan struct {
 	Blockers              []string               `protobuf:"bytes,5,rep,name=blockers,proto3" json:"blockers,omitempty"`
 	Warnings              []string               `protobuf:"bytes,6,rep,name=warnings,proto3" json:"warnings,omitempty"`
 	Applied               uint32                 `protobuf:"varint,7,opt,name=applied,proto3" json:"applied,omitempty"`
+	ForgetTargets         []string               `protobuf:"bytes,8,rep,name=forget_targets,json=forgetTargets,proto3" json:"forget_targets,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
@@ -1358,6 +1369,13 @@ func (x *CleanPlan) GetApplied() uint32 {
 		return x.Applied
 	}
 	return 0
+}
+
+func (x *CleanPlan) GetForgetTargets() []string {
+	if x != nil {
+		return x.ForgetTargets
+	}
+	return nil
 }
 
 type CleanResponse struct {
@@ -1499,18 +1517,19 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"generation\x18\x01 \x01(\x04R\n" +
 	"generation\x12\x18\n" +
 	"\aapplied\x18\x02 \x03(\tR\aapplied\x12)\n" +
-	"\x10restart_required\x18\x03 \x03(\tR\x0frestartRequired\"\xa8\x01\n" +
+	"\x10restart_required\x18\x03 \x03(\tR\x0frestartRequired\"\xcf\x01\n" +
 	"\fCleanRequest\x12\x1a\n" +
 	"\bdatasets\x18\x01 \x03(\tR\bdatasets\x12\x1c\n" +
 	"\trecursive\x18\x02 \x01(\bR\trecursive\x12\x10\n" +
 	"\x03all\x18\x03 \x01(\bR\x03all\x126\n" +
 	"\x17destroy_owned_snapshots\x18\x04 \x01(\bR\x15destroyOwnedSnapshots\x12\x14\n" +
-	"\x05apply\x18\x05 \x01(\bR\x05apply\"s\n" +
+	"\x05apply\x18\x05 \x01(\bR\x05apply\x12%\n" +
+	"\x0eforget_targets\x18\x06 \x03(\tR\rforgetTargets\"s\n" +
 	"\vCleanAction\x12\x1c\n" +
 	"\toperation\x18\x01 \x01(\tR\toperation\x12\x16\n" +
 	"\x06object\x18\x02 \x01(\tR\x06object\x12\x1a\n" +
 	"\bproperty\x18\x03 \x01(\tR\bproperty\x12\x12\n" +
-	"\x04guid\x18\x04 \x01(\x04R\x04guid\"\x8b\x02\n" +
+	"\x04guid\x18\x04 \x01(\x04R\x04guid\"\xb2\x02\n" +
 	"\tCleanPlan\x12\x18\n" +
 	"\adataset\x18\x01 \x01(\tR\adataset\x12\x1c\n" +
 	"\trecursive\x18\x02 \x01(\bR\trecursive\x126\n" +
@@ -1518,7 +1537,8 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"\aactions\x18\x04 \x03(\v2\".boomerangz.control.v1.CleanActionR\aactions\x12\x1a\n" +
 	"\bblockers\x18\x05 \x03(\tR\bblockers\x12\x1a\n" +
 	"\bwarnings\x18\x06 \x03(\tR\bwarnings\x12\x18\n" +
-	"\aapplied\x18\a \x01(\rR\aapplied\"]\n" +
+	"\aapplied\x18\a \x01(\rR\aapplied\x12%\n" +
+	"\x0eforget_targets\x18\b \x03(\tR\rforgetTargets\"]\n" +
 	"\rCleanResponse\x126\n" +
 	"\x05plans\x18\x01 \x03(\v2 .boomerangz.control.v1.CleanPlanR\x05plans\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error2\xc0\x02\n" +

@@ -3,7 +3,8 @@
 _boomerangz_option_takes_value() {
   case $1 in
     --config|--config-dir|--socket|--credential|--listener|\
-      --client-cert|--client-key|--scope|--expires-in|--owner|--status)
+      --client-cert|--client-key|--scope|--expires-in|--owner|--status|\
+      --forget-target)
       return 0
       ;;
   esac
@@ -23,7 +24,7 @@ _boomerangz_options() {
     'dataset list') reply=(-h --help --config --config-dir --status --json) ;;
     'dataset inspect') reply=(-h --help --config --config-dir --json) ;;
     'dataset adopt'|'dataset reseed'|'dataset abort-receive') reply=(-h --help --config --config-dir --apply) ;;
-    'dataset clean') reply=(-h --help --config --config-dir --recursive --all --destroy-owned-snapshots --apply) ;;
+    'dataset clean') reply=(-h --help --config --config-dir --recursive --all --destroy-owned-snapshots --forget-target --apply) ;;
     'identity recover') reply=(-h --help --config --config-dir --owner --apply) ;;
     *) reply=(-h --help) ;;
   esac

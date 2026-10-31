@@ -107,6 +107,17 @@ func (s *Safety) CheckTarget(ctx context.Context, source, target string) error {
 	return targets.CheckTarget(ctx, source, target)
 }
 
+// TargetID resolves an operator's name for a target, as TargetChecker does.
+func (s *Safety) TargetID(name string) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("target resolution is unavailable")
+	}
+	s.mu.RLock()
+	targets := s.targets
+	s.mu.RUnlock()
+	return targets.TargetID(name)
+}
+
 func (s *Safety) setTargets(targets *TargetChecker) {
 	s.mu.Lock()
 	s.targets = targets
@@ -163,6 +174,27 @@ func (s *TargetChecker) CheckTarget(ctx context.Context, source, targetID string
 		return checkResumeState(ctx, s.local, binding.MappedDataset)
 	}
 	return fmt.Errorf("recorded target is not configured")
+}
+
+// TargetID resolves an operator's name for a target to the ID its state is
+// recorded under, without needing the target to be reachable: a target ID is
+// taken as it is, a configured remote's name is its canonical target's ID, and
+// any other dataset name is a local destination root, configured or not. A
+// remote no longer configured can only be named by its ID, which a clean
+// blocker for it reports.
+func (s *TargetChecker) TargetID(name string) (string, error) {
+	if lifecycle.ValidTargetID(name) {
+		return name, nil
+	}
+	if s != nil {
+		if client, ok := s.remotes[name]; ok {
+			return lifecycle.TargetID(client.CanonicalTarget()), nil
+		}
+	}
+	if err := zfs.ValidateDataset(name); err != nil {
+		return "", fmt.Errorf("target %q is neither a target ID, a configured remote nor a local destination root", name)
+	}
+	return lifecycle.TargetID("local:" + name), nil
 }
 
 // sourcePolicy resolves source's policy, and the local destinations it and

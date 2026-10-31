@@ -24,6 +24,7 @@ complete -c boomerangz -l apply
 complete -c boomerangz -l recursive
 complete -c boomerangz -l all
 complete -c boomerangz -l destroy-owned-snapshots
+complete -c boomerangz -l forget-target -r
 complete -c boomerangz -s w -l watch
 complete -c boomerangz -l credential -r
 complete -c boomerangz -l listener -r

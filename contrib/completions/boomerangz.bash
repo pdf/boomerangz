@@ -52,7 +52,8 @@ _boomerangz_complete_reseed_targets() {
 _boomerangz_option_takes_value() {
     case $1 in
         --config|--config-dir|--socket|--credential|--listener|\
-            --client-cert|--client-key|--scope|--expires-in|--owner|--status)
+            --client-cert|--client-key|--scope|--expires-in|--owner|--status|\
+            --forget-target)
             return 0
             ;;
     esac
@@ -96,7 +97,7 @@ _boomerangz_options() {
             printf '%s' '-h --help --config --config-dir --apply'
             ;;
         'dataset clean')
-            printf '%s' '-h --help --config --config-dir --recursive --all --destroy-owned-snapshots --apply'
+            printf '%s' '-h --help --config --config-dir --recursive --all --destroy-owned-snapshots --forget-target --apply'
             ;;
         'identity recover')
             printf '%s' '-h --help --config --config-dir --owner --apply'

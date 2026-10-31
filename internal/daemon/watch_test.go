@@ -35,7 +35,7 @@ func (r watchRuntime) SubscribeStatus(ctx context.Context) (daemonstate.Subscrip
 }
 func (watchRuntime) Trigger([]string) ([]string, error) { return nil, nil }
 func (watchRuntime) Reconcile()                         {}
-func (watchRuntime) Clean(context.Context, []string, bool, bool, bool, bool) ([]lifecycle.CleanPlan, error) {
+func (watchRuntime) Clean(context.Context, []string, bool, bool, bool, []string, bool) ([]lifecycle.CleanPlan, error) {
 	return nil, nil
 }
 

@@ -486,3 +486,34 @@ func TestRemoteDestinationsFollowEachRemotesBinding(t *testing.T) {
 		t.Fatalf("loopback destination = %+v", loopback["home"])
 	}
 }
+
+// A target is forgotten by the name an operator knows it by, and a remote no
+// longer configured by the ID a clean blocker reported for it.
+func TestResolveForgetTargets(t *testing.T) {
+	t.Parallel()
+	native := &nativeRemote{bundle: control.PairingBundle{Version: 1, Endpoint: "a:1"}, root: "tank/backups", canonical: "native://a:1/tank/backups"}
+	checker := &TargetChecker{remotes: map[string]remoteClient{"home": native}}
+	gone := lifecycle.TargetID("ssh://gone/backup")
+	ids, err := ResolveForgetTargets(checker, []string{"home", "backup/archive", gone, "home"}, false, false, false)
+	want := []string{lifecycle.TargetID(native.canonical), lifecycle.TargetID("local:backup/archive"), gone}
+	slices.Sort(want)
+	if err != nil || !slices.Equal(ids, want) {
+		t.Fatalf("ids=%v err=%v, want %v", ids, err, want)
+	}
+	for name, test := range map[string]struct {
+		names                   []string
+		recursive, all, destroy bool
+	}{
+		"not a target": {names: []string{"/backup"}},
+		"recursive":    {names: []string{"home"}, recursive: true},
+		"all":          {names: []string{"home"}, all: true},
+		"destroy":      {names: []string{"home"}, destroy: true},
+	} {
+		if ids, err := ResolveForgetTargets(checker, test.names, test.recursive, test.all, test.destroy); err == nil {
+			t.Errorf("%s: resolved %v", name, ids)
+		}
+	}
+	if ids, err := ResolveForgetTargets(checker, nil, true, true, true); err != nil || ids != nil {
+		t.Fatalf("no targets: ids=%v err=%v", ids, err)
+	}
+}
