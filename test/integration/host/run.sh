@@ -207,6 +207,11 @@ start_qemu() {
 	boot_index=$((boot_index + 1))
 	local console=$diagnostics/console-$boot_index.log
 	: >"$console"
+	# The pool disks are created per run and destroyed with it, so a flush
+	# guards nothing a test can observe: ZFS issues one for every transaction
+	# group a property change, snapshot or hold commits, and cache=unsafe
+	# drops them instead of syncing the host disk. The system disk keeps
+	# cache=none, since a provisioning boot flattens it into the image cache.
 	"$target_qemu_binary" \
 		-machine "$target_machine" \
 		-cpu "$target_cpu" \
@@ -219,9 +224,9 @@ start_qemu() {
 		-device virtio-rng-pci \
 		-drive "if=none,id=system,file=$system_image,format=$target_image_format,cache=none" \
 		-device "$target_system_device",drive=system \
-		-drive "if=none,id=source,file=$source_image,format=qcow2,cache=none" \
+		-drive "if=none,id=source,file=$source_image,format=qcow2,cache=unsafe" \
 		-device "$target_data_device",drive=source,serial="$(disk_serial src)" \
-		-drive "if=none,id=destination,file=$destination_image,format=qcow2,cache=none" \
+		-drive "if=none,id=destination,file=$destination_image,format=qcow2,cache=unsafe" \
 		-device "$target_data_device",drive=destination,serial="$(disk_serial dst)" \
 		-drive "if=none,id=seed,file=$seed_image,format=$target_seed_format,readonly=on" \
 		-device virtio-blk-pci,drive=seed \
