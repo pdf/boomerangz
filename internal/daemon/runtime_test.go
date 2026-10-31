@@ -77,31 +77,6 @@ func TestNearestReceiveLockScope(t *testing.T) {
 	}
 }
 
-func TestMissingMappedAncestor(t *testing.T) {
-	t.Parallel()
-	target := "backup/root"
-	root := "tank/data/project"
-	child := root + "/child"
-	effective := policy.Effective{Enabled: true, Local: []string{target}, Discard: policy.DiscardFirst}
-	active := map[string]bool{root: true, child: true}
-	policies := map[string]policy.Effective{root: effective, child: effective}
-	mapped, err := zfs.MapReceiveDataset(child, target, zfs.ReceiveDropFirst)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := missingMappedAncestor(child, target, mapped, []zfs.Dataset{{Name: target, Type: zfs.Filesystem}}, active, policies); got != "backup/root/data/project" {
-		t.Fatalf("missing ancestor = %q", got)
-	}
-	inventory := []zfs.Dataset{{Name: target, Type: zfs.Filesystem}, {Name: "backup/root/data/project", Type: zfs.Filesystem}}
-	if got := missingMappedAncestor(child, target, mapped, inventory, active, policies); got != "" {
-		t.Fatalf("established ancestor reported missing: %q", got)
-	}
-	delete(active, root)
-	if got := missingMappedAncestor(child, target, mapped, []zfs.Dataset{{Name: target, Type: zfs.Filesystem}}, active, policies); got != "" {
-		t.Fatalf("inactive ancestor created dependency: %q", got)
-	}
-}
-
 func TestDiscoveryReferenceChangeDoesNotReconcile(t *testing.T) {
 	t.Parallel()
 	base := discovery.Entry{
@@ -156,7 +131,7 @@ func (b *runtimeBackend) InspectState(context.Context, string, bool) (zfs.State,
 func (*runtimeBackend) SetProperties(context.Context, string, map[string]string) error { return nil }
 func (*runtimeBackend) CreateReceiveParent(context.Context, string) error              { return nil }
 func (*runtimeBackend) InheritProperty(context.Context, string, string) error          { return nil }
-func (*runtimeBackend) Snapshot(context.Context, string, string, bool, map[string]string) error {
+func (*runtimeBackend) Snapshot(context.Context, []string, string, map[string]string) error {
 	return nil
 }
 func (*runtimeBackend) DestroySnapshot(context.Context, string) error  { return nil }
@@ -445,5 +420,34 @@ func TestSameRemoteClientsComparesWhatEachClientWasBuiltFrom(t *testing.T) {
 		if got := sameRemoteClients(tc.a, tc.b); got != tc.same {
 			t.Errorf("%s: same=%t, want %t", tc.name, got, tc.same)
 		}
+	}
+}
+
+func TestRemoteDestinationsFollowEachRemotesBinding(t *testing.T) {
+	t.Parallel()
+	settings := map[string]config.RemoteConfig{
+		"home":   {Transport: "ssh", Host: "Backup.Example.net", User: "replicator", Root: "pool/backup"},
+		"office": {Transport: "ssh", Host: "backup.example.net", Port: 22, User: "other", Root: "pool/backup"},
+		// An unreadable credential leaves this remote out rather than failing
+		// the whole set.
+		"paired": {Transport: "native", Credential: "missing", Root: "pool/backup"},
+	}
+	destinations := RemoteDestinations(settings, t.TempDir())
+	want := discovery.RemoteDestination{Namespace: "ssh://backup.example.net:22", Root: "pool/backup"}
+	// Different users on one host reach one dataset tree.
+	if destinations["home"] != want || destinations["office"] != want {
+		t.Fatalf("destinations = %+v", destinations)
+	}
+	if _, found := destinations["paired"]; found {
+		t.Fatalf("a remote without a readable credential was given a destination: %+v", destinations["paired"])
+	}
+	// A remote found to receive into this host's own pools shares the local
+	// namespace, whatever address it is reached by.
+	clients, err := buildRemoteClients(map[string]config.RemoteConfig{"home": settings["home"]}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loopback := remoteDestinations(clients, map[string]bool{"home": true}); loopback["home"] != (discovery.RemoteDestination{Namespace: "local", Root: "pool/backup"}) {
+		t.Fatalf("loopback destination = %+v", loopback["home"])
 	}
 }

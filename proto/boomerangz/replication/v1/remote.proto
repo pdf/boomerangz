@@ -13,6 +13,7 @@ service RemoteService {
   rpc CreateReceiveParent(CreateReceiveParentRequest) returns (CreateReceiveParentResponse);
   rpc AbortReceive(AbortReceiveRequest) returns (AbortReceiveResponse);
   rpc DestroyDataset(DestroyDatasetRequest) returns (DestroyDatasetResponse);
+  rpc RenameDataset(RenameDatasetRequest) returns (RenameDatasetResponse);
   rpc SetProperties(SetPropertiesRequest) returns (SetPropertiesResponse);
   rpc InheritProperty(InheritPropertyRequest) returns (InheritPropertyResponse);
   rpc Receive(stream ReceiveRequest) returns (ReceiveResponse);
@@ -47,6 +48,8 @@ message InspectDatasetIdentityResponse {
   uint64 guid = 3;
   string pool = 4;
   uint64 pool_guid = 5;
+  // Set when the dataset carries the placeholder marker locally.
+  bool placeholder = 6;
 }
 
 message InspectStateRequest {
@@ -112,6 +115,13 @@ message DestroyDatasetRequest {
 }
 
 message DestroyDatasetResponse {}
+
+message RenameDatasetRequest {
+  string from = 1;
+  string to = 2;
+}
+
+message RenameDatasetResponse {}
 
 message SetPropertiesRequest {
   string dataset = 1;

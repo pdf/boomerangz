@@ -37,6 +37,9 @@ type remoteApplier struct {
 	client       remoteClient
 	installation string
 	lifecycle    *lifecycle.Service
+	// hostLocal is told when the remote turns out to receive into one of this
+	// host's own pools.
+	hostLocal func()
 }
 
 func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, report transfer.Reporter) (transfer.Result, error) {
@@ -49,6 +52,10 @@ func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, repo
 		return transfer.Result{}, errors.Join(err, endpoint.close())
 	}
 	result, applyErr := engine.Apply(ctx, request, report)
+	var loopback *transfer.HostLocalError
+	if errors.As(applyErr, &loopback) && a.hostLocal != nil {
+		a.hostLocal()
+	}
 	return result, errors.Join(applyErr, endpoint.close())
 }
 
@@ -88,13 +95,16 @@ type Runtime struct {
 	now          func() time.Time
 	reloadMu     sync.Mutex
 
-	mu               sync.Mutex
-	known            map[string]bool
-	active           map[string]bool
-	recursive        map[string]bool
-	policies         map[string]policy.Effective
-	generation       *discovery.Generation
-	roads            map[string]roadState
+	mu         sync.Mutex
+	known      map[string]bool
+	active     map[string]bool
+	recursive  map[string]bool
+	policies   map[string]policy.Effective
+	generation *discovery.Generation
+	roads      map[string]roadState
+	// hostLocal names the remotes found to receive into this host's own
+	// pools. It is learned from transfers and forgotten when remotes change.
+	hostLocal        map[string]bool
 	retireFailures   map[string]int
 	delayed          map[string]time.Time
 	dirty            map[string]bool
@@ -144,7 +154,7 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 		remoteNames = append(remoteNames, name)
 	}
 	slices.Sort(remoteNames)
-	scanner, err := discovery.New(source, discovery.Options{Remotes: remoteNames})
+	scanner, err := discovery.New(source, discovery.Options{Remotes: remoteNames, Destinations: remoteDestinations(clients, nil)})
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +186,7 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 		local: local, remote: remote, localStream: stream, pending: &transfer.PendingSet{},
 		remotes: clients, logger: logger, lifecycle: lifecycleService, status: status, locks: sharedLocks, now: time.Now, known: make(map[string]bool), active: make(map[string]bool),
 		recursive: make(map[string]bool), policies: make(map[string]policy.Effective),
-		roads: make(map[string]roadState), retireFailures: make(map[string]int), delayed: make(map[string]time.Time), dirty: make(map[string]bool), configGeneration: 1,
+		roads: make(map[string]roadState), hostLocal: make(map[string]bool), retireFailures: make(map[string]int), delayed: make(map[string]time.Time), dirty: make(map[string]bool), configGeneration: 1,
 	}
 	runtime.safety = newSafety(gate, source, clients, liveConfig.Remotes)
 	for _, pool := range []*Pool{management, local, remote} {
@@ -284,7 +294,13 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	_ = r.management.Resize(effective.Daemon.EffectiveManagementWorkers())
 	_ = r.local.Resize(effective.Daemon.LocalTransferWorkers)
 	_ = r.remote.Resize(effective.Daemon.RemoteTransferWorkers)
-	_ = r.scanner.Reconfigure(effective.Daemon.ReconcileInterval.Duration, prepared.remotes)
+	r.mu.Lock()
+	if prepared.refreshRemotes {
+		r.hostLocal = make(map[string]bool)
+	}
+	hostLocal := maps.Clone(r.hostLocal)
+	r.mu.Unlock()
+	_ = r.scanner.Reconfigure(effective.Daemon.ReconcileInterval.Duration, prepared.remotes, remoteDestinations(prepared.clients, hostLocal))
 	// Queued remote work, and each remote's recovery coordinator with its
 	// retry state, is bound to the client it was built with. A reload that
 	// leaves every remote as it was keeps both; one that changes a remote
@@ -332,7 +348,7 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	for _, reconcile := range reconciles {
 		jobID := "remote:" + reconcile.dataset + ":" + reconcile.remote
 		r.markDirty(jobID)
-		if !r.enqueueRemote(reconcile.dataset, reconcile.remote, reconcile.policy, "") {
+		if !r.enqueueRemote(reconcile.dataset, reconcile.remote, reconcile.policy, nil) {
 			r.clearDirty(jobID)
 		}
 	}
@@ -513,11 +529,11 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 		}
 		if changed[name] {
 			entry, _ := generation.Inspect(name)
-			deadline, _, deadlineErr := r.nextOwnedSnapshot(name, entry.Policy.Grid.Cadence())
-			if deadlineErr != nil {
-				r.logger.Error("inspect existing transfer work", "dataset", name, "error", deadlineErr)
-			} else if !deadline.IsZero() {
-				r.enqueueTransfers(name, entry.Policy, "")
+			owned, ownedErr := r.hasOwnedSnapshot(name)
+			if ownedErr != nil {
+				r.logger.Error("inspect existing transfer work", "dataset", name, "error", ownedErr)
+			} else if owned {
+				r.enqueueTransfers(name, entry.Policy, nil)
 			}
 		}
 	}
@@ -625,9 +641,11 @@ func destroyedSnapshots(plan lifecycle.CleanPlan) daemonstate.Identity {
 
 func (r *Runtime) enqueueRetirement(dataset string) {
 	r.mu.Lock()
-	recursive := r.recursive[dataset]
 	effective := r.policies[dataset].Clone()
 	r.mu.Unlock()
+	// Members hold snapshots of the root's lineage whatever the wire format,
+	// so retiring a root always covers its whole subtree.
+	const recursive = true
 	_, err := r.management.Submit(Job{RunID: nextRunID(), ID: "retire:" + dataset, Group: dataset, Scope: dataset, LockKey: dataset, StartState: "retiring", Run: func(ctx context.Context) Outcome {
 		service, serviceErr := r.service()
 		if serviceErr != nil {
@@ -695,31 +713,61 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 		if startErr := ticket.Start(); startErr != nil {
 			return blockedOrCancelled(startErr)
 		}
-		deadline, latest, deadlineErr := r.nextOwnedSnapshot(schedule.Dataset, schedule.Policy.Grid.Cadence())
+		satisfied, latest, deadlineErr := r.satisfiedMembers(schedule)
 		if deadlineErr != nil {
 			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
 			return Outcome{State: "failed", Reason: deadlineErr.Error()}
 		}
-		if !schedule.Force && !deadline.IsZero() && r.now().Before(deadline) {
-			r.scheduler.Retry(schedule.Dataset, deadline)
+		var due []string
+		for _, name := range schedule.Due {
+			if _, deferred := satisfied[name]; !deferred {
+				due = append(due, name)
+			}
+		}
+		if len(due) == 0 {
+			r.scheduler.Complete(schedule.Dataset, nil, r.now(), satisfied)
 			return Outcome{State: "scheduled", Reason: "existing owned snapshot sets the next deadline", Identity: daemonstate.Identity{Snapshot: latest}}
 		}
 		service, serviceErr := r.service()
 		if serviceErr != nil {
 			return Outcome{State: "failed", Reason: serviceErr.Error()}
 		}
-		metadata, createErr := service.CreateSnapshot(ticket.Context(), schedule.Dataset, schedule.Policy.Send.Replicate, r.now(), schedule.Policy)
+		retentions := memberRetentions(schedule, due)
+		if schedule.Policy.Send.Replicate {
+			// One -R stream needs the snapshot on every dataset ZFS holds
+			// beneath the root now, including any created since discovery.
+			subtree, subtreeErr := r.subtree(schedule.Dataset)
+			if subtreeErr != nil {
+				r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
+				return Outcome{State: "failed", Reason: subtreeErr.Error()}
+			}
+			due, retentions = subtree, nil
+			for _, name := range subtree {
+				retentions = append(retentions, lifecycle.Retention{Dataset: name, Grid: schedule.Policy.Grid})
+			}
+		}
+		metadata, createErr := service.CreateSnapshot(ticket.Context(), schedule.Dataset, due, r.now(), schedule.Policy)
 		if createErr != nil {
 			r.scheduler.Retry(schedule.Dataset, r.now().Add(r.daemonConfig().ReconcileInterval.Duration))
 			return Outcome{State: "failed", Reason: createErr.Error()}
 		}
-		completed := r.now()
-		r.scheduler.Complete(schedule.Dataset, completed)
-		created := daemonstate.Identity{Snapshot: schedule.Dataset + "@" + metadata.Name()}
-		if !r.enqueueTransfers(schedule.Dataset, schedule.Policy, created.Snapshot) {
+		r.scheduler.Complete(schedule.Dataset, due, r.now(), satisfied)
+		snapshots := make([]string, 0, len(due))
+		for _, name := range due {
+			snapshots = append(snapshots, name+"@"+metadata.Name())
+		}
+		created := daemonstate.Identity{Snapshot: snapshots[0]}
+		if slices.Contains(due, schedule.Dataset) {
+			created.Snapshot = schedule.Dataset + "@" + metadata.Name()
+			// Datasets excluded from the root are never snapshotted again, so
+			// their remaining snapshots only need pruning on the root's own
+			// cadence, not on every member's.
+			retentions = append(retentions, r.excludedRetentions(schedule.Dataset)...)
+		}
+		if !r.enqueueTransfers(schedule.Dataset, schedule.Policy, snapshots) {
 			return Outcome{State: "failed", Reason: "new snapshot could not be protected for every transfer target", Identity: created}
 		}
-		r.enqueuePrune(schedule.Dataset, schedule.Policy)
+		r.enqueuePrune(schedule.Dataset, schedule.Policy, retentions)
 		return Outcome{State: "succeeded", Identity: created}
 	}
 	if added, submitErr := r.management.Submit(job); submitErr != nil || !added {
@@ -732,32 +780,133 @@ func (r *Runtime) enqueueSnapshot(schedule Schedule) bool {
 	return true
 }
 
-// nextOwnedSnapshot returns when the newest owned snapshot makes the next one
-// due, and that snapshot's name; both are zero when there is none.
-func (r *Runtime) nextOwnedSnapshot(dataset string, cadence time.Duration) (time.Time, string, error) {
-	state, err := r.backend.InspectState(context.Background(), dataset, false)
+// subtree names the root and every filesystem and volume ZFS holds beneath it.
+func (r *Runtime) subtree(root string) ([]string, error) {
+	state, err := r.backend.InspectState(context.Background(), root, true)
 	if err != nil {
-		return time.Time{}, "", err
+		return nil, err
 	}
-	lineage, authoritative := rootLineage(state, dataset, r.installation)
-	if !authoritative {
-		// A fresh root has no authority until its first successful snapshot.
-		return time.Time{}, "", nil
-	}
-	var (
-		latest time.Time
-		name   string
-	)
-	for _, snapshot := range lifecycle.Snapshots(state, dataset) {
-		metadata, ownershipErr := lifecycle.Ownership(snapshot, lineage)
-		if ownershipErr == nil && metadata.Created.After(latest) {
-			latest, name = metadata.Created, snapshot.Name
+	return lifecycle.Subtree(state, root), nil
+}
+
+// memberRetentions pairs each named member with its own grid.
+func memberRetentions(schedule Schedule, names []string) []lifecycle.Retention {
+	var retentions []lifecycle.Retention
+	for _, member := range schedule.Members {
+		if slices.Contains(names, member.Dataset) {
+			retentions = append(retentions, member.Retention())
 		}
 	}
-	if latest.IsZero() {
-		return time.Time{}, "", nil
+	return retentions
+}
+
+// excludedRetentions names the datasets inside root that are not members, with
+// the grid each still resolves. They may hold snapshots of the root's lineage
+// from before they were excluded.
+func (r *Runtime) excludedRetentions(root string) []lifecycle.Retention {
+	r.mu.Lock()
+	generation := r.generation
+	r.mu.Unlock()
+	if generation == nil {
+		return nil
 	}
-	return latest.Add(cadence), name, nil
+	var retentions []lifecycle.Retention
+	for _, entry := range generation.Entries() {
+		if entry.CoveredBy == root && !entry.Member && entry.Inspected && entry.Policy.Grid.Cadence() > 0 {
+			retentions = append(retentions, lifecycle.Retention{Dataset: entry.Dataset.Name, Grid: entry.Policy.Grid})
+		}
+	}
+	return retentions
+}
+
+// satisfiedMembers maps each due member whose newest owned snapshot already
+// covers its own cadence to the deadline that snapshot sets, and names the
+// newest owned snapshot of the root itself, or failing that of any member.
+// Deadlines live only in memory, so this is what stops a restart from
+// snapshotting every member at once. A forced schedule satisfies nothing.
+func (r *Runtime) satisfiedMembers(schedule Schedule) (map[string]time.Time, string, error) {
+	if schedule.Force {
+		return nil, "", nil
+	}
+	state, err := r.backend.InspectState(context.Background(), schedule.Dataset, true)
+	if err != nil {
+		return nil, "", err
+	}
+	lineage, authoritative := rootLineage(state, schedule.Dataset, r.installation)
+	if !authoritative {
+		// A fresh root has no authority until its first successful snapshot.
+		return nil, "", nil
+	}
+	newest := func(dataset string) (time.Time, string) {
+		var (
+			latest time.Time
+			name   string
+		)
+		for _, snapshot := range lifecycle.Snapshots(state, dataset) {
+			metadata, ownershipErr := lifecycle.Ownership(snapshot, lineage)
+			if ownershipErr == nil && metadata.Created.After(latest) {
+				latest, name = metadata.Created, snapshot.Name
+			}
+		}
+		return latest, name
+	}
+	now := r.now()
+	satisfied := make(map[string]time.Time)
+	var (
+		rootName, anyName string
+		anyCreated        time.Time
+	)
+	for _, member := range schedule.Members {
+		created, name := newest(member.Dataset)
+		if created.IsZero() {
+			continue
+		}
+		if member.Dataset == schedule.Dataset {
+			rootName = name
+		}
+		if created.After(anyCreated) {
+			anyCreated, anyName = created, name
+		}
+		if deadline := created.Add(member.Grid.Cadence()); now.Before(deadline) {
+			satisfied[member.Dataset] = deadline
+		}
+	}
+	if schedule.Policy.Send.Replicate {
+		// One cadence, the root's, governs the whole -R subtree.
+		if deadline, found := satisfied[schedule.Dataset]; found {
+			for _, name := range schedule.Due {
+				satisfied[name] = deadline
+			}
+		} else {
+			clear(satisfied)
+		}
+	}
+	if rootName == "" {
+		rootName = anyName
+	}
+	return satisfied, rootName, nil
+}
+
+// hasOwnedSnapshot reports whether anything in the root's subtree already holds
+// a snapshot of its lineage, which is what makes catch-up transfer work
+// meaningful.
+func (r *Runtime) hasOwnedSnapshot(root string) (bool, error) {
+	state, err := r.backend.InspectState(context.Background(), root, true)
+	if err != nil {
+		return false, err
+	}
+	lineage, authoritative := rootLineage(state, root, r.installation)
+	if !authoritative {
+		return false, nil
+	}
+	for _, dataset := range lifecycle.Subtree(state, root) {
+		for _, snapshot := range lifecycle.Snapshots(state, dataset) {
+			if _, ownershipErr := lifecycle.Ownership(snapshot, lineage); ownershipErr == nil {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func rootLineage(state zfs.State, dataset, installation string) (string, bool) {
@@ -765,7 +914,13 @@ func rootLineage(state zfs.State, dataset, installation string) (string, bool) {
 	return lineage, err == nil
 }
 
-func (r *Runtime) enqueuePrune(dataset string, effective policy.Effective) {
+// enqueuePrune prunes the named datasets of one root in a single job, each
+// against its own grid. They share the root's lock, so one job rather than one
+// per member avoids the root contending with itself.
+func (r *Runtime) enqueuePrune(dataset string, effective policy.Effective, retentions []lifecycle.Retention) {
+	if len(retentions) == 0 {
+		return
+	}
 	ticket, err := r.gate.Queue(context.Background(), dataset, lifecycle.Management)
 	if err != nil {
 		return
@@ -780,14 +935,18 @@ func (r *Runtime) enqueuePrune(dataset string, effective policy.Effective) {
 		if serviceErr != nil {
 			return Outcome{State: "failed", Reason: serviceErr.Error()}
 		}
-		decisions, pruneErr := service.Prune(ticket.Context(), dataset, effective, true)
-		if pruneErr != nil {
-			return Outcome{State: "failed", Reason: pruneErr.Error()}
-		}
 		var destroyed []string
-		for _, decision := range decisions {
-			if decision.Destroy {
-				destroyed = append(destroyed, decision.Snapshot)
+		for _, retention := range retentions {
+			decisions, pruneErr := service.Prune(ticket.Context(), dataset, effective, retention, true)
+			if pruneErr != nil {
+				// A failed pass returns its plan, not what it destroyed, so
+				// only completed passes are reported.
+				return Outcome{State: "failed", Reason: pruneErr.Error(), Identity: daemonstate.DestroyedIdentity(destroyed)}
+			}
+			for _, decision := range decisions {
+				if decision.Destroy {
+					destroyed = append(destroyed, decision.Snapshot)
+				}
 			}
 		}
 		return Outcome{State: "succeeded", Identity: daemonstate.DestroyedIdentity(destroyed)}
@@ -798,7 +957,9 @@ func (r *Runtime) enqueuePrune(dataset string, effective policy.Effective) {
 }
 
 func (r *Runtime) latestPending(dataset, snapshot string) (transfer.PendingSnapshot, error) {
-	state, err := r.backend.InspectState(context.Background(), dataset, false)
+	// A tick may snapshot a member without the root, so the snapshot can sit
+	// anywhere in the root's subtree.
+	state, err := r.backend.InspectState(context.Background(), dataset, true)
 	if err != nil {
 		return transfer.PendingSnapshot{}, err
 	}
@@ -810,8 +971,11 @@ func (r *Runtime) latestPending(dataset, snapshot string) (transfer.PendingSnaps
 	return transfer.PendingSnapshot{}, fmt.Errorf("created snapshot is absent from source inventory")
 }
 
-func (r *Runtime) protectAndCoalesce(dataset, snapshot, target string, recursive bool) error {
-	pending, err := r.latestPending(dataset, snapshot)
+// protectAndCoalesce holds a newly created snapshot for target under its own
+// stream's proof and makes it that stream's pending work. A replication root's
+// stream carries its whole subtree, so it holds the subtree's snapshots too.
+func (r *Runtime) protectAndCoalesce(root, snapshot, target string, recursive bool) error {
+	pending, err := r.latestPending(root, snapshot)
 	if err != nil {
 		return err
 	}
@@ -819,32 +983,32 @@ func (r *Runtime) protectAndCoalesce(dataset, snapshot, target string, recursive
 	if err != nil {
 		return err
 	}
+	stream, component, found := strings.Cut(snapshot, "@")
+	if !found {
+		return fmt.Errorf("pending snapshot has no component")
+	}
 	snapshots := []string{snapshot}
 	if recursive {
-		state, inspectErr := r.backend.InspectState(context.Background(), dataset, false)
+		state, inspectErr := r.backend.InspectState(context.Background(), root, true)
 		if inspectErr != nil {
 			return inspectErr
 		}
-		_, component, found := strings.Cut(snapshot, "@")
-		if !found {
-			return fmt.Errorf("pending recursive snapshot has no component")
-		}
 		for _, object := range state.Objects {
-			if object.Type == "snapshot" && strings.HasPrefix(object.Name, dataset+"/") && strings.HasSuffix(object.Name, "@"+component) {
+			if object.Type == "snapshot" && strings.HasPrefix(object.Name, root+"/") && strings.HasSuffix(object.Name, "@"+component) {
 				snapshots = append(snapshots, object.Name)
 			}
 		}
 	}
-	if err := protectSet(service, dataset, snapshots, target); err != nil {
+	if err := protectSet(service, root, stream, snapshots, target); err != nil {
 		return err
 	}
-	coalesced, err := r.pending.Coalesce(dataset, target, pending)
+	coalesced, err := r.pending.Coalesce(stream, target, pending)
 	if err != nil {
 		return err
 	}
 	if coalesced.ReleaseSuperseded {
-		if err := r.releaseSupersededPending(dataset, target, coalesced.Superseded.Name); err != nil {
-			r.logger.Warn("retain superseded pending recovery hold", "dataset", dataset, "target", target, "snapshot", coalesced.Superseded.Name, "error", err)
+		if err := r.releaseSupersededPending(root, stream, target, coalesced.Superseded.Name); err != nil {
+			r.logger.Warn("retain superseded pending recovery hold", "dataset", stream, "target", target, "snapshot", coalesced.Superseded.Name, "error", err)
 		}
 	}
 	return nil
@@ -877,14 +1041,14 @@ func replan[T any](operation func() (T, error)) (T, error) {
 // protectSet places a reference and holds on snapshots for target, re-planning
 // around concurrent changes. Nothing reschedules a new snapshot's protection,
 // so leaving it to a later attempt would leave the snapshot unprotected.
-func protectSet(service *lifecycle.Service, dataset string, snapshots []string, target string) error {
+func protectSet(service *lifecycle.Service, dataset, stream string, snapshots []string, target string) error {
 	_, err := replan(func() (lifecycle.Reference, error) {
-		return service.ProtectSet(context.Background(), dataset, snapshots, target)
+		return service.ProtectSet(context.Background(), dataset, stream, snapshots, target)
 	})
 	return err
 }
 
-func (r *Runtime) releaseSupersededPending(dataset, target, snapshot string) error {
+func (r *Runtime) releaseSupersededPending(dataset, stream, target, snapshot string) error {
 	state, err := r.backend.InspectState(context.Background(), dataset, true)
 	if err != nil {
 		return err
@@ -898,7 +1062,7 @@ func (r *Runtime) releaseSupersededPending(dataset, target, snapshot string) err
 		return err
 	}
 	for _, reference := range references {
-		if reference.Target == target && reference.SnapshotName(dataset) == snapshot {
+		if reference.Target == target && reference.Dataset == stream && reference.SnapshotName() == snapshot {
 			service, serviceErr := r.service()
 			if serviceErr != nil {
 				return serviceErr
@@ -909,13 +1073,109 @@ func (r *Runtime) releaseSupersededPending(dataset, target, snapshot string) err
 	return fmt.Errorf("superseded pending recovery reference is missing")
 }
 
-func (r *Runtime) enqueueTransfers(dataset string, effective policy.Effective, snapshot string) bool {
-	protected := true
-	for _, target := range effective.Local {
-		protected = r.enqueueLocal(dataset, target, effective, snapshot) && protected
+// transferStreams lists, for each target of a root, the members that send
+// there with their own policies, parents first. A target only the root sends
+// to carries no member list, and neither does any target of a replication
+// root: the root's own stream is then the whole transfer.
+func (r *Runtime) transferStreams(root string, effective policy.Effective) (local, remote map[string][]transfer.Member) {
+	local, remote = map[string][]transfer.Member{}, map[string][]transfer.Member{}
+	add := func(member transfer.Member) {
+		for _, target := range member.Policy.Local {
+			local[target] = append(local[target], member)
+		}
+		for _, name := range member.Policy.Remote {
+			remote[name] = append(remote[name], member)
+		}
 	}
-	for _, name := range effective.Remote {
-		protected = r.enqueueRemote(dataset, name, effective, snapshot) && protected
+	add(transfer.Member{Dataset: root, Policy: effective.Clone()})
+	r.mu.Lock()
+	generation := r.generation
+	r.mu.Unlock()
+	if !effective.Send.Replicate && generation != nil {
+		if entry, found := generation.Inspect(root); found {
+			for _, name := range entry.Members {
+				if member, exists := generation.Inspect(name); exists && member.Member && member.CoveredBy == root {
+					add(transfer.Member{Dataset: name, Policy: member.Policy.Clone()})
+				}
+			}
+		}
+	}
+	for _, set := range []map[string][]transfer.Member{local, remote} {
+		for target, members := range set {
+			if len(members) == 1 && members[0].Dataset == root {
+				set[target] = nil
+			}
+		}
+	}
+	return local, remote
+}
+
+// refuseBlocked reports a target that discovery blocked for the root as the
+// job's outcome, in place of a transfer, and says whether it did. Nothing is
+// protected as pending for a blocked target, so the root's snapshots go on
+// being pruned on their grid.
+func (r *Runtime) refuseBlocked(pool *Pool, jobID, startState, dataset, target string, remote bool) bool {
+	r.mu.Lock()
+	generation := r.generation
+	r.mu.Unlock()
+	if generation == nil {
+		return false
+	}
+	entry, found := generation.Inspect(dataset)
+	if !found {
+		return false
+	}
+	blocked := entry.ErrBlocked(target, remote)
+	if blocked == nil {
+		return false
+	}
+	job := Job{RunID: nextRunID(), ID: jobID, Group: dataset, Scope: dataset, StartState: startState}
+	job.Run = func(context.Context) Outcome { return Outcome{State: "blocked", Reason: blocked.Error()} }
+	if _, err := pool.Submit(job); err != nil {
+		r.logger.Error("report blocked target", "dataset", dataset, "target", target, "error", err)
+	}
+	return true
+}
+
+// streamDatasets names the datasets a target's transfer sends from.
+func streamDatasets(root string, members []transfer.Member) []string {
+	if len(members) == 0 {
+		return []string{root}
+	}
+	names := make([]string, 0, len(members))
+	for _, member := range members {
+		names = append(names, member.Dataset)
+	}
+	return names
+}
+
+// protectCreated protects each newly created snapshot that one of a target's
+// streams sends from. A replication root's stream is protected through its
+// root snapshot, which holds the subtree.
+func (r *Runtime) protectCreated(root string, effective policy.Effective, members []transfer.Member, created []string, target string) error {
+	streams := streamDatasets(root, members)
+	for _, snapshot := range created {
+		stream, _, _ := strings.Cut(snapshot, "@")
+		if !slices.Contains(streams, stream) {
+			continue
+		}
+		if err := r.protectAndCoalesce(root, snapshot, target, effective.Send.Replicate); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// enqueueTransfers queues each of a root's targets, after protecting the
+// snapshots this tick created for the streams that send there.
+func (r *Runtime) enqueueTransfers(dataset string, effective policy.Effective, created []string) bool {
+	local, remote := r.transferStreams(dataset, effective)
+	protected := true
+	for _, target := range slices.Sorted(maps.Keys(local)) {
+		protected = r.enqueueLocal(dataset, target, effective, created) && protected
+	}
+	for _, name := range slices.Sorted(maps.Keys(remote)) {
+		protected = r.enqueueRemote(dataset, name, effective, created) && protected
 	}
 	return protected
 }
@@ -932,46 +1192,17 @@ func nearestReceiveLockScope(root, mapped string, inventory []zfs.Dataset) strin
 	return nearest
 }
 
-func missingMappedAncestor(dataset, target, mapped string, inventory []zfs.Dataset, active map[string]bool, policies map[string]policy.Effective) string {
-	exists := make(map[string]bool, len(inventory))
-	for _, entry := range inventory {
-		exists[entry.Name] = true
-	}
-	for ancestor := dataset; strings.Contains(ancestor, "/"); {
-		ancestor = ancestor[:strings.LastIndexByte(ancestor, '/')]
-		if !active[ancestor] {
-			continue
-		}
-		ancestorPolicy, ok := policies[ancestor]
-		if !ok || !slices.Contains(ancestorPolicy.Local, target) {
-			continue
-		}
-		ancestorMapped, err := zfs.MapReceiveDataset(ancestor, target, zfs.ReceiveDiscard(ancestorPolicy.Discard))
-		if err != nil || ancestorMapped == mapped || !strings.HasPrefix(mapped, ancestorMapped+"/") {
-			continue
-		}
-		if !exists[ancestorMapped] {
-			return ancestorMapped
-		}
-	}
-	return ""
-}
-
-func (r *Runtime) missingLocalDestinationAncestor(ctx context.Context, dataset, target, mapped string) (string, error) {
-	inventory, err := r.backend.ListDatasets(ctx)
-	if err != nil {
-		return "", err
-	}
-	r.mu.Lock()
-	active := maps.Clone(r.active)
-	policies := maps.Clone(r.policies)
-	r.mu.Unlock()
-	return missingMappedAncestor(dataset, target, mapped, inventory, active, policies), nil
-}
-
-func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effective, snapshot string) bool {
+func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effective, created []string) bool {
 	canonical := "local:" + target
+	local, _ := r.transferStreams(dataset, effective)
+	members, configured := local[target]
+	if !configured {
+		return true
+	}
 	jobID := "local:" + dataset + ":" + target
+	if r.refuseBlocked(r.local, jobID, "planning", dataset, target, false) {
+		return true
+	}
 	mapped, mapErr := zfs.MapReceiveDataset(dataset, target, zfs.ReceiveDiscard(effective.Discard))
 	if mapErr != nil {
 		r.logger.Error("map local transfer lock scope", "dataset", dataset, "target", target, "error", mapErr)
@@ -983,8 +1214,8 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 	} else {
 		lockScope = nearestReceiveLockScope(target, mapped, inventory)
 	}
-	if snapshot != "" {
-		if pendingErr := r.protectAndCoalesce(dataset, snapshot, canonical, effective.Send.Replicate); pendingErr != nil {
+	if len(created) > 0 {
+		if pendingErr := r.protectCreated(dataset, effective, members, created, canonical); pendingErr != nil {
 			r.logger.Error("protect local pending snapshot", "dataset", dataset, "target", target, "error", pendingErr)
 			return false
 		}
@@ -992,22 +1223,22 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 	}
 	ticket, err := r.gate.Queue(context.Background(), dataset, lifecycle.Transfer)
 	if err != nil {
-		return snapshot == ""
+		return len(created) == 0
 	}
 	job := Job{RunID: nextRunID(), ID: jobID, Group: dataset, Scope: dataset, LockKey: canonical, LockScope: lockScope, StartState: "planning", Drop: ticket.Finish}
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		r.clearDirty(jobID)
-		return r.withPending(dataset, canonical, r.runLocal(ticket, dataset, target, canonical, mapped, effective, job))
+		return r.withPending(dataset, canonical, r.runLocal(ticket, dataset, target, canonical, mapped, effective, members, job))
 	}
 	job.After = func(outcome Outcome) {
 		if r.isDirty(jobID) {
-			r.enqueueLocal(dataset, target, effective, "")
+			r.enqueueLocal(dataset, target, effective, nil)
 			return
 		}
 		if outcome.State == "waiting-retry" {
 			r.schedule("retry:"+jobID, r.now().Add(transientTransferRetryDelay), func() {
-				r.enqueueLocal(dataset, target, effective, "")
+				r.enqueueLocal(dataset, target, effective, nil)
 			})
 		}
 	}
@@ -1017,34 +1248,33 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 	return true
 }
 
-// runLocal runs one local transfer. An outcome that follows a transfer names
-// the snapshot it carried; withPending names the pending one for any other.
-func (r *Runtime) runLocal(ticket *lifecycle.Ticket, dataset, target, canonical, mapped string, effective policy.Effective, job Job) Outcome {
+// runLocal runs one local transfer of a root's streams to target. An outcome
+// that follows a transfer names the snapshot it carried; withPending names the
+// pending one for any other.
+func (r *Runtime) runLocal(ticket *lifecycle.Ticket, dataset, target, canonical, mapped string, effective policy.Effective, members []transfer.Member, job Job) Outcome {
 	if startErr := ticket.Start(); startErr != nil {
 		return blockedOrCancelled(startErr)
-	}
-	missingAncestor, ancestorErr := r.missingLocalDestinationAncestor(ticket.Context(), dataset, target, mapped)
-	if ancestorErr != nil {
-		return Outcome{State: "waiting-retry", Reason: "inspect destination hierarchy: " + ancestorErr.Error()}
-	}
-	if missingAncestor != "" {
-		return Outcome{State: "waiting-retry", Reason: "waiting for destination ancestor " + missingAncestor}
 	}
 	engine, engineErr := transfer.NewLocalWithService(r.backend, r.localStream, r.installation, r.lifecycle)
 	if engineErr != nil {
 		return Outcome{State: "failed", Reason: engineErr.Error()}
 	}
-	requestSnapshot := ""
-	pending, hasPending := r.pending.Begin(dataset, canonical)
-	completed := false
-	if hasPending {
-		defer func() { r.pending.End(dataset, canonical, pending, completed) }()
+	request, reserved, beginErr := r.pending.BeginStreams(transfer.Request{Source: dataset, DestinationRoot: target, Policy: effective, Members: members}, canonical)
+	if beginErr != nil {
+		return Outcome{State: "blocked", Reason: beginErr.Error()}
 	}
-	if hasPending {
-		requestSnapshot = pending.Name
+	var result transfer.Result
+	defer func() { r.pending.FinishStreams(canonical, reserved, result) }()
+	carried := daemonstate.Identity{}
+	if len(reserved) > 0 {
+		carried.Snapshot = reserved[0].Snapshot.Name
 	}
-	carried := daemonstate.Identity{Snapshot: requestSnapshot}
-	result, applyErr := engine.Apply(ticket.Context(), transfer.Request{Source: dataset, DestinationRoot: target, Snapshot: requestSnapshot, Policy: effective}, r.transferReporter(r.local, job))
+	result, applyErr := engine.Apply(ticket.Context(), request, r.transferReporter(r.local, job))
+	// Each stream that verified advanced its own proof whether or not the
+	// others did, so its replica is pruned either way.
+	if slices.ContainsFunc(transfer.StreamResults(result), func(stream transfer.Result) bool { return stream.Verified }) {
+		r.enqueueDestinationPrune(dataset, effective, canonical, mapped, members)
+	}
 	if applyErr != nil {
 		if errors.Is(applyErr, context.Canceled) {
 			outcome := blockedOrCancelled(applyErr)
@@ -1060,8 +1290,6 @@ func (r *Runtime) runLocal(ticket *lifecycle.Ticket, dataset, target, canonical,
 	if !result.Verified {
 		return Outcome{State: "failed", Reason: "transfer was not verified", Identity: carried}
 	}
-	completed = hasPending && result.Plan.Snapshot == pending.Name
-	r.enqueueDestinationPrune(dataset, effective, canonical, result.Plan.Destination)
 	return Outcome{State: "succeeded", Identity: daemonstate.Identity{Snapshot: result.Plan.Snapshot, Destination: result.Plan.Destination}}
 }
 
@@ -1071,7 +1299,7 @@ func (r *Runtime) runLocal(ticket *lifecycle.Ticket, dataset, target, canonical,
 // from its queue before running names none; see the design's chunk J.
 func (r *Runtime) withPending(dataset, canonical string, outcome Outcome) Outcome {
 	if (outcome.State == "waiting-retry" || outcome.State == "blocked" || outcome.State == "cancelled") && outcome.Identity.Snapshot == "" {
-		if pending, found := r.pending.Peek(dataset, canonical); found {
+		if pending, found := r.pending.PeekScope(dataset, canonical); found {
 			outcome.Identity.Snapshot = pending.Name
 		}
 	}
@@ -1080,12 +1308,12 @@ func (r *Runtime) withPending(dataset, canonical string, outcome Outcome) Outcom
 
 func roadKey(dataset, remote string) string { return dataset + "\x00" + remote }
 
-func (r *Runtime) road(dataset, remote string, effective policy.Effective) (roadState, error) {
+func (r *Runtime) road(dataset, remote string, effective policy.Effective, members []transfer.Member) (roadState, error) {
 	key := roadKey(dataset, remote)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if existing, found := r.roads[key]; found {
-		if reflect.DeepEqual(existing.request.Policy, effective) {
+		if reflect.DeepEqual(existing.request.Policy, effective) && reflect.DeepEqual(existing.request.Members, members) && existing.request.HostLocal == r.hostLocal[remote] {
 			return existing, nil
 		}
 		delete(r.roads, key)
@@ -1095,8 +1323,9 @@ func (r *Runtime) road(dataset, remote string, effective policy.Effective) (road
 		return roadState{}, fmt.Errorf("remote %s is not configured", remote)
 	}
 	client := r.remotes[remote]
-	request := transfer.Request{Source: dataset, DestinationRoot: setting.Root, Policy: effective.Clone(), Transport: client.Transport(), RemoteName: remote, CanonicalTarget: client.CanonicalTarget()}
-	coordinator, err := transfer.NewRoadwarrior(remoteApplier{source: r.backend, client: client, installation: r.installation, lifecycle: r.lifecycle}, request, r.pending, transfer.DefaultRetryPolicy(), r.now, rand.Float64)
+	request := transfer.Request{Source: dataset, DestinationRoot: setting.Root, Policy: effective.Clone(), Members: slices.Clone(members), Transport: client.Transport(), RemoteName: remote, CanonicalTarget: client.CanonicalTarget(), HostLocal: r.hostLocal[remote]}
+	applier := remoteApplier{source: r.backend, client: client, installation: r.installation, lifecycle: r.lifecycle, hostLocal: func() { r.learnHostLocal(remote, client) }}
+	coordinator, err := transfer.NewRoadwarrior(applier, request, r.pending, transfer.DefaultRetryPolicy(), r.now, rand.Float64)
 	if err != nil {
 		return roadState{}, err
 	}
@@ -1105,14 +1334,40 @@ func (r *Runtime) road(dataset, remote string, effective policy.Effective) (road
 	return state, nil
 }
 
-func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effective, snapshot string) bool {
-	road, err := r.road(dataset, remote, effective)
+// learnHostLocal records that remote receives into one of this host's own
+// pools and rescans with its replicas in the local namespace. A root whose
+// replica there would overlap this host's datasets becomes invalid; any other
+// is retried with the request marked as validated. Knowledge is dropped if the
+// remote has since been replaced.
+func (r *Runtime) learnHostLocal(remote string, client remoteClient) {
+	r.mu.Lock()
+	if r.remotes[remote] != client || r.hostLocal[remote] {
+		r.mu.Unlock()
+		return
+	}
+	r.hostLocal[remote] = true
+	destinations := remoteDestinations(r.remotes, r.hostLocal)
+	r.mu.Unlock()
+	r.logger.Info("remote receives into this host's own pools; revalidating its replicas as local", "remote", remote)
+	r.scanner.SetDestinations(destinations)
+}
+
+func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effective, created []string) bool {
+	_, remotes := r.transferStreams(dataset, effective)
+	members, configured := remotes[remote]
+	if !configured {
+		return true
+	}
+	if r.refuseBlocked(r.remote, "remote:"+dataset+":"+remote, "probing", dataset, remote, true) {
+		return true
+	}
+	road, err := r.road(dataset, remote, effective, members)
 	if err != nil {
 		r.logger.Error("prepare remote recovery", "dataset", dataset, "remote", remote, "error", err)
 		return false
 	}
-	if snapshot != "" {
-		if pendingErr := r.protectAndCoalesce(dataset, snapshot, road.request.CanonicalTarget, effective.Send.Replicate); pendingErr != nil {
+	if len(created) > 0 {
+		if pendingErr := r.protectCreated(dataset, effective, members, created, road.request.CanonicalTarget); pendingErr != nil {
 			r.logger.Error("protect remote pending snapshot", "dataset", dataset, "remote", remote, "error", pendingErr)
 			return false
 		}
@@ -1128,7 +1383,7 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 	}
 	ticket, err := r.gate.Queue(context.Background(), dataset, lifecycle.Transfer)
 	if err != nil {
-		return snapshot == ""
+		return len(created) == 0
 	}
 	jobID := "remote:" + dataset + ":" + remote
 	job := Job{RunID: nextRunID(), ID: jobID, Group: dataset, Scope: dataset, LockKey: road.request.CanonicalTarget, StartState: "probing", Drop: ticket.Finish}
@@ -1140,7 +1395,7 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 		}
 		outcome, reconcileErr := road.coordinator.Reconcile(ticket.Context(), r.transferReporter(r.remote, job))
 		if outcome.Status == "waiting-retry" && !outcome.NotBefore.IsZero() {
-			r.schedule(jobID, outcome.NotBefore, func() { r.enqueueRemote(dataset, remote, effective, "") })
+			r.schedule(jobID, outcome.NotBefore, func() { r.enqueueRemote(dataset, remote, effective, nil) })
 		}
 		carried := daemonstate.Identity{Snapshot: outcome.Pending}
 		if reconcileErr != nil {
@@ -1152,7 +1407,7 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 			return r.withPending(dataset, road.request.CanonicalTarget, Outcome{State: outcome.Status, Reason: reconcileErr.Error(), Identity: carried})
 		}
 		if outcome.Status == "succeeded" {
-			r.enqueueDestinationPrune(dataset, effective, road.request.CanonicalTarget, "")
+			r.enqueueDestinationPrune(dataset, effective, road.request.CanonicalTarget, "", members)
 			last := outcome.Results[len(outcome.Results)-1].Plan
 			return Outcome{State: outcome.Status, Reason: outcome.Reason, Identity: daemonstate.Identity{Snapshot: last.Snapshot, Destination: last.Destination}}
 		}
@@ -1165,7 +1420,7 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 	}
 	job.After = func(Outcome) {
 		if r.isDirty(jobID) {
-			r.enqueueRemote(dataset, remote, effective, "")
+			r.enqueueRemote(dataset, remote, effective, nil)
 		}
 	}
 	if added, submitErr := r.remote.Submit(job); submitErr != nil || !added {
@@ -1385,6 +1640,16 @@ func (r *Runtime) Trigger(datasets []string) ([]string, error) {
 		}
 		schedule, exists := r.scheduler.Lookup(dataset)
 		if !exists {
+			r.mu.Lock()
+			generation := r.generation
+			r.mu.Unlock()
+			if generation != nil {
+				if entry, found := generation.Inspect(dataset); found {
+					if coveredErr := entry.ErrCovered(); coveredErr != nil {
+						return nil, coveredErr
+					}
+				}
+			}
 			return nil, fmt.Errorf("dataset %s is not an active scheduling root", dataset)
 		}
 		schedule.Force = true

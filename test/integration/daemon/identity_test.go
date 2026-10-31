@@ -86,19 +86,21 @@ func destructionOf(transitions []daemon.Event, snapshot string, jobs ...string) 
 	return result
 }
 
-// requireSnapshotAgreesWithEvents reads dataset once and checks snapshot
-// against what the daemon's events say about it at that read: present unless
-// a run that destroys snapshots may have destroyed it, and absent if one
-// reported destroying it.
-func requireSnapshotAgreesWithEvents(t *testing.T, direct *zfs.Direct, waiter *statuswait.Waiter, dataset, snapshot string) {
+// requireSnapshotAgreesWithEvents reads the snapshot's dataset once and checks
+// snapshot against what the daemon's events say about it at that read: present
+// unless a run of root's that destroys snapshots may have destroyed it, and
+// absent if one reported destroying it. Root is the actor root whose prune and
+// retirement jobs own the snapshot, which for a member is not its own dataset.
+func requireSnapshotAgreesWithEvents(t *testing.T, direct *zfs.Direct, waiter *statuswait.Waiter, root, snapshot string) {
 	t.Helper()
+	dataset, _, _ := strings.Cut(snapshot, "@")
 	state, err := direct.InspectState(t.Context(), dataset, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	settled := waiter.Settle(t, 30*time.Second)
 	present := slices.ContainsFunc(state.Objects, func(object zfs.Object) bool { return object.Name == snapshot && object.Type == "snapshot" })
-	switch destructionOf(waiter.Transitions()[:settled], snapshot, "prune:"+dataset, "retire:"+dataset) {
+	switch destructionOf(waiter.Transitions()[:settled], snapshot, "prune:"+root, "retire:"+root) {
 	case notDestroyed:
 		if !present {
 			t.Fatalf("%s is missing, and no run that destroys snapshots had started; transitions: %+v", snapshot, waiter.Transitions()[:settled])

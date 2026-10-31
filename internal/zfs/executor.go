@@ -28,6 +28,10 @@ type DatasetIdentity struct {
 	GUID     uint64
 	Pool     string
 	PoolGUID uint64
+	// Placeholder reports PlaceholderProperty set locally on the dataset: a
+	// receive parent boomerangz created and has not yet replaced. It is read
+	// in the same query, so ruling a placeholder out costs nothing extra.
+	Placeholder bool
 }
 
 // PropertySource records whether a property is locally set or received.
@@ -60,7 +64,10 @@ type Executor interface {
 	CreateReceiveParent(context.Context, string) error
 	SetProperties(context.Context, string, map[string]string) error
 	InheritProperty(context.Context, string, string) error
-	Snapshot(context.Context, string, string, bool, map[string]string) error
+	// Snapshot creates one snapshot name across an explicit set of datasets in
+	// a single atomic transaction group. The set may be sparse, which `-r` cannot
+	// express, so there is no recursive variant.
+	Snapshot(context.Context, []string, string, map[string]string) error
 	DestroySnapshot(context.Context, string) error
 	Bookmark(context.Context, string, string) error
 	DestroyBookmark(context.Context, string) error
@@ -73,6 +80,21 @@ type Executor interface {
 type ReseedExecutor interface {
 	Executor
 	AbortReceive(context.Context, string) error
+	DestroyDataset(context.Context, string, bool) error
+}
+
+// PlaceholderProperty marks a dataset boomerangz created only so that a deeper
+// replica could be received beneath it. Every receive parent carries it from
+// the moment it is created, so the marker is proof the dataset was never a
+// replica of anything.
+const PlaceholderProperty = propertyNamespace + "state:placeholder"
+
+// ReplicaExecutor exposes the destination operations that replace a
+// placeholder with the replica it stood in for: moving the placeholder aside,
+// moving its children beneath the received replica, and removing it.
+type ReplicaExecutor interface {
+	Executor
+	RenameDataset(context.Context, string, string) error
 	DestroyDataset(context.Context, string, bool) error
 }
 

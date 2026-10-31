@@ -79,7 +79,7 @@ func TestGuestAccessControlRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	effective := policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, map[string]struct{}{"home": {}})
-	metadata, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), effective)
+	metadata, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC(), effective)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -127,6 +127,7 @@ A job's `state` in `status`, in `transitions`, and in the
 | State | Meaning |
 |---|---|
 | `pending-management`, `pending-transfer` | Queued in that worker pool, waiting for a worker |
+| `waiting-lock` | Taken by a worker but held back by another job's lock on the same destination, for example while the first transfer to it creates the receive ancestors both would need; `reason` names the job it waits for. It is reported again if that changes |
 | `snapshotting` | Taking a scheduled or triggered snapshot |
 | `pruning` | Destroying snapshots that retention no longer keeps, on the source (`prune:`) or a destination (`destination-prune:`) |
 | `reconciling` | Activating or deactivating a dataset |

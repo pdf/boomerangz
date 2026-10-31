@@ -8,23 +8,29 @@ import (
 	"strings"
 
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
 // ReseedPlan is the complete destructive scope of one source-target reset.
 type ReseedPlan struct {
-	Dataset            string                `json:"dataset"`
-	Target             string                `json:"target"`
-	Binding            TargetBinding         `json:"binding"`
-	BindingStored      bool                  `json:"binding_stored"`
-	ReceiveAnchor      string                `json:"receive_anchor"`
-	DestinationExists  bool                  `json:"destination_exists"`
-	DestinationObjects []string              `json:"destination_objects,omitempty"`
-	ResumeDatasets     []string              `json:"resume_datasets,omitempty"`
-	References         []lifecycle.Reference `json:"references,omitempty"`
-	Suspended          bool                  `json:"suspended,omitempty"`
-	Warning            string                `json:"warning"`
-	Applied            bool                  `json:"applied"`
+	Dataset            string        `json:"dataset"`
+	Target             string        `json:"target"`
+	Binding            TargetBinding `json:"binding"`
+	BindingStored      bool          `json:"binding_stored"`
+	ReceiveAnchor      string        `json:"receive_anchor"`
+	DestinationExists  bool          `json:"destination_exists"`
+	DestinationObjects []string      `json:"destination_objects,omitempty"`
+	// SetAside is the root replica's placeholder, moved aside while the root's
+	// own replica replaces it, with the member replicas waiting beneath it.
+	// It lies beside the mapped replica rather than inside it, so it is
+	// destroyed with it explicitly.
+	SetAside       string                `json:"set_aside,omitempty"`
+	ResumeDatasets []string              `json:"resume_datasets,omitempty"`
+	References     []lifecycle.Reference `json:"references,omitempty"`
+	Suspended      bool                  `json:"suspended,omitempty"`
+	Warning        string                `json:"warning"`
+	Applied        bool                  `json:"applied"`
 }
 
 // ReseedService coordinates destructive destination cleanup with release of
@@ -74,7 +80,7 @@ func (s *ReseedService) plan(ctx context.Context, request Request) (ReseedPlan, 
 			return plan, err
 		}
 	}
-	mapped, err := zfs.MapReceiveDataset(request.Source, request.DestinationRoot, zfs.ReceiveDiscard(request.Policy.Discard))
+	mapped, _, err := request.mapped(request.Source)
 	if err != nil {
 		return plan, err
 	}
@@ -111,6 +117,9 @@ func (s *ReseedService) plan(ctx context.Context, request Request) (ReseedPlan, 
 	if err != nil {
 		return plan, err
 	}
+	if err := checkHostLocal(ctx, s.source, request, identity); err != nil {
+		return plan, err
+	}
 	if binding != nil {
 		if identityDataset == binding.Anchor && !sameBoundIdentity(*binding, identity) {
 			return plan, fmt.Errorf("destination anchor identity differs from persistent binding")
@@ -142,6 +151,24 @@ func (s *ReseedService) plan(ctx context.Context, request Request) (ReseedPlan, 
 			plan.DestinationObjects = append(plan.DestinationObjects, object.Name)
 		}
 		for dataset := range destination.ResumeTokens {
+			plan.ResumeDatasets = append(plan.ResumeDatasets, dataset)
+		}
+		slices.Sort(plan.DestinationObjects)
+		slices.Sort(plan.ResumeDatasets)
+	}
+	if aside := placeholderAside(binding.MappedDataset); datasets[aside] {
+		state, inspectErr := s.destination.InspectState(ctx, aside, true)
+		if inspectErr != nil {
+			return ReseedPlan{}, inspectErr
+		}
+		if !isPlaceholder(state, aside) {
+			return ReseedPlan{}, fmt.Errorf("%s is not a placeholder boomerangz set aside; refusing reseed", aside)
+		}
+		plan.SetAside = aside
+		for _, object := range state.Objects {
+			plan.DestinationObjects = append(plan.DestinationObjects, object.Name)
+		}
+		for dataset := range state.ResumeTokens {
 			plan.ResumeDatasets = append(plan.ResumeDatasets, dataset)
 		}
 		slices.Sort(plan.DestinationObjects)
@@ -183,6 +210,11 @@ func (s *ReseedService) Apply(ctx context.Context, request Request) (ReseedPlan,
 			return plan, fmt.Errorf("destination cleanup permission preflight: %w", err)
 		}
 	}
+	if plan.SetAside != "" {
+		if err := s.destination.CheckPermissions(ctx, plan.SetAside, []string{"destroy", "mount"}); err != nil {
+			return plan, fmt.Errorf("set-aside placeholder cleanup permission preflight: %w", err)
+		}
+	}
 	if err := s.destination.CheckPermissions(ctx, plan.ReceiveAnchor, reseedReceivePermissions(request)); err != nil {
 		return plan, fmt.Errorf("fresh receive permission preflight: %w", err)
 	}
@@ -201,6 +233,11 @@ func (s *ReseedService) Apply(ctx context.Context, request Request) (ReseedPlan,
 	if plan.DestinationExists {
 		if err := s.destination.DestroyDataset(ctx, plan.Binding.MappedDataset, true); err != nil {
 			return plan, fmt.Errorf("destroy mapped destination %s: %w", plan.Binding.MappedDataset, err)
+		}
+	}
+	if plan.SetAside != "" {
+		if err := s.destination.DestroyDataset(ctx, plan.SetAside, true); err != nil {
+			return plan, fmt.Errorf("destroy set-aside placeholder %s: %w", plan.SetAside, err)
 		}
 	}
 	references := slices.Clone(plan.References)
@@ -230,16 +267,85 @@ func (s *ReseedService) Apply(ctx context.Context, request Request) (ReseedPlan,
 	return plan, nil
 }
 
-func reseedReceivePermissions(request Request) []string {
-	permissions := []string{"canmount", "create", "destroy", "mount", "receive:append", "userprop"}
-	for property := range request.Policy.SetProperties {
-		if !strings.Contains(property, ":") {
-			permissions = append(permissions, property)
+// AbortPlan describes discarding the interrupted receives one target holds for
+// an actor root's streams. It is the operator's way out when resuming a stream
+// keeps failing, which transfers never resolve on their own: nothing else on
+// the destination is touched, the binding and every proof stay, and the next
+// transfer plans afresh from what the destination still holds.
+type AbortPlan struct {
+	Dataset  string   `json:"dataset"`
+	Target   string   `json:"target"`
+	Receives []string `json:"receives"`
+	Warning  string   `json:"warning"`
+	Applied  bool     `json:"applied"`
+}
+
+func abortPlan(plan ReseedPlan) AbortPlan {
+	return AbortPlan{
+		Dataset:  plan.Dataset,
+		Target:   plan.Target,
+		Receives: slices.Clone(plan.ResumeDatasets),
+		Warning:  "applying this plan discards the partially received data of each listed receive; the next transfer sends it again",
+	}
+}
+
+// PlanAbort returns a read-only, revalidated description of an abort. The
+// target is resolved and checked exactly as for a reseed.
+func (s *ReseedService) PlanAbort(ctx context.Context, request Request) (AbortPlan, error) {
+	plan, err := s.plan(ctx, request)
+	if err != nil {
+		return AbortPlan{}, err
+	}
+	return abortPlan(plan), nil
+}
+
+// ApplyAbort revalidates and discards exactly the previewed receives, deepest
+// first.
+func (s *ReseedService) ApplyAbort(ctx context.Context, request Request) (AbortPlan, error) {
+	reseed, err := s.plan(ctx, request)
+	if err != nil {
+		return AbortPlan{}, err
+	}
+	plan := abortPlan(reseed)
+	for _, dataset := range plan.Receives {
+		if err := s.destination.CheckPermissions(ctx, dataset, []string{"destroy", "mount", "receive:append"}); err != nil {
+			return plan, fmt.Errorf("abort permission preflight: %w", err)
 		}
 	}
-	for _, property := range request.Policy.IgnoreProperties {
-		if !strings.Contains(property, ":") {
-			permissions = append(permissions, property)
+	fresh, err := s.plan(ctx, request)
+	if err != nil {
+		return plan, err
+	}
+	if !reflect.DeepEqual(plan, abortPlan(fresh)) {
+		return plan, fmt.Errorf("receive state changed during preflight; retry preview")
+	}
+	for i := len(plan.Receives) - 1; i >= 0; i-- {
+		if err := s.destination.AbortReceive(ctx, plan.Receives[i]); err != nil {
+			return plan, fmt.Errorf("abort receive on %s: %w", plan.Receives[i], err)
+		}
+	}
+	plan.Applied = true
+	return plan, nil
+}
+
+// reseedReceivePermissions covers the fresh receives that follow a reseed: the
+// root's own and each member stream's, whose receive overrides are their own.
+func reseedReceivePermissions(request Request) []string {
+	permissions := []string{"canmount", "create", "destroy", "mount", "receive:append", "userprop"}
+	policies := []policy.Effective{request.Policy}
+	for _, member := range request.Members {
+		policies = append(policies, member.Policy)
+	}
+	for _, p := range policies {
+		for property := range p.SetProperties {
+			if !strings.Contains(property, ":") {
+				permissions = append(permissions, property)
+			}
+		}
+		for _, property := range p.IgnoreProperties {
+			if !strings.Contains(property, ":") {
+				permissions = append(permissions, property)
+			}
 		}
 	}
 	slices.Sort(permissions)

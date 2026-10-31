@@ -1,6 +1,7 @@
 package zfs
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -110,23 +111,40 @@ func (d *Direct) inspectState(ctx context.Context, dataset string, recursive boo
 		return State{}, fmt.Errorf("dataset missing from inventory")
 	}
 	slices.SortFunc(state.Objects, func(a, b Object) int { return strings.Compare(a.Name, b.Name) })
+	// Properties and holds are read for many objects per command rather than
+	// one command per object: the work ZFS does is the same, but each command
+	// costs a process and, on a remote transport, a round trip. Rows are
+	// regrouped per object and applied in the order one query per object
+	// would have produced, so the state is the same either way.
+	var names, snapshots []string
 	for _, object := range state.Objects {
 		if object.Type == "bookmark" {
 			continue
 		}
-		// Fixed ownership keys also reveal hidden received metadata omitted by all.
-		for _, keys := range []string{"all", propertyNamespace + "state:lineage," + propertyNamespace + "state:snapshot," + propertyNamespace + "state:created"} {
-			out, err := d.runner.Run(ctx, "get", "-H", "-p", "-o", "name,property,value,received,source", keys, object.Name)
-			if err != nil {
-				if objectDisappeared(err) {
-					return State{}, &InventoryChangedError{Object: object.Name, Err: err}
+		names = append(names, object.Name)
+		if object.Type == "snapshot" {
+			snapshots = append(snapshots, object.Name)
+		}
+	}
+	// Fixed ownership keys also reveal hidden received metadata omitted by all.
+	queries := []string{"all", propertyNamespace + "state:lineage," + propertyNamespace + "state:snapshot," + propertyNamespace + "state:created"}
+	rows := make(map[string][][][]string, len(names))
+	for _, chunk := range d.inspectionChunks(names) {
+		for query, keys := range queries {
+			err := d.readRows(ctx, chunk, 5, "property outside exact object query", func(f []string) {
+				if rows[f[0]] == nil {
+					rows[f[0]] = make([][][]string, len(queries))
 				}
+				rows[f[0]][query] = append(rows[f[0]][query], f)
+			}, append([]string{"get", "-H", "-p", "-o", "name,property,value,received,source", keys}, chunk...)...)
+			if err != nil {
 				return State{}, err
 			}
-			err = parseTable(out, 5, func(f []string) error {
-				if f[0] != object.Name {
-					return fmt.Errorf("property outside exact object query")
-				}
+		}
+	}
+	for _, name := range names {
+		for _, query := range rows[name] {
+			for _, f := range query {
 				if f[1] == "receive_resume_token" && f[2] != "-" && f[2] != "" {
 					state.ResumeTokens[f[0]] = f[2]
 				}
@@ -134,7 +152,7 @@ func (d *Direct) inspectState(ctx context.Context, dataset string, recursive boo
 					state.Clones[f[0]] = strings.Split(f[2], ",")
 				}
 				if !strings.HasPrefix(f[1], propertyNamespace) {
-					return nil
+					continue
 				}
 				if f[3] != "-" {
 					if state.Received[f[0]] == nil {
@@ -148,34 +166,83 @@ func (d *Direct) inspectState(ctx context.Context, dataset string, recursive boo
 						state.Properties = append(state.Properties, p)
 					}
 				}
-				return nil
-			})
-			if err != nil {
-				return State{}, err
 			}
-		}
-		if object.Type == "snapshot" {
-			out, err := d.runner.Run(ctx, "holds", "-H", object.Name)
-			if err != nil {
-				if objectDisappeared(err) {
-					return State{}, &InventoryChangedError{Object: object.Name, Err: err}
-				}
-				return State{}, err
-			}
-			err = parseTable(out, 3, func(f []string) error {
-				if f[0] != object.Name {
-					return fmt.Errorf("hold outside queried snapshot")
-				}
-				state.Holds[f[0]] = append(state.Holds[f[0]], f[1])
-				return nil
-			})
-			if err != nil {
-				return State{}, err
-			}
-			slices.Sort(state.Holds[object.Name])
 		}
 	}
+	for _, chunk := range d.inspectionChunks(snapshots) {
+		err := d.readRows(ctx, chunk, 3, "hold outside queried snapshot", func(f []string) {
+			state.Holds[f[0]] = append(state.Holds[f[0]], f[1])
+		}, append([]string{"holds", "-H"}, chunk...)...)
+		if err != nil {
+			return State{}, err
+		}
+	}
+	for _, snapshot := range snapshots {
+		slices.Sort(state.Holds[snapshot])
+	}
+	// ZFS lists an object's user properties, and a snapshot's clones, in no
+	// promised order, and the order can change when one is removed. Callers
+	// compare inspections to detect change, so the state is canonical.
+	slices.SortFunc(state.Properties, compareProperties)
+	for _, clones := range state.Clones {
+		slices.Sort(clones)
+	}
 	return state, nil
+}
+
+// inspectionBatch bounds how many objects one property or hold query names,
+// keeping each command's arguments, and its output, well inside what a remote
+// transport accepts: a property query returns a few KB per object.
+const inspectionBatch = 256
+
+func (d *Direct) inspectionChunks(names []string) [][]string {
+	size := inspectionBatch
+	if d.batch > 0 {
+		size = d.batch
+	}
+	var chunks [][]string
+	for start := 0; start < len(names); start += size {
+		chunks = append(chunks, names[start:min(start+size, len(names))])
+	}
+	return chunks
+}
+
+// readRows runs one query naming the objects in chunk and passes each row to
+// row. A row for any other object is refused with outside. An object that
+// disappeared since it was listed is reported as an inventory change.
+func (d *Direct) readRows(ctx context.Context, chunk []string, columns int, outside string, row func([]string), args ...string) error {
+	out, err := d.runner.Run(ctx, args...)
+	if err != nil {
+		if objectDisappeared(err) {
+			return &InventoryChangedError{Object: disappearedObject(err, chunk), Err: err}
+		}
+		return err
+	}
+	return parseTable(out, columns, func(f []string) error {
+		if !slices.Contains(chunk, f[0]) {
+			return fmt.Errorf("%s", outside)
+		}
+		row(slices.Clone(f))
+		return nil
+	})
+}
+
+// disappearedObject names the object a ZFS error says it could not open, or the
+// whole query when it names none of them.
+func disappearedObject(err error, chunk []string) string {
+	message := err.Error()
+	for _, name := range chunk {
+		if strings.Contains(message, "cannot open '"+name+"'") {
+			return name
+		}
+	}
+	return strings.Join(chunk, ", ")
+}
+
+// compareProperties orders properties canonically: by dataset, then name,
+// source and value.
+func compareProperties(a, b Property) int {
+	return cmp.Or(strings.Compare(a.Dataset, b.Dataset), strings.Compare(a.Name, b.Name), strings.Compare(string(a.Source), string(b.Source)), strings.Compare(a.Value, b.Value))
 }
 
 func validateObject(name string) error {
@@ -189,12 +256,31 @@ func validateObject(name string) error {
 }
 
 // CreateReceiveParent creates one exact receive container that is never
-// mounted automatically. It never creates parents implicitly.
+// mounted automatically, marked as a placeholder in the same operation. It
+// never creates parents implicitly.
 func (d *Direct) CreateReceiveParent(ctx context.Context, dataset string) error {
 	if err := validateDataset(dataset); err != nil {
 		return err
 	}
-	_, err := d.runner.Run(ctx, "create", "-o", "canmount=noauto", dataset)
+	_, err := d.runner.Run(ctx, "create", "-o", "canmount=noauto", "-o", PlaceholderProperty+"=on", dataset)
+	return err
+}
+
+// RenameDataset moves one exact dataset, with its descendants and snapshots,
+// to another name in the same pool. It never creates parents implicitly.
+func (d *Direct) RenameDataset(ctx context.Context, from, to string) error {
+	if err := validateDataset(from); err != nil {
+		return err
+	}
+	if err := validateDataset(to); err != nil {
+		return err
+	}
+	fromPool, _, _ := strings.Cut(from, "/")
+	toPool, _, _ := strings.Cut(to, "/")
+	if fromPool != toPool || from == fromPool || to == toPool || from == to || strings.HasPrefix(to, from+"/") {
+		return fmt.Errorf("cannot rename %s to %s", from, to)
+	}
+	_, err := d.runner.Run(ctx, "rename", from, to)
 	return err
 }
 
@@ -271,4 +357,48 @@ func validateUserProperty(name string) error {
 		}
 	}
 	return nil
+}
+
+// MergeStates combines inspections of distinct datasets into one state. A
+// shallow inspection lists the dataset's direct children too, so an object or
+// property two inspections both report is kept once.
+func MergeStates(states ...State) State {
+	var merged State
+	for _, state := range states {
+		for _, object := range state.Objects {
+			if !slices.Contains(merged.Objects, object) {
+				merged.Objects = append(merged.Objects, object)
+			}
+		}
+		for _, property := range state.Properties {
+			if !slices.Contains(merged.Properties, property) {
+				merged.Properties = append(merged.Properties, property)
+			}
+		}
+		for name, value := range state.Received {
+			if merged.Received == nil {
+				merged.Received = make(map[string]map[string]string)
+			}
+			merged.Received[name] = value
+		}
+		for name, value := range state.ResumeTokens {
+			if merged.ResumeTokens == nil {
+				merged.ResumeTokens = make(map[string]string)
+			}
+			merged.ResumeTokens[name] = value
+		}
+		for name, value := range state.Clones {
+			if merged.Clones == nil {
+				merged.Clones = make(map[string][]string)
+			}
+			merged.Clones[name] = value
+		}
+		for name, value := range state.Holds {
+			if merged.Holds == nil {
+				merged.Holds = make(map[string][]string)
+			}
+			merged.Holds[name] = value
+		}
+	}
+	return merged
 }

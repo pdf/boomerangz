@@ -116,11 +116,11 @@ func TestGuestLifecycle(t *testing.T) {
 	)
 
 	chain("snapshot-scope", func(t *testing.T) {
-		first, err := service.CreateSnapshot(t.Context(), root, true, now.Add(-2*time.Hour), effective)
+		first, err := service.CreateSnapshot(t.Context(), root, zfstest.Subtree(t, root), now.Add(-2*time.Hour), effective)
 		if err != nil {
 			t.Fatal(err)
 		}
-		second, err = service.CreateSnapshot(t.Context(), root, false, now, effective)
+		second, err = service.CreateSnapshot(t.Context(), root, []string{root}, now, effective)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -148,10 +148,10 @@ func TestGuestLifecycle(t *testing.T) {
 		//
 		// This phase tests the lifecycle hook; actual destination verification is
 		// the responsibility of the transfer implementation in phase 4.
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID); err != nil {
+		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()); err != nil {
 			t.Fatal(err)
 		}
-		bookmark := ref.BookmarkName(root)
+		bookmark := ref.BookmarkName()
 		bookmarks := func(t *testing.T) []string {
 			t.Helper()
 			state, stateErr := direct.InspectState(t.Context(), root, true)
@@ -170,7 +170,7 @@ func TestGuestLifecycle(t *testing.T) {
 		if !slices.Contains(checkpointed, bookmark) {
 			t.Fatalf("checkpoint created no versioned bookmark: %v", checkpointed)
 		}
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID+1); err == nil {
+		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()+1); err == nil {
 			t.Fatal("accepted wrong destination GUID")
 		}
 		if after := bookmarks(t); !slices.Equal(after, checkpointed) {
@@ -187,7 +187,7 @@ func TestGuestLifecycle(t *testing.T) {
 		}
 		grid, _ := policy.ParseGrid("1x5m")
 		effective.Grid = grid
-		preview, err := service.Prune(t.Context(), root, effective, true)
+		preview, err := service.Prune(t.Context(), root, effective, lifecycle.Retention{Dataset: root, Grid: effective.Grid}, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -199,7 +199,7 @@ func TestGuestLifecycle(t *testing.T) {
 		if err := direct.Release(t.Context(), "foreign-test-hold", old); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := service.Prune(t.Context(), root, effective, true); err != nil {
+		if _, err := service.Prune(t.Context(), root, effective, lifecycle.Retention{Dataset: root, Grid: effective.Grid}, true); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -227,7 +227,7 @@ func TestGuestLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID); err != nil {
+		if err := service.Checkpoint(t.Context(), root, ref, ref.GUID()); err != nil {
 			t.Fatal(err)
 		}
 		// No transfer has run against this synthetic target; the test knows it has
@@ -260,7 +260,7 @@ func TestGuestLifecycle(t *testing.T) {
 		command(t, "zfs", "create", "-u", cliRoot)
 		command(t, "zfs", "set", policy.Namespace+"enabled=on", cliRoot)
 		command(t, "zfs", "snapshot", cliRoot+"@foreign")
-		if _, err := service.CreateSnapshot(t.Context(), cliRoot, false, time.Now(), activePolicy(cliRoot)); err != nil {
+		if _, err := service.CreateSnapshot(t.Context(), cliRoot, []string{cliRoot}, time.Now(), activePolicy(cliRoot)); err != nil {
 			t.Fatal(err)
 		}
 		if err := direct.InheritProperty(t.Context(), cliRoot, lifecycle.LineageProperty); err != nil {

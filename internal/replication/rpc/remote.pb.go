@@ -294,12 +294,14 @@ func (x *InspectDatasetIdentityRequest) GetDataset() string {
 }
 
 type InspectDatasetIdentityResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
-	Guid          uint64                 `protobuf:"varint,3,opt,name=guid,proto3" json:"guid,omitempty"`
-	Pool          string                 `protobuf:"bytes,4,opt,name=pool,proto3" json:"pool,omitempty"`
-	PoolGuid      uint64                 `protobuf:"varint,5,opt,name=pool_guid,json=poolGuid,proto3" json:"pool_guid,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Name     string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Type     string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	Guid     uint64                 `protobuf:"varint,3,opt,name=guid,proto3" json:"guid,omitempty"`
+	Pool     string                 `protobuf:"bytes,4,opt,name=pool,proto3" json:"pool,omitempty"`
+	PoolGuid uint64                 `protobuf:"varint,5,opt,name=pool_guid,json=poolGuid,proto3" json:"pool_guid,omitempty"`
+	// Set when the dataset carries the placeholder marker locally.
+	Placeholder   bool `protobuf:"varint,6,opt,name=placeholder,proto3" json:"placeholder,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -367,6 +369,13 @@ func (x *InspectDatasetIdentityResponse) GetPoolGuid() uint64 {
 		return x.PoolGuid
 	}
 	return 0
+}
+
+func (x *InspectDatasetIdentityResponse) GetPlaceholder() bool {
+	if x != nil {
+		return x.Placeholder
+	}
+	return false
 }
 
 type InspectStateRequest struct {
@@ -1061,6 +1070,94 @@ func (*DestroyDatasetResponse) Descriptor() ([]byte, []int) {
 	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{19}
 }
 
+type RenameDatasetRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	From          string                 `protobuf:"bytes,1,opt,name=from,proto3" json:"from,omitempty"`
+	To            string                 `protobuf:"bytes,2,opt,name=to,proto3" json:"to,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenameDatasetRequest) Reset() {
+	*x = RenameDatasetRequest{}
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenameDatasetRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenameDatasetRequest) ProtoMessage() {}
+
+func (x *RenameDatasetRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenameDatasetRequest.ProtoReflect.Descriptor instead.
+func (*RenameDatasetRequest) Descriptor() ([]byte, []int) {
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *RenameDatasetRequest) GetFrom() string {
+	if x != nil {
+		return x.From
+	}
+	return ""
+}
+
+func (x *RenameDatasetRequest) GetTo() string {
+	if x != nil {
+		return x.To
+	}
+	return ""
+}
+
+type RenameDatasetResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenameDatasetResponse) Reset() {
+	*x = RenameDatasetResponse{}
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenameDatasetResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenameDatasetResponse) ProtoMessage() {}
+
+func (x *RenameDatasetResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenameDatasetResponse.ProtoReflect.Descriptor instead.
+func (*RenameDatasetResponse) Descriptor() ([]byte, []int) {
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{21}
+}
+
 type SetPropertiesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Dataset       string                 `protobuf:"bytes,1,opt,name=dataset,proto3" json:"dataset,omitempty"`
@@ -1071,7 +1168,7 @@ type SetPropertiesRequest struct {
 
 func (x *SetPropertiesRequest) Reset() {
 	*x = SetPropertiesRequest{}
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[20]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1083,7 +1180,7 @@ func (x *SetPropertiesRequest) String() string {
 func (*SetPropertiesRequest) ProtoMessage() {}
 
 func (x *SetPropertiesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[20]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1096,7 +1193,7 @@ func (x *SetPropertiesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPropertiesRequest.ProtoReflect.Descriptor instead.
 func (*SetPropertiesRequest) Descriptor() ([]byte, []int) {
-	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{20}
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SetPropertiesRequest) GetDataset() string {
@@ -1123,7 +1220,7 @@ type InheritPropertyRequest struct {
 
 func (x *InheritPropertyRequest) Reset() {
 	*x = InheritPropertyRequest{}
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[21]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1135,7 +1232,7 @@ func (x *InheritPropertyRequest) String() string {
 func (*InheritPropertyRequest) ProtoMessage() {}
 
 func (x *InheritPropertyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[21]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1148,7 +1245,7 @@ func (x *InheritPropertyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InheritPropertyRequest.ProtoReflect.Descriptor instead.
 func (*InheritPropertyRequest) Descriptor() ([]byte, []int) {
-	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{21}
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *InheritPropertyRequest) GetDataset() string {
@@ -1173,7 +1270,7 @@ type SetPropertiesResponse struct {
 
 func (x *SetPropertiesResponse) Reset() {
 	*x = SetPropertiesResponse{}
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[22]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1185,7 +1282,7 @@ func (x *SetPropertiesResponse) String() string {
 func (*SetPropertiesResponse) ProtoMessage() {}
 
 func (x *SetPropertiesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[22]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1198,7 +1295,7 @@ func (x *SetPropertiesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPropertiesResponse.ProtoReflect.Descriptor instead.
 func (*SetPropertiesResponse) Descriptor() ([]byte, []int) {
-	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{22}
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{24}
 }
 
 type InheritPropertyResponse struct {
@@ -1209,7 +1306,7 @@ type InheritPropertyResponse struct {
 
 func (x *InheritPropertyResponse) Reset() {
 	*x = InheritPropertyResponse{}
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[23]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1221,7 +1318,7 @@ func (x *InheritPropertyResponse) String() string {
 func (*InheritPropertyResponse) ProtoMessage() {}
 
 func (x *InheritPropertyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[23]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1234,7 +1331,7 @@ func (x *InheritPropertyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InheritPropertyResponse.ProtoReflect.Descriptor instead.
 func (*InheritPropertyResponse) Descriptor() ([]byte, []int) {
-	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{23}
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{25}
 }
 
 type ReceiveOptions struct {
@@ -1249,7 +1346,7 @@ type ReceiveOptions struct {
 
 func (x *ReceiveOptions) Reset() {
 	*x = ReceiveOptions{}
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[24]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1261,7 +1358,7 @@ func (x *ReceiveOptions) String() string {
 func (*ReceiveOptions) ProtoMessage() {}
 
 func (x *ReceiveOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[24]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1274,7 +1371,7 @@ func (x *ReceiveOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReceiveOptions.ProtoReflect.Descriptor instead.
 func (*ReceiveOptions) Descriptor() ([]byte, []int) {
-	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{24}
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ReceiveOptions) GetRoot() string {
@@ -1315,7 +1412,7 @@ type ReceiveRequest struct {
 
 func (x *ReceiveRequest) Reset() {
 	*x = ReceiveRequest{}
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[25]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1327,7 +1424,7 @@ func (x *ReceiveRequest) String() string {
 func (*ReceiveRequest) ProtoMessage() {}
 
 func (x *ReceiveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[25]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1340,7 +1437,7 @@ func (x *ReceiveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReceiveRequest.ProtoReflect.Descriptor instead.
 func (*ReceiveRequest) Descriptor() ([]byte, []int) {
-	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{25}
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ReceiveRequest) GetOptions() *ReceiveOptions {
@@ -1366,7 +1463,7 @@ type ReceiveResponse struct {
 
 func (x *ReceiveResponse) Reset() {
 	*x = ReceiveResponse{}
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[26]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1378,7 +1475,7 @@ func (x *ReceiveResponse) String() string {
 func (*ReceiveResponse) ProtoMessage() {}
 
 func (x *ReceiveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[26]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1391,7 +1488,7 @@ func (x *ReceiveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReceiveResponse.ProtoReflect.Descriptor instead.
 func (*ReceiveResponse) Descriptor() ([]byte, []int) {
-	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{26}
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ReceiveResponse) GetBytes() uint64 {
@@ -1411,7 +1508,7 @@ type CheckPermissionsRequest struct {
 
 func (x *CheckPermissionsRequest) Reset() {
 	*x = CheckPermissionsRequest{}
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[27]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1423,7 +1520,7 @@ func (x *CheckPermissionsRequest) String() string {
 func (*CheckPermissionsRequest) ProtoMessage() {}
 
 func (x *CheckPermissionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[27]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1436,7 +1533,7 @@ func (x *CheckPermissionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckPermissionsRequest.ProtoReflect.Descriptor instead.
 func (*CheckPermissionsRequest) Descriptor() ([]byte, []int) {
-	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{27}
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *CheckPermissionsRequest) GetDataset() string {
@@ -1461,7 +1558,7 @@ type CheckPermissionsResponse struct {
 
 func (x *CheckPermissionsResponse) Reset() {
 	*x = CheckPermissionsResponse{}
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[28]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1473,7 +1570,7 @@ func (x *CheckPermissionsResponse) String() string {
 func (*CheckPermissionsResponse) ProtoMessage() {}
 
 func (x *CheckPermissionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[28]
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1486,7 +1583,7 @@ func (x *CheckPermissionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckPermissionsResponse.ProtoReflect.Descriptor instead.
 func (*CheckPermissionsResponse) Descriptor() ([]byte, []int) {
-	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{28}
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{30}
 }
 
 var File_boomerangz_replication_v1_remote_proto protoreflect.FileDescriptor
@@ -1508,13 +1605,14 @@ const file_boomerangz_replication_v1_remote_proto_rawDesc = "" +
 	"\x14ListDatasetsResponse\x12>\n" +
 	"\bdatasets\x18\x01 \x03(\v2\".boomerangz.replication.v1.DatasetR\bdatasets\"9\n" +
 	"\x1dInspectDatasetIdentityRequest\x12\x18\n" +
-	"\adataset\x18\x01 \x01(\tR\adataset\"\x8d\x01\n" +
+	"\adataset\x18\x01 \x01(\tR\adataset\"\xaf\x01\n" +
 	"\x1eInspectDatasetIdentityResponse\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x12\n" +
 	"\x04guid\x18\x03 \x01(\x04R\x04guid\x12\x12\n" +
 	"\x04pool\x18\x04 \x01(\tR\x04pool\x12\x1b\n" +
-	"\tpool_guid\x18\x05 \x01(\x04R\bpoolGuid\"M\n" +
+	"\tpool_guid\x18\x05 \x01(\x04R\bpoolGuid\x12 \n" +
+	"\vplaceholder\x18\x06 \x01(\bR\vplaceholder\"M\n" +
 	"\x13InspectStateRequest\x12\x18\n" +
 	"\adataset\x18\x01 \x01(\tR\adataset\x12\x1c\n" +
 	"\trecursive\x18\x02 \x01(\bR\trecursive\"\x7f\n" +
@@ -1559,7 +1657,11 @@ const file_boomerangz_replication_v1_remote_proto_rawDesc = "" +
 	"\x15DestroyDatasetRequest\x12\x18\n" +
 	"\adataset\x18\x01 \x01(\tR\adataset\x12\x1c\n" +
 	"\trecursive\x18\x02 \x01(\bR\trecursive\"\x18\n" +
-	"\x16DestroyDatasetResponse\"\xd0\x01\n" +
+	"\x16DestroyDatasetResponse\":\n" +
+	"\x14RenameDatasetRequest\x12\x12\n" +
+	"\x04from\x18\x01 \x01(\tR\x04from\x12\x0e\n" +
+	"\x02to\x18\x02 \x01(\tR\x02to\"\x17\n" +
+	"\x15RenameDatasetResponse\"\xd0\x01\n" +
 	"\x14SetPropertiesRequest\x12\x18\n" +
 	"\adataset\x18\x01 \x01(\tR\adataset\x12_\n" +
 	"\n" +
@@ -1589,8 +1691,7 @@ const file_boomerangz_replication_v1_remote_proto_rawDesc = "" +
 	"\x17CheckPermissionsRequest\x12\x18\n" +
 	"\adataset\x18\x01 \x01(\tR\adataset\x12 \n" +
 	"\vpermissions\x18\x02 \x03(\tR\vpermissions\"\x1a\n" +
-	"\x18CheckPermissionsResponse2\xb0\n" +
-	"\n" +
+	"\x18CheckPermissionsResponse2\xa4\v\n" +
 	"\rRemoteService\x12o\n" +
 	"\fCapabilities\x12..boomerangz.replication.v1.CapabilitiesRequest\x1a/.boomerangz.replication.v1.CapabilitiesResponse\x12o\n" +
 	"\fListDatasets\x12..boomerangz.replication.v1.ListDatasetsRequest\x1a/.boomerangz.replication.v1.ListDatasetsResponse\x12\x8d\x01\n" +
@@ -1600,6 +1701,7 @@ const file_boomerangz_replication_v1_remote_proto_rawDesc = "" +
 	"\x13CreateReceiveParent\x125.boomerangz.replication.v1.CreateReceiveParentRequest\x1a6.boomerangz.replication.v1.CreateReceiveParentResponse\x12o\n" +
 	"\fAbortReceive\x12..boomerangz.replication.v1.AbortReceiveRequest\x1a/.boomerangz.replication.v1.AbortReceiveResponse\x12u\n" +
 	"\x0eDestroyDataset\x120.boomerangz.replication.v1.DestroyDatasetRequest\x1a1.boomerangz.replication.v1.DestroyDatasetResponse\x12r\n" +
+	"\rRenameDataset\x12/.boomerangz.replication.v1.RenameDatasetRequest\x1a0.boomerangz.replication.v1.RenameDatasetResponse\x12r\n" +
 	"\rSetProperties\x12/.boomerangz.replication.v1.SetPropertiesRequest\x1a0.boomerangz.replication.v1.SetPropertiesResponse\x12x\n" +
 	"\x0fInheritProperty\x121.boomerangz.replication.v1.InheritPropertyRequest\x1a2.boomerangz.replication.v1.InheritPropertyResponse\x12b\n" +
 	"\aReceive\x12).boomerangz.replication.v1.ReceiveRequest\x1a*.boomerangz.replication.v1.ReceiveResponse(\x01B8Z6github.com/pdf/boomerangz/internal/replication/rpc;rpcb\x06proto3"
@@ -1616,7 +1718,7 @@ func file_boomerangz_replication_v1_remote_proto_rawDescGZIP() []byte {
 	return file_boomerangz_replication_v1_remote_proto_rawDescData
 }
 
-var file_boomerangz_replication_v1_remote_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
+var file_boomerangz_replication_v1_remote_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
 var file_boomerangz_replication_v1_remote_proto_goTypes = []any{
 	(*CapabilitiesRequest)(nil),            // 0: boomerangz.replication.v1.CapabilitiesRequest
 	(*CapabilitiesResponse)(nil),           // 1: boomerangz.replication.v1.CapabilitiesResponse
@@ -1638,17 +1740,19 @@ var file_boomerangz_replication_v1_remote_proto_goTypes = []any{
 	(*AbortReceiveResponse)(nil),           // 17: boomerangz.replication.v1.AbortReceiveResponse
 	(*DestroyDatasetRequest)(nil),          // 18: boomerangz.replication.v1.DestroyDatasetRequest
 	(*DestroyDatasetResponse)(nil),         // 19: boomerangz.replication.v1.DestroyDatasetResponse
-	(*SetPropertiesRequest)(nil),           // 20: boomerangz.replication.v1.SetPropertiesRequest
-	(*InheritPropertyRequest)(nil),         // 21: boomerangz.replication.v1.InheritPropertyRequest
-	(*SetPropertiesResponse)(nil),          // 22: boomerangz.replication.v1.SetPropertiesResponse
-	(*InheritPropertyResponse)(nil),        // 23: boomerangz.replication.v1.InheritPropertyResponse
-	(*ReceiveOptions)(nil),                 // 24: boomerangz.replication.v1.ReceiveOptions
-	(*ReceiveRequest)(nil),                 // 25: boomerangz.replication.v1.ReceiveRequest
-	(*ReceiveResponse)(nil),                // 26: boomerangz.replication.v1.ReceiveResponse
-	(*CheckPermissionsRequest)(nil),        // 27: boomerangz.replication.v1.CheckPermissionsRequest
-	(*CheckPermissionsResponse)(nil),       // 28: boomerangz.replication.v1.CheckPermissionsResponse
-	nil,                                    // 29: boomerangz.replication.v1.SetPropertiesRequest.PropertiesEntry
-	nil,                                    // 30: boomerangz.replication.v1.ReceiveOptions.SetEntry
+	(*RenameDatasetRequest)(nil),           // 20: boomerangz.replication.v1.RenameDatasetRequest
+	(*RenameDatasetResponse)(nil),          // 21: boomerangz.replication.v1.RenameDatasetResponse
+	(*SetPropertiesRequest)(nil),           // 22: boomerangz.replication.v1.SetPropertiesRequest
+	(*InheritPropertyRequest)(nil),         // 23: boomerangz.replication.v1.InheritPropertyRequest
+	(*SetPropertiesResponse)(nil),          // 24: boomerangz.replication.v1.SetPropertiesResponse
+	(*InheritPropertyResponse)(nil),        // 25: boomerangz.replication.v1.InheritPropertyResponse
+	(*ReceiveOptions)(nil),                 // 26: boomerangz.replication.v1.ReceiveOptions
+	(*ReceiveRequest)(nil),                 // 27: boomerangz.replication.v1.ReceiveRequest
+	(*ReceiveResponse)(nil),                // 28: boomerangz.replication.v1.ReceiveResponse
+	(*CheckPermissionsRequest)(nil),        // 29: boomerangz.replication.v1.CheckPermissionsRequest
+	(*CheckPermissionsResponse)(nil),       // 30: boomerangz.replication.v1.CheckPermissionsResponse
+	nil,                                    // 31: boomerangz.replication.v1.SetPropertiesRequest.PropertiesEntry
+	nil,                                    // 32: boomerangz.replication.v1.ReceiveOptions.SetEntry
 }
 var file_boomerangz_replication_v1_remote_proto_depIdxs = []int32{
 	3,  // 0: boomerangz.replication.v1.ListDatasetsResponse.datasets:type_name -> boomerangz.replication.v1.Dataset
@@ -1658,33 +1762,35 @@ var file_boomerangz_replication_v1_remote_proto_depIdxs = []int32{
 	11, // 4: boomerangz.replication.v1.InspectStateResponse.resume_tokens:type_name -> boomerangz.replication.v1.NamedValue
 	12, // 5: boomerangz.replication.v1.InspectStateResponse.clones:type_name -> boomerangz.replication.v1.NamedValues
 	12, // 6: boomerangz.replication.v1.InspectStateResponse.holds:type_name -> boomerangz.replication.v1.NamedValues
-	29, // 7: boomerangz.replication.v1.SetPropertiesRequest.properties:type_name -> boomerangz.replication.v1.SetPropertiesRequest.PropertiesEntry
-	30, // 8: boomerangz.replication.v1.ReceiveOptions.set:type_name -> boomerangz.replication.v1.ReceiveOptions.SetEntry
-	24, // 9: boomerangz.replication.v1.ReceiveRequest.options:type_name -> boomerangz.replication.v1.ReceiveOptions
+	31, // 7: boomerangz.replication.v1.SetPropertiesRequest.properties:type_name -> boomerangz.replication.v1.SetPropertiesRequest.PropertiesEntry
+	32, // 8: boomerangz.replication.v1.ReceiveOptions.set:type_name -> boomerangz.replication.v1.ReceiveOptions.SetEntry
+	26, // 9: boomerangz.replication.v1.ReceiveRequest.options:type_name -> boomerangz.replication.v1.ReceiveOptions
 	0,  // 10: boomerangz.replication.v1.RemoteService.Capabilities:input_type -> boomerangz.replication.v1.CapabilitiesRequest
 	2,  // 11: boomerangz.replication.v1.RemoteService.ListDatasets:input_type -> boomerangz.replication.v1.ListDatasetsRequest
 	5,  // 12: boomerangz.replication.v1.RemoteService.InspectDatasetIdentity:input_type -> boomerangz.replication.v1.InspectDatasetIdentityRequest
 	7,  // 13: boomerangz.replication.v1.RemoteService.InspectState:input_type -> boomerangz.replication.v1.InspectStateRequest
-	27, // 14: boomerangz.replication.v1.RemoteService.CheckPermissions:input_type -> boomerangz.replication.v1.CheckPermissionsRequest
+	29, // 14: boomerangz.replication.v1.RemoteService.CheckPermissions:input_type -> boomerangz.replication.v1.CheckPermissionsRequest
 	14, // 15: boomerangz.replication.v1.RemoteService.CreateReceiveParent:input_type -> boomerangz.replication.v1.CreateReceiveParentRequest
 	16, // 16: boomerangz.replication.v1.RemoteService.AbortReceive:input_type -> boomerangz.replication.v1.AbortReceiveRequest
 	18, // 17: boomerangz.replication.v1.RemoteService.DestroyDataset:input_type -> boomerangz.replication.v1.DestroyDatasetRequest
-	20, // 18: boomerangz.replication.v1.RemoteService.SetProperties:input_type -> boomerangz.replication.v1.SetPropertiesRequest
-	21, // 19: boomerangz.replication.v1.RemoteService.InheritProperty:input_type -> boomerangz.replication.v1.InheritPropertyRequest
-	25, // 20: boomerangz.replication.v1.RemoteService.Receive:input_type -> boomerangz.replication.v1.ReceiveRequest
-	1,  // 21: boomerangz.replication.v1.RemoteService.Capabilities:output_type -> boomerangz.replication.v1.CapabilitiesResponse
-	4,  // 22: boomerangz.replication.v1.RemoteService.ListDatasets:output_type -> boomerangz.replication.v1.ListDatasetsResponse
-	6,  // 23: boomerangz.replication.v1.RemoteService.InspectDatasetIdentity:output_type -> boomerangz.replication.v1.InspectDatasetIdentityResponse
-	13, // 24: boomerangz.replication.v1.RemoteService.InspectState:output_type -> boomerangz.replication.v1.InspectStateResponse
-	28, // 25: boomerangz.replication.v1.RemoteService.CheckPermissions:output_type -> boomerangz.replication.v1.CheckPermissionsResponse
-	15, // 26: boomerangz.replication.v1.RemoteService.CreateReceiveParent:output_type -> boomerangz.replication.v1.CreateReceiveParentResponse
-	17, // 27: boomerangz.replication.v1.RemoteService.AbortReceive:output_type -> boomerangz.replication.v1.AbortReceiveResponse
-	19, // 28: boomerangz.replication.v1.RemoteService.DestroyDataset:output_type -> boomerangz.replication.v1.DestroyDatasetResponse
-	22, // 29: boomerangz.replication.v1.RemoteService.SetProperties:output_type -> boomerangz.replication.v1.SetPropertiesResponse
-	23, // 30: boomerangz.replication.v1.RemoteService.InheritProperty:output_type -> boomerangz.replication.v1.InheritPropertyResponse
-	26, // 31: boomerangz.replication.v1.RemoteService.Receive:output_type -> boomerangz.replication.v1.ReceiveResponse
-	21, // [21:32] is the sub-list for method output_type
-	10, // [10:21] is the sub-list for method input_type
+	20, // 18: boomerangz.replication.v1.RemoteService.RenameDataset:input_type -> boomerangz.replication.v1.RenameDatasetRequest
+	22, // 19: boomerangz.replication.v1.RemoteService.SetProperties:input_type -> boomerangz.replication.v1.SetPropertiesRequest
+	23, // 20: boomerangz.replication.v1.RemoteService.InheritProperty:input_type -> boomerangz.replication.v1.InheritPropertyRequest
+	27, // 21: boomerangz.replication.v1.RemoteService.Receive:input_type -> boomerangz.replication.v1.ReceiveRequest
+	1,  // 22: boomerangz.replication.v1.RemoteService.Capabilities:output_type -> boomerangz.replication.v1.CapabilitiesResponse
+	4,  // 23: boomerangz.replication.v1.RemoteService.ListDatasets:output_type -> boomerangz.replication.v1.ListDatasetsResponse
+	6,  // 24: boomerangz.replication.v1.RemoteService.InspectDatasetIdentity:output_type -> boomerangz.replication.v1.InspectDatasetIdentityResponse
+	13, // 25: boomerangz.replication.v1.RemoteService.InspectState:output_type -> boomerangz.replication.v1.InspectStateResponse
+	30, // 26: boomerangz.replication.v1.RemoteService.CheckPermissions:output_type -> boomerangz.replication.v1.CheckPermissionsResponse
+	15, // 27: boomerangz.replication.v1.RemoteService.CreateReceiveParent:output_type -> boomerangz.replication.v1.CreateReceiveParentResponse
+	17, // 28: boomerangz.replication.v1.RemoteService.AbortReceive:output_type -> boomerangz.replication.v1.AbortReceiveResponse
+	19, // 29: boomerangz.replication.v1.RemoteService.DestroyDataset:output_type -> boomerangz.replication.v1.DestroyDatasetResponse
+	21, // 30: boomerangz.replication.v1.RemoteService.RenameDataset:output_type -> boomerangz.replication.v1.RenameDatasetResponse
+	24, // 31: boomerangz.replication.v1.RemoteService.SetProperties:output_type -> boomerangz.replication.v1.SetPropertiesResponse
+	25, // 32: boomerangz.replication.v1.RemoteService.InheritProperty:output_type -> boomerangz.replication.v1.InheritPropertyResponse
+	28, // 33: boomerangz.replication.v1.RemoteService.Receive:output_type -> boomerangz.replication.v1.ReceiveResponse
+	22, // [22:34] is the sub-list for method output_type
+	10, // [10:22] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name
 	10, // [10:10] is the sub-list for extension extendee
 	0,  // [0:10] is the sub-list for field type_name
@@ -1701,7 +1807,7 @@ func file_boomerangz_replication_v1_remote_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_boomerangz_replication_v1_remote_proto_rawDesc), len(file_boomerangz_replication_v1_remote_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   31,
+			NumMessages:   33,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

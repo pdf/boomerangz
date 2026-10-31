@@ -160,7 +160,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 	var last lifecycle.Metadata
 
 	chain("full-bootstrap", func(t *testing.T) {
-		first, err := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-4*time.Hour), request(t, latest, "").Policy)
+		first, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-4*time.Hour), request(t, latest, "").Policy)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -203,7 +203,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 			return transfer.Request{Source: retentionSource, DestinationRoot: retentionDestination, Policy: effective}
 		}
 		retentionPolicy := retentionRequest().Policy
-		retentionBase, err := snapshots.CreateSnapshot(t.Context(), retentionSource, false, now.Add(-time.Hour), retentionPolicy)
+		retentionBase, err := snapshots.CreateSnapshot(t.Context(), retentionSource, []string{retentionSource}, now.Add(-time.Hour), retentionPolicy)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -211,11 +211,11 @@ func TestGuestLocalTransfer(t *testing.T) {
 		if err != nil || !retentionResult.Verified || retentionResult.Plan.Mode != "full" {
 			t.Fatalf("retention bootstrap=%+v err=%v", retentionResult, err)
 		}
-		retentionNext, err := snapshots.CreateSnapshot(t.Context(), retentionSource, false, now, retentionPolicy)
+		retentionNext, err := snapshots.CreateSnapshot(t.Context(), retentionSource, []string{retentionSource}, now, retentionPolicy)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := snapshots.Prune(t.Context(), retentionSource, retentionPolicy, true); err != nil {
+		if _, err := snapshots.Prune(t.Context(), retentionSource, retentionPolicy, lifecycle.Retention{Dataset: retentionSource, Grid: retentionPolicy.Grid}, true); err != nil {
 			t.Fatal(err)
 		}
 		if err := exec.CommandContext(t.Context(), "zfs", "list", "-H", "-t", "snapshot", retentionSource+"@"+retentionBase.Name()).Run(); err != nil {
@@ -232,7 +232,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 		if len(retentionState.Holds[retentionSource+"@"+retentionBase.Name()]) != 0 || len(retentionState.Holds[retentionSource+"@"+retentionNext.Name()]) == 0 {
 			t.Fatalf("incremental-all hold did not rotate: %v", retentionState.Holds)
 		}
-		if _, err := snapshots.Prune(t.Context(), retentionSource, retentionPolicy, true); err != nil {
+		if _, err := snapshots.Prune(t.Context(), retentionSource, retentionPolicy, lifecycle.Retention{Dataset: retentionSource, Grid: retentionPolicy.Grid}, true); err != nil {
 			t.Fatal(err)
 		}
 		if err := exec.CommandContext(t.Context(), "zfs", "list", "-H", "-t", "snapshot", retentionSource+"@"+retentionBase.Name()).Run(); err == nil {
@@ -242,12 +242,12 @@ func TestGuestLocalTransfer(t *testing.T) {
 	})
 
 	chain("incremental-modes", func(t *testing.T) {
-		middle, err := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-3*time.Hour), request(t, latest, "").Policy)
+		middle, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-3*time.Hour), request(t, latest, "").Policy)
 		if err != nil {
 			t.Fatal(err)
 		}
 		command(t, "snapshot", source+"@foreign-"+suffix)
-		last, err = snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-2*time.Hour), request(t, latest, "").Policy)
+		last, err = snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-2*time.Hour), request(t, latest, "").Policy)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -290,7 +290,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 		// Advance the incremental-all target so it no longer protects last. The
 		// latest-only target must then remain able to use its bookmark after that
 		// source snapshot is pruned.
-		if _, err := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-time.Hour), request(t, all, "").Policy); err != nil {
+		if _, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-time.Hour), request(t, all, "").Policy); err != nil {
 			t.Fatal(err)
 		}
 		result, err := engine.Apply(t.Context(), request(t, all, ""), nil)
@@ -315,7 +315,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 		// error alone is satisfied by any planner or inventory fault, and
 		// only a plan that came back a moment earlier attributes the refusal
 		// to the snapshot this phase planted.
-		if _, err := snapshots.CreateSnapshot(t.Context(), source, false, now, request(t, latest, "").Policy); err != nil {
+		if _, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now, request(t, latest, "").Policy); err != nil {
 			t.Fatal(err)
 		}
 		if plan, err := engine.Preview(t.Context(), request(t, latest, "")); err != nil || plan.Mode == "" {
@@ -375,7 +375,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 					t.Fatal(err)
 				}
 				treePolicy := policy.Resolve(zfs.Dataset{Name: tree, Type: zfs.Filesystem}, nil, rows, nil)
-				if _, err := snapshots.CreateSnapshot(t.Context(), tree, true, now, treePolicy); err != nil {
+				if _, err := snapshots.CreateSnapshot(t.Context(), tree, zfstest.Subtree(t, tree), now, treePolicy); err != nil {
 					t.Fatal(err)
 				}
 				req := transfer.Request{Source: tree, DestinationRoot: destinationPool + "/data", Policy: treePolicy}
@@ -387,7 +387,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 				// The mapped destination is only known once the plan resolves
 				// it; discard=first keeps a path component the other mode drops.
 				zfstest.RegisterCleanup(t, result.Plan.Destination)
-				if _, err := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(time.Minute), treePolicy); err != nil {
+				if _, err := snapshots.CreateSnapshot(t.Context(), tree, zfstest.Subtree(t, tree), now.Add(time.Minute), treePolicy); err != nil {
 					t.Fatal(err)
 				}
 				result, err = engine.Apply(t.Context(), req, nil)
@@ -398,7 +398,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 				// the same request has to plan cleanly before the foreign
 				// snapshot is planted, or the refusal proves only that
 				// something went wrong.
-				if _, err := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(2*time.Minute), treePolicy); err != nil {
+				if _, err := snapshots.CreateSnapshot(t.Context(), tree, zfstest.Subtree(t, tree), now.Add(2*time.Minute), treePolicy); err != nil {
 					t.Fatal(err)
 				}
 				if plan, err := engine.Preview(t.Context(), req); err != nil || plan.Mode == "" {
@@ -432,7 +432,7 @@ func TestGuestLocalTransfer(t *testing.T) {
 			t.Fatal(err)
 		}
 		linuxPolicy := policy.Resolve(zfs.Dataset{Name: linuxSource, Type: zfs.Filesystem, EncryptionRoot: "-"}, nil, rows, nil)
-		if _, err := snapshots.CreateSnapshot(t.Context(), linuxSource, false, now.Add(3*time.Minute), linuxPolicy); err != nil {
+		if _, err := snapshots.CreateSnapshot(t.Context(), linuxSource, []string{linuxSource}, now.Add(3*time.Minute), linuxPolicy); err != nil {
 			t.Fatal(err)
 		}
 		linuxResult, err := engine.Apply(t.Context(), transfer.Request{Source: linuxSource, DestinationRoot: linuxRoot, Policy: linuxPolicy}, nil)
@@ -506,7 +506,7 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			effective := policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, nil)
-			metadata, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), effective)
+			metadata, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC(), effective)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -525,7 +525,9 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			recovered, err := restarted.Apply(t.Context(), request, nil)
-			if err != nil || !recovered.Verified || recovered.Plan.Mode != "resume" {
+			// A resumed stream plans again afterwards, so it ends at its newest
+			// endpoint; that it resumed is reported on its own.
+			if err != nil || !recovered.Verified || !recovered.Resumed {
 				t.Fatalf("recovered result=%+v err=%v", recovered, err)
 			}
 			destinationState, err := direct.InspectState(t.Context(), destination, false)
@@ -553,10 +555,10 @@ func TestGuestInterruptedTransferRecovery(t *testing.T) {
 					continue
 				}
 				found = true
-				snapshot := reference.SnapshotName(source)
+				snapshot := reference.SnapshotName()
 				retained = slices.Contains(sourceState.Holds[snapshot], reference.HoldName())
 				checkpointed = slices.ContainsFunc(sourceState.Objects, func(object zfs.Object) bool {
-					return object.Name == reference.BookmarkName(source) && object.Type == "bookmark" && object.GUID == reference.GUID
+					return object.Name == reference.BookmarkName() && object.Type == "bookmark" && object.GUID == reference.GUID()
 				})
 			}
 			if !found || !checkpointed || retained != (mode == "all") {

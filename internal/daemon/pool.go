@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,18 +19,25 @@ type Event = daemonstate.Event
 type Reporter func(Event)
 
 type keyLocks struct {
-	mu      sync.Mutex
-	active  map[string]map[string]int
+	mu     sync.Mutex
+	active map[string]map[string]int
+	// holders names who holds each active scope, for a waiter to report.
+	holders map[string]map[string][]string
 	waiters map[string][]*lockWaiter
 	changed chan struct{}
 }
 
 type lockWaiter struct {
-	scope string
+	scope  string
+	holder string
 }
 
 func (k *keyLocks) acquire(ctx context.Context, key string) (func(), error) {
 	return k.acquireScope(ctx, key, "")
+}
+
+func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(), error) {
+	return k.acquireAs(ctx, key, scope, "", nil)
 }
 
 func overlappingLockScope(a, b string) bool {
@@ -59,11 +67,16 @@ func (k *keyLocks) removeWaiterLocked(key string, waiter *lockWaiter) {
 	}
 }
 
-func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(), error) {
+// acquireAs takes key for scope on behalf of holder. Whenever it has to wait,
+// and whenever what it waits for changes, it calls waiting with the holder it
+// waits on, outside the lock: a job that would overlap is held back visibly
+// rather than indistinguishably from one not yet started.
+func (k *keyLocks) acquireAs(ctx context.Context, key, scope, holder string, waiting func(blocker string)) (func(), error) {
 	if key == "" {
 		return func() {}, nil
 	}
-	waiter := &lockWaiter{scope: scope}
+	waiter := &lockWaiter{scope: scope, holder: holder}
+	reported, first := "", true
 	k.mu.Lock()
 	if k.waiters == nil {
 		k.waiters = make(map[string][]*lockWaiter)
@@ -78,10 +91,13 @@ func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(),
 			k.mu.Unlock()
 			return nil, err
 		}
-		blocked := false
+		blocked, blocker := false, ""
 		for active := range k.active[key] {
 			if overlappingLockScope(active, scope) {
 				blocked = true
+				if holders := k.holders[key][active]; len(holders) > 0 {
+					blocker = holders[0]
+				}
 				break
 			}
 		}
@@ -91,7 +107,7 @@ func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(),
 					break
 				}
 				if overlappingLockScope(earlier.scope, scope) {
-					blocked = true
+					blocked, blocker = true, earlier.holder
 					break
 				}
 			}
@@ -105,6 +121,13 @@ func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(),
 			}
 			k.removeWaiterLocked(key, waiter)
 			k.active[key][scope]++
+			if k.holders == nil {
+				k.holders = make(map[string]map[string][]string)
+			}
+			if k.holders[key] == nil {
+				k.holders[key] = make(map[string][]string)
+			}
+			k.holders[key][scope] = append(k.holders[key][scope], holder)
 			k.signalLocked()
 			k.mu.Unlock()
 			return func() {
@@ -116,6 +139,18 @@ func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(),
 				if len(k.active[key]) == 0 {
 					delete(k.active, key)
 				}
+				held := k.holders[key][scope]
+				if index := slices.Index(held, holder); index >= 0 {
+					held = slices.Delete(held, index, index+1)
+				}
+				if len(held) == 0 {
+					delete(k.holders[key], scope)
+				} else {
+					k.holders[key][scope] = held
+				}
+				if len(k.holders[key]) == 0 {
+					delete(k.holders, key)
+				}
 				k.signalLocked()
 				k.mu.Unlock()
 			}, nil
@@ -125,6 +160,10 @@ func (k *keyLocks) acquireScope(ctx context.Context, key, scope string) (func(),
 		}
 		changed := k.changed
 		k.mu.Unlock()
+		if waiting != nil && (first || blocker != reported) {
+			first, reported = false, blocker
+			waiting(blocker)
+		}
 		select {
 		case <-ctx.Done():
 			continue
@@ -317,7 +356,13 @@ func (p *Pool) worker(runCtx, workerCtx context.Context) {
 			}
 			continue
 		}
-		release, err := p.locks.acquireScope(runCtx, job.LockKey, job.LockScope)
+		release, err := p.locks.acquireAs(runCtx, job.LockKey, job.LockScope, job.ID, func(blocker string) {
+			reason := "waiting for another job's lock on " + job.LockKey
+			if blocker != "" {
+				reason = "waiting for " + blocker + " to release its lock on " + job.LockKey
+			}
+			p.emit(job, "waiting-lock", reason)
+		})
 		if err != nil {
 			outcome := Outcome{State: "failed", Reason: err.Error()}
 			p.emit(job, outcome.State, outcome.Reason)

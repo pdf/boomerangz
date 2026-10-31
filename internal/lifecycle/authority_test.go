@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pdf/boomerangz/internal/policy"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
@@ -45,5 +46,29 @@ func TestRootAuthority(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestActiveRootRequiresLocalActivation(t *testing.T) {
+	t.Parallel()
+	parent := policy.Resolve(zfs.Dataset{Name: "tank", Type: zfs.Filesystem, EncryptionRoot: "-"}, nil,
+		[]zfs.Property{{Dataset: "tank", Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal}}, nil)
+	inherited := policy.Resolve(zfs.Dataset{Name: "tank/data", Type: zfs.Filesystem, EncryptionRoot: "-"}, &parent, nil, nil)
+	if !inherited.Enabled {
+		t.Fatal("fixture: activation did not inherit")
+	}
+	if err := ActiveRoot(parent, "tank"); err != nil {
+		t.Fatalf("local activation refused: %v", err)
+	}
+	// Inherited activation makes tank/data a member of tank's root. The prefix
+	// walk this replaced accepted it, which is what let every descendant act as
+	// a peer root.
+	if err := ActiveRoot(inherited, "tank/data"); err == nil || !strings.Contains(err.Error(), "member") {
+		t.Fatalf("inherited activation accepted: %v", err)
+	}
+	received := policy.Resolve(zfs.Dataset{Name: "tank/data", Type: zfs.Filesystem, EncryptionRoot: "-"}, nil,
+		[]zfs.Property{{Dataset: "tank/data", Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceReceived}}, nil)
+	if err := ActiveRoot(received, "tank/data"); err == nil {
+		t.Fatal("received activation accepted")
 	}
 }

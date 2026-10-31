@@ -49,7 +49,7 @@ func (b *targetBackend) InheritProperty(_ context.Context, object, property stri
 	b.states[object] = state
 	return nil
 }
-func (*targetBackend) Snapshot(context.Context, string, string, bool, map[string]string) error {
+func (*targetBackend) Snapshot(context.Context, []string, string, map[string]string) error {
 	return nil
 }
 func (b *targetBackend) DestroySnapshot(_ context.Context, snapshot string) error {
@@ -98,7 +98,7 @@ func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) 
 	}
 	runtime := &Runtime{backend: backend, installation: installation, config: config.Defaults()}
 	effective := policy.Effective{Local: []string{"backup/data"}, Discard: policy.DiscardOff}
-	reference := lifecycle.Reference{Target: canonical, Dataset: "tank/data", GUID: 20, Metadata: metadata}
+	reference := lifecycle.Reference{Target: canonical, Dataset: "tank/data", Metadata: metadata, Sources: []lifecycle.ReferenceSource{{Dataset: "tank/data", GUID: 20, Metadata: metadata}}}
 	if err := runtime.retireReference(t.Context(), "tank/data", effective, sourceState, lineage, reference); err != nil {
 		t.Fatal(err)
 	}

@@ -21,7 +21,7 @@ _boomerangz_options() {
     'pairing create') reply=(-h --help --config --config-dir --listener --client-cert --client-key --scope --expires-in) ;;
     'pairing import'|'pairing list'|'pairing revoke') reply=(-h --help --config --config-dir) ;;
     'dataset list'|'dataset inspect') reply=(-h --help --config --config-dir --json) ;;
-    'dataset adopt'|'dataset reseed') reply=(-h --help --config --config-dir --apply) ;;
+    'dataset adopt'|'dataset reseed'|'dataset abort-receive') reply=(-h --help --config --config-dir --apply) ;;
     'dataset clean') reply=(-h --help --config --config-dir --recursive --all --destroy-owned-snapshots --apply) ;;
     'identity recover') reply=(-h --help --config --config-dir --owner --apply) ;;
     *) reply=(-h --help) ;;
@@ -136,7 +136,7 @@ _boomerangz_candidates() {
   elif [[ -z $subcommand ]]; then
     case $command in
       config) reply=(check reload show) ;;
-      dataset) reply=(adopt clean inspect list reseed) ;;
+      dataset) reply=(abort-receive adopt clean inspect list reseed) ;;
       identity) reply=(recover) ;;
       pairing) reply=(create import list revoke) ;;
       trigger) _boomerangz_datasets ;;
@@ -146,7 +146,7 @@ _boomerangz_candidates() {
       'dataset inspect'|'dataset adopt')
         (( positional_count == 0 )) && _boomerangz_datasets
         ;;
-      'dataset reseed')
+      'dataset reseed'|'dataset abort-receive')
         if (( positional_count == 0 )); then
           _boomerangz_datasets
         elif (( positional_count == 1 )); then

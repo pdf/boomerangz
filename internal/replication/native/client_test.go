@@ -38,6 +38,7 @@ func (testBackend) SetProperties(context.Context, string, map[string]string) err
 func (testBackend) InheritProperty(context.Context, string, string) error          { return nil }
 func (testBackend) AbortReceive(context.Context, string) error                     { return nil }
 func (testBackend) DestroyDataset(context.Context, string, bool) error             { return nil }
+func (testBackend) RenameDataset(context.Context, string, string) error            { return nil }
 
 func testTLSCertificate(t *testing.T) (tls.Certificate, *x509.Certificate) {
 	t.Helper()
@@ -105,6 +106,20 @@ func TestAuthenticatedNativeEndpointNegotiatesSharedService(t *testing.T) {
 	}
 	if err := reseed.DestroyDataset(ctx, "other/private", true); err == nil {
 		t.Fatal("native endpoint destroyed a dataset outside its configured root")
+	}
+	replicas, ok := endpoint.Executor().(zfs.ReplicaExecutor)
+	if !ok {
+		t.Fatal("native endpoint does not expose placeholder replacement")
+	}
+	if err := replicas.RenameDataset(ctx, "tank/a/hole", "tank/a/hole.boomerangz-placeholder"); err != nil {
+		t.Fatalf("rename within the configured root: %v", err)
+	}
+	// Nothing may move a configured root, or carry a dataset out of its own
+	// root, even into another configured one.
+	for _, pair := range [][2]string{{"tank/a", "tank/a2"}, {"tank/a/x", "tank/a"}, {"tank/a/x", "tank/b/x"}, {"tank/a/x", "other/private/x"}, {"other/private", "other/moved"}} {
+		if err := replicas.RenameDataset(ctx, pair[0], pair[1]); err == nil {
+			t.Errorf("native endpoint renamed %s to %s", pair[0], pair[1])
+		}
 	}
 	if got := endpoint.CanonicalTarget(); got != "native://127.0.0.1:"+strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)+"/tank/a" {
 		t.Fatalf("canonical target=%q", got)

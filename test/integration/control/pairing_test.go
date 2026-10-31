@@ -143,7 +143,7 @@ replication_roots = [%q]
 	if err != nil {
 		t.Fatal(err)
 	}
-	metadata, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), effective)
+	metadata, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC(), effective)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,9 @@ replication_roots = [%q]
 		if err != nil {
 			t.Fatal(err)
 		}
-		request := transfer.Request{Source: source, DestinationRoot: destinationRoot, Snapshot: source + "@" + metadata.Name(), Policy: effective, Transport: "native", RemoteName: "backup", CanonicalTarget: endpoint.CanonicalTarget()}
+		request := transfer.Request{Source: source, DestinationRoot: destinationRoot, Snapshot: source + "@" + metadata.Name(), Policy: effective, Transport: "native", RemoteName: "backup", CanonicalTarget: endpoint.CanonicalTarget(),
+			// The guest is both hosts; the remote reaches this host's pool.
+			HostLocal: true}
 		result, err := engine.Apply(t.Context(), request, nil)
 		if err != nil || !result.Verified {
 			t.Fatalf("imported credential did not replicate: result=%+v err=%v", result, err)

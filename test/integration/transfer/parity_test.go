@@ -14,6 +14,7 @@ import (
 
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/control"
+	"github.com/pdf/boomerangz/internal/discovery"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
 	replicationnative "github.com/pdf/boomerangz/internal/replication/native"
@@ -252,6 +253,8 @@ func TestGuestTransportParity(t *testing.T) {
 			Transport:       target.transport,
 			RemoteName:      target.remote,
 			CanonicalTarget: target.canonical,
+			// The guest is both hosts; its remotes reach this host's pool.
+			HostLocal: target.transport != "local",
 		}
 	}
 
@@ -287,7 +290,7 @@ exec zfs "$@"
 		policy.Namespace+"remote=home",
 		policy.Namespace+"local="+container("local")+"/resume",
 		resumeSource)
-	resumeMetadata, err := snapshots.CreateSnapshot(t.Context(), resumeSource, false, time.Now().UTC(),
+	resumeMetadata, err := snapshots.CreateSnapshot(t.Context(), resumeSource, []string{resumeSource}, time.Now().UTC(),
 		request(t, parityTarget{root: container("local") + "/resume"}, resumeSource, zfs.Volume, "").Policy)
 	if err != nil {
 		t.Fatal(err)
@@ -343,7 +346,7 @@ exec zfs "$@"
 			var last lifecycle.Metadata
 
 			chain("full-bootstrap", func(t *testing.T) {
-				first, snapErr := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-4*time.Hour),
+				first, snapErr := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-4*time.Hour),
 					request(t, latestTarget, source, zfs.Filesystem, "").Policy)
 				if snapErr != nil {
 					t.Fatal(snapErr)
@@ -365,7 +368,7 @@ exec zfs "$@"
 			})
 
 			chain("incremental-modes", func(t *testing.T) {
-				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-3*time.Hour),
+				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-3*time.Hour),
 					request(t, latestTarget, source, zfs.Filesystem, "").Policy); snapErr != nil {
 					t.Fatal(snapErr)
 				}
@@ -373,7 +376,7 @@ exec zfs "$@"
 				// must carry it and -i must not.
 				command(t, "snapshot", source+"@foreign-"+suffix)
 				var snapErr error
-				last, snapErr = snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-2*time.Hour),
+				last, snapErr = snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-2*time.Hour),
 					request(t, latestTarget, source, zfs.Filesystem, "").Policy)
 				if snapErr != nil {
 					t.Fatal(snapErr)
@@ -416,7 +419,7 @@ exec zfs "$@"
 				// Advance the incremental-all target so it no longer protects
 				// last, then prune last from the source. The latest-only
 				// target must fall back to its bookmark.
-				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, false, now.Add(-time.Hour),
+				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-time.Hour),
 					request(t, allTarget, source, zfs.Filesystem, "").Policy); snapErr != nil {
 					t.Fatal(snapErr)
 				}
@@ -440,7 +443,7 @@ exec zfs "$@"
 				// failure here to the planted snapshot rather than to the
 				// transport. Previewing the identical request first, and
 				// requiring a plan back, is what does that.
-				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, false, now,
+				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now,
 					request(t, latestTarget, source, zfs.Filesystem, "").Policy); snapErr != nil {
 					t.Fatal(snapErr)
 				}
@@ -511,7 +514,9 @@ exec zfs "$@"
 				intact := transport.open(t, resumeRoot, "zfs")
 				recovered, recoverErr := intact.engine.Apply(t.Context(),
 					request(t, intact, resumeSource, zfs.Volume, resumeSource+"@"+resumeMetadata.Name()), nil)
-				if recoverErr != nil || !recovered.Verified || recovered.Plan.Mode != "resume" {
+				// A resumed stream plans again afterwards, so it ends at its
+				// newest endpoint; that it resumed is reported on its own.
+				if recoverErr != nil || !recovered.Verified || !recovered.Resumed || recovered.ResumedSnapshot != resumeSource+"@"+resumeMetadata.Name() {
 					t.Fatalf("resumed result=%+v err=%v", recovered, recoverErr)
 				}
 				state, stateErr := direct.InspectState(t.Context(), resumeRoot, true)
@@ -558,7 +563,7 @@ exec zfs "$@"
 							t.Helper()
 							return request(t, target, tree, zfs.Filesystem, "")
 						}
-						bootstrap, snapErr := snapshots.CreateSnapshot(t.Context(), tree, true, now,
+						bootstrap, snapErr := snapshots.CreateSnapshot(t.Context(), tree, zfstest.Subtree(t, tree), now,
 							recursiveRequest(t).Policy)
 						if snapErr != nil {
 							t.Fatal(snapErr)
@@ -590,7 +595,7 @@ exec zfs "$@"
 							}
 						}
 
-						follow, snapErr := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(time.Minute),
+						follow, snapErr := snapshots.CreateSnapshot(t.Context(), tree, zfstest.Subtree(t, tree), now.Add(time.Minute),
 							recursiveRequest(t).Policy)
 						if snapErr != nil {
 							t.Fatal(snapErr)
@@ -611,7 +616,7 @@ exec zfs "$@"
 						// planted snapshot rather than to any fault in the
 						// transport, so preview the identical request first
 						// and require a real plan back.
-						if _, snapErr := snapshots.CreateSnapshot(t.Context(), tree, true, now.Add(2*time.Minute),
+						if _, snapErr := snapshots.CreateSnapshot(t.Context(), tree, zfstest.Subtree(t, tree), now.Add(2*time.Minute),
 							recursiveRequest(t).Policy); snapErr != nil {
 							t.Fatal(snapErr)
 						}
@@ -623,6 +628,104 @@ exec zfs "$@"
 							t.Fatalf("accepted a foreign snapshot on the recursive destination: %+v", plan)
 						}
 					})
+				}
+			})
+
+			// Self-contained, like recursive-mapping. A root that sends its
+			// members as streams of their own puts each one at its exact
+			// root-relative path on the remote, and creates the hole between
+			// them as a placeholder through the transport. Under discard=all
+			// a member received by its own name would land beside the root's
+			// replica instead, so that mode is the one that discriminates.
+			t.Run("member-streams", func(t *testing.T) {
+				memberRoot := root + "/members"
+				command(t, "create", "-u", memberRoot)
+				tree := zfstest.FixtureName(sourcePool, "parity-members")
+				for _, name := range []string{"", "/hole", "/hole/deep", "/kept"} {
+					command(t, "create", "-u", tree+name)
+				}
+				zfstest.RegisterCleanup(t, tree)
+				command(t, "set",
+					policy.Namespace+"enabled=on",
+					policy.Namespace+"discard=all",
+					policy.Namespace+"remote=home",
+					policy.Namespace+"local="+memberRoot,
+					tree)
+				command(t, "set", policy.Namespace+"enabled=off", tree+"/hole")
+				command(t, "set", policy.Namespace+"enabled=on", tree+"/hole/deep")
+				members := []string{tree, tree + "/hole/deep", tree + "/kept"}
+				target := transport.open(t, memberRoot, "zfs")
+				// Members and their policies come from discovery, as the
+				// daemon resolves them.
+				memberRequest := func(t *testing.T) transfer.Request {
+					t.Helper()
+					scanner, scanErr := discovery.New(direct, discovery.Options{Remotes: []string{"home"}})
+					if scanErr != nil {
+						t.Fatal(scanErr)
+					}
+					generation, scanErr := scanner.Scan(t.Context(), nil)
+					if scanErr != nil {
+						t.Fatal(scanErr)
+					}
+					entry, _ := generation.Inspect(tree)
+					req := request(t, target, tree, zfs.Filesystem, "")
+					req.Policy = entry.Policy
+					for _, name := range entry.Members {
+						member, _ := generation.Inspect(name)
+						req.Members = append(req.Members, transfer.Member{Dataset: name, Policy: member.Policy})
+					}
+					return req
+				}
+				bootstrap, snapErr := snapshots.CreateSnapshot(t.Context(), tree, members, now, memberRequest(t).Policy)
+				if snapErr != nil {
+					t.Fatal(snapErr)
+				}
+				result, applyErr := target.engine.Apply(t.Context(), memberRequest(t), nil)
+				if applyErr != nil || !result.Verified || len(result.Streams) != len(members) {
+					t.Fatalf("member bootstrap=%+v err=%v", result, applyErr)
+				}
+				mapped := result.Plan.Destination
+				for _, member := range members {
+					command(t, "list", "-H", "-o", "name", mapped+strings.TrimPrefix(member, tree)+"@"+bootstrap.Name())
+				}
+				if held := command(t, "list", "-H", "-o", "name", "-t", "snapshot", "-d", "1", mapped+"/hole"); held != "" {
+					t.Fatalf("the hole's placeholder received snapshots: %s", held)
+				}
+				for _, misplaced := range []string{memberRoot + "/deep", memberRoot + "/kept"} {
+					if exec.CommandContext(t.Context(), "zfs", "list", "-H", misplaced).Run() == nil {
+						t.Fatalf("a member was received by its own name at %s", misplaced)
+					}
+				}
+
+				// A member snapshotted alone advances alone over the
+				// transport; the root's stream finds nothing to send.
+				follow, snapErr := snapshots.CreateSnapshot(t.Context(), tree, []string{tree + "/hole/deep"}, now.Add(time.Minute), memberRequest(t).Policy)
+				if snapErr != nil {
+					t.Fatal(snapErr)
+				}
+				result, applyErr = target.engine.Apply(t.Context(), memberRequest(t), nil)
+				if applyErr != nil || !result.Verified || result.Streams[0].Plan.Mode != "up-to-date" {
+					t.Fatalf("member follow-up=%+v err=%v", result, applyErr)
+				}
+				command(t, "list", "-H", "-o", "name", mapped+"/hole/deep@"+follow.Name())
+
+				// Including the hole replaces its placeholder through the
+				// transport: set aside, received, the member beneath moved
+				// back with its history, the placeholder removed.
+				command(t, "inherit", policy.Namespace+"enabled", tree+"/hole")
+				members = append(members, tree+"/hole")
+				hole, snapErr := snapshots.CreateSnapshot(t.Context(), tree, []string{tree + "/hole"}, now.Add(2*time.Minute), memberRequest(t).Policy)
+				if snapErr != nil {
+					t.Fatal(snapErr)
+				}
+				result, applyErr = target.engine.Apply(t.Context(), memberRequest(t), nil)
+				if applyErr != nil || !result.Verified || len(result.Streams) != len(members) {
+					t.Fatalf("hole inclusion=%+v err=%v", result, applyErr)
+				}
+				command(t, "list", "-H", "-o", "name", mapped+"/hole@"+hole.Name())
+				command(t, "list", "-H", "-o", "name", mapped+"/hole/deep@"+follow.Name())
+				if exec.CommandContext(t.Context(), "zfs", "list", "-H", mapped+"/hole.boomerangz-placeholder").Run() == nil {
+					t.Fatal("the set-aside placeholder was left behind")
 				}
 			})
 		})

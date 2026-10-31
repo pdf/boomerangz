@@ -27,6 +27,15 @@ type localBackend struct {
 	checks      map[string][]string
 	checkErr    error
 	afterSet    func()
+	// poolGUID distinguishes another host's backup pool; zero is this host's.
+	poolGUID uint64
+}
+
+func (b *localBackend) pool() uint64 {
+	if b.poolGUID != 0 {
+		return b.poolGUID
+	}
+	return 11
 }
 
 func cloneState(state zfs.State) (zfs.State, error) {
@@ -49,6 +58,13 @@ func (b *localBackend) InspectState(_ context.Context, dataset string, _ bool) (
 	if dataset == "backup/data" && b.destExists {
 		return cloneState(b.destination)
 	}
+	// Any other dataset the inventory holds exists as an empty filesystem, as
+	// a real pool would report it.
+	for _, existing := range b.inventory {
+		if existing.Name == dataset {
+			return zfs.State{Objects: []zfs.Object{{Name: dataset, Type: string(existing.Type), GUID: 1}}}, nil
+		}
+	}
 	return zfs.State{}, fmt.Errorf("dataset absent")
 }
 
@@ -61,10 +77,10 @@ func (b *localBackend) InspectDatasetIdentity(_ context.Context, dataset string)
 	}
 	switch dataset {
 	case "backup":
-		return zfs.DatasetIdentity{Name: dataset, Type: zfs.Filesystem, GUID: 10, Pool: "backup", PoolGUID: 11}, nil
+		return zfs.DatasetIdentity{Name: dataset, Type: zfs.Filesystem, GUID: 10, Pool: "backup", PoolGUID: b.pool()}, nil
 	case "backup/data":
 		if b.destExists {
-			return zfs.DatasetIdentity{Name: dataset, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: 11}, nil
+			return zfs.DatasetIdentity{Name: dataset, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: b.pool()}, nil
 		}
 	}
 	return zfs.DatasetIdentity{}, fmt.Errorf("identity absent")
@@ -184,7 +200,9 @@ func (s remoteTestStream) Run(_ context.Context, send zfs.SendOptions, receive z
 	}
 	component := strings.TrimPrefix(endpoint.Name, "tank/data@")
 	s.destination.destExists = true
-	s.destination.inventory = append(s.destination.inventory, zfs.Dataset{Name: "backup/data", Type: zfs.Filesystem, EncryptionRoot: "-"})
+	if !slices.ContainsFunc(s.destination.inventory, func(dataset zfs.Dataset) bool { return dataset.Name == "backup/data" }) {
+		s.destination.inventory = append(s.destination.inventory, zfs.Dataset{Name: "backup/data", Type: zfs.Filesystem, EncryptionRoot: "-"})
+	}
 	s.destination.destination = zfs.State{Objects: []zfs.Object{
 		{Name: receive.Root, Type: "filesystem", GUID: 20, CreateTXG: 20},
 		{Name: receive.Root + "@" + component, Type: "snapshot", GUID: endpoint.GUID, CreateTXG: 21},
@@ -212,7 +230,9 @@ func (s localTestStream) Run(_ context.Context, send zfs.SendOptions, receive zf
 	}
 	component := strings.TrimPrefix(endpoint.Name, "tank/data@")
 	s.backend.destExists = true
-	s.backend.inventory = append(s.backend.inventory, zfs.Dataset{Name: "backup/data", Type: zfs.Filesystem, EncryptionRoot: "-"})
+	if !slices.ContainsFunc(s.backend.inventory, func(dataset zfs.Dataset) bool { return dataset.Name == "backup/data" }) {
+		s.backend.inventory = append(s.backend.inventory, zfs.Dataset{Name: "backup/data", Type: zfs.Filesystem, EncryptionRoot: "-"})
+	}
 	s.backend.destination = zfs.State{Objects: []zfs.Object{
 		{Name: receive.Root, Type: "filesystem", GUID: 20, CreateTXG: 20},
 		{Name: receive.Root + "@" + component, Type: "snapshot", GUID: endpoint.GUID, CreateTXG: 21},
@@ -248,8 +268,10 @@ func TestApplyResumesHeldReceiveAfterRestart(t *testing.T) {
 	if err != nil || preview.Mode != "resume" || preview.Send.ResumeToken != "1-resume-token" {
 		t.Fatalf("preview=%+v err=%v", preview, err)
 	}
+	// The resumed receive was already the newest endpoint, so the replanning
+	// pass that follows a resume finds the target up to date.
 	result, err := restarted.Apply(t.Context(), request, nil)
-	if err != nil || !result.Verified || result.Plan.Mode != "resume" {
+	if err != nil || !result.Verified || !result.Resumed || result.ResumedSnapshot != preview.Snapshot || result.Plan.Mode != "up-to-date" {
 		t.Fatalf("result=%+v err=%v writes=%v", result, err, backend.writes)
 	}
 	if len(backend.source.Holds[result.Plan.Snapshot]) != 0 {
@@ -278,7 +300,7 @@ func TestApplyResumeSelectsEndpointProofAheadOfHeldIncrementalBase(t *testing.T)
 		t.Fatal(err)
 	}
 	result, err := restarted.Apply(t.Context(), request, nil)
-	if err != nil || !result.Verified || result.Plan.Mode != "resume" || result.Plan.Snapshot != view.Source.Objects[2].Name {
+	if err != nil || !result.Verified || !result.Resumed || result.ResumedSnapshot != view.Source.Objects[2].Name || result.Plan.Mode != "up-to-date" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
@@ -286,7 +308,7 @@ func TestApplyResumeSelectsEndpointProofAheadOfHeldIncrementalBase(t *testing.T)
 func TestRemoteApplyKeepsSourceAndDestinationExecutorsSeparate(t *testing.T) {
 	t.Parallel()
 	source, request := newLocalBackend(t)
-	destination := &localBackend{inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem, EncryptionRoot: "-"}}}
+	destination := &localBackend{poolGUID: 12, inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem, EncryptionRoot: "-"}}}
 	request.Transport = "ssh"
 	request.RemoteName = "home"
 	request.CanonicalTarget = "ssh://replicator@backup.example.net:22/backup/data"
@@ -404,7 +426,7 @@ func TestApplyMarksDatasetChangeDuringPreparationRetryable(t *testing.T) {
 func TestApplyChecksBothEndpointsBeforeMutation(t *testing.T) {
 	t.Parallel()
 	source, request := newLocalBackend(t)
-	destination := &localBackend{inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem, EncryptionRoot: "-"}}, checkErr: errors.New("missing receive permission")}
+	destination := &localBackend{poolGUID: 12, inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem, EncryptionRoot: "-"}}, checkErr: errors.New("missing receive permission")}
 	request.Transport = "ssh"
 	request.RemoteName = "home"
 	request.CanonicalTarget = "ssh://replicator@backup.example.net:22/backup/data"
@@ -543,7 +565,7 @@ func TestApplyRotatesProtectedIncrementalAllBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	references, err := lifecycle.References(state, request.Source, fixtureLineage)
-	if err != nil || len(references) != 1 || references[0].SnapshotName(request.Source) != next {
+	if err != nil || len(references) != 1 || references[0].SnapshotName() != next {
 		t.Fatalf("references=%+v err=%v", references, err)
 	}
 }
@@ -575,7 +597,7 @@ func TestApplyRetainsNewerPendingRecoveryReference(t *testing.T) {
 	}
 	references, err := lifecycle.References(state, request.Source, fixtureLineage)
 	if err != nil || !slices.ContainsFunc(references, func(reference lifecycle.Reference) bool {
-		return reference.Target == newer.Target && reference.SnapshotName(request.Source) == newer.SnapshotName(request.Source)
+		return reference.Target == newer.Target && reference.SnapshotName() == newer.SnapshotName()
 	}) {
 		t.Fatalf("newer pending reference was released: refs=%+v err=%v", references, err)
 	}

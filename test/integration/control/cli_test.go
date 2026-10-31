@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -105,7 +106,7 @@ func datasetStatuses(t *testing.T, output string) map[string]string {
 // The rendering of both `list` and `inspect` is unit-tested over a fake
 // reader. What only a pool can establish is that ZFS's own value/source
 // columns drive it - a locally activated root reads as active, its replicated
-// descendant as covered, and a received activation as provenance rather than
+// descendant as a member, and a received activation as provenance rather than
 // as activation.
 func TestGuestDatasetCLI(t *testing.T) {
 	binary, sourcePool, destinationPool := guestCLI(t)
@@ -160,9 +161,10 @@ func TestGuestDatasetCLI(t *testing.T) {
 	}
 	zfstest.RegisterCleanup(t, destinationRoot)
 	zfsSet(t, "create", "-u", child)
-	// replicate makes the child covered rather than a root of its own; props
-	// is what sends the activation property, so the received replica can be
-	// distinguished from a locally configured one.
+	// The child inherits activation, so it is a member of the root rather than
+	// a root of its own. props is what sends the activation property, so the
+	// received replica can be distinguished from a locally configured one, and
+	// a property stream needs the root's single -R stream.
 	zfsSet(t, "set", policy.Namespace+"enabled=on", policy.Namespace+"replicate=on",
 		policy.Namespace+"props=on", policy.Namespace+"policy=1x1h",
 		policy.Namespace+"local="+destinationRoot, active)
@@ -173,7 +175,7 @@ func TestGuestDatasetCLI(t *testing.T) {
 		statuses := datasetStatuses(t, cli(t, "dataset", "list"))
 		for dataset, want := range map[string]string{
 			active:   "active",
-			child:    "covered",
+			child:    "member",
 			invalid:  "invalid",
 			inactive: "inactive",
 		} {
@@ -200,7 +202,7 @@ func TestGuestDatasetCLI(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("dataset list --json did not report %s as covered by %s", child, active)
+			t.Errorf("dataset list --json did not report %s as a member of %s", child, active)
 		}
 	})
 
@@ -218,9 +220,9 @@ func TestGuestDatasetCLI(t *testing.T) {
 				t.Errorf("dataset inspect is missing %q:\n%s", want, output)
 			}
 		}
-		covered := cli(t, "dataset", "inspect", child)
-		if !strings.Contains(covered, "Covered by: "+active) {
-			t.Errorf("dataset inspect did not report %s as covered:\n%s", child, covered)
+		member := cli(t, "dataset", "inspect", child)
+		if !strings.Contains(member, "Actor root: member of "+active) {
+			t.Errorf("dataset inspect did not report %s as a member of %s:\n%s", child, active, member)
 		}
 	})
 
@@ -248,7 +250,7 @@ func TestGuestDatasetCLI(t *testing.T) {
 	var lineage string
 
 	chain("bootstrap", func(t *testing.T) {
-		metadata, err := snapshots.CreateSnapshot(t.Context(), active, true, time.Now().UTC(), effective(t))
+		metadata, err := snapshots.CreateSnapshot(t.Context(), active, zfstest.Subtree(t, active), time.Now().UTC(), effective(t))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -383,7 +385,7 @@ func TestGuestIdentityRecoverCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	effective := policy.Resolve(zfs.Dataset{Name: root, Type: zfs.Filesystem, EncryptionRoot: "-"}, nil, rows, nil)
-	if _, err := snapshots.CreateSnapshot(t.Context(), root, false, time.Now().UTC(), effective); err != nil {
+	if _, err := snapshots.CreateSnapshot(t.Context(), root, []string{root}, time.Now().UTC(), effective); err != nil {
 		t.Fatal(err)
 	}
 
@@ -461,7 +463,7 @@ func TestGuestIdentityRecoverCLI(t *testing.T) {
 		if serviceErr != nil {
 			t.Fatal(serviceErr)
 		}
-		if _, err := recovered.CreateSnapshot(t.Context(), root, false, time.Now().UTC().Add(time.Minute), effective); err != nil {
+		if _, err := recovered.CreateSnapshot(t.Context(), root, []string{root}, time.Now().UTC().Add(time.Minute), effective); err != nil {
 			t.Fatalf("recovered installation could not extend the lineage it adopted: %v", err)
 		}
 	})
@@ -476,4 +478,113 @@ func TestGuestIdentityRecoverCLI(t *testing.T) {
 			t.Fatalf("repeat refusal does not name the cause: %s", output)
 		}
 	})
+}
+
+// TestGuestAbortReceiveCLI interrupts a real receive, then discards it with
+// `dataset abort-receive`: the explicit way out when resuming keeps failing.
+// The abort must discard exactly the partial receive and leave the source able
+// to send again.
+func TestGuestAbortReceiveCLI(t *testing.T) {
+	binary, sourcePool, destinationPool := guestCLI(t)
+	configPath, dropInDir, identityDir := scratchConfig(t)
+	installation, err := identity.LoadOrCreate(identityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct, err := zfs.NewDirect("zfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := lifecycle.NewService(direct, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli := func(t *testing.T, args ...string) string {
+		t.Helper()
+		args = append(args, "--config", configPath, "--config-dir", dropInDir)
+		output, runErr := exec.CommandContext(t.Context(), binary, args...).CombinedOutput()
+		if runErr != nil {
+			t.Fatalf("boomerangz %s: %v: %s", strings.Join(args, " "), runErr, output)
+		}
+		return string(output)
+	}
+	token := func(t *testing.T, dataset string) string {
+		t.Helper()
+		output, _ := exec.CommandContext(t.Context(), "zfs", "get", "-H", "-o", "value", "receive_resume_token", dataset).CombinedOutput()
+		return strings.TrimSpace(string(output))
+	}
+
+	// Enough data to outrun the truncation point.
+	source := zfstest.PayloadVolume(t, zfstest.FixtureName(sourcePool, "abortcli"), 64, 16)
+	destinationRoot := zfstest.FixtureName(destinationPool, "abortcli")
+	zfstest.RegisterCleanup(t, destinationRoot)
+	if output, setErr := exec.CommandContext(t.Context(), "zfs", "set", policy.Namespace+"enabled=on", policy.Namespace+"local="+destinationRoot, source).CombinedOutput(); setErr != nil {
+		t.Fatalf("guest zfs set: %v: %s", setErr, output)
+	}
+	effective := func(t *testing.T) policy.Effective {
+		t.Helper()
+		rows, storedErr := direct.GetStoredProperties(t.Context(), []string{source})
+		if storedErr != nil {
+			t.Fatal(storedErr)
+		}
+		return policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, nil)
+	}
+	if _, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC(), effective(t)); err != nil {
+		t.Fatal(err)
+	}
+	truncating := filepath.Join(t.TempDir(), "zfs-truncating-send")
+	wrapper := "#!/bin/sh\nif [ \"$1\" = \"send\" ]; then\n\tzfs \"$@\" | head -c 1048576\n\texit 1\nfi\nexec zfs \"$@\"\n"
+	if err := os.WriteFile(truncating, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := zfs.NewLocalStream(truncating)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupted, err := transfer.NewLocal(direct, stream, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := interrupted.Apply(t.Context(), transfer.Request{Source: source, DestinationRoot: destinationRoot, Policy: effective(t)}, nil); err == nil {
+		t.Fatal("the truncated send succeeded")
+	}
+	if token(t, destinationRoot) == "" || token(t, destinationRoot) == "-" {
+		t.Fatal("fixture: the truncated send left no resumable receive")
+	}
+
+	var plan struct {
+		Dataset  string   `json:"dataset"`
+		Receives []string `json:"receives"`
+		Applied  bool     `json:"applied"`
+	}
+	output := cli(t, "dataset", "abort-receive", source, destinationRoot)
+	if err := json.Unmarshal([]byte(output), &plan); err != nil {
+		t.Fatalf("decode preview: %v: %s", err, output)
+	}
+	if plan.Dataset != source || plan.Applied || !slices.Equal(plan.Receives, []string{destinationRoot}) {
+		t.Fatalf("preview=%s", output)
+	}
+	if token(t, destinationRoot) == "" {
+		t.Fatal("the preview discarded the receive")
+	}
+	output = cli(t, "dataset", "abort-receive", source, destinationRoot, "--apply")
+	if err := json.Unmarshal([]byte(output), &plan); err != nil || !plan.Applied {
+		t.Fatalf("abort --apply: %v: %s", err, output)
+	}
+	// An interrupted full receive takes the dataset it was creating with it.
+	if exec.CommandContext(t.Context(), "zfs", "list", "-H", destinationRoot).Run() == nil {
+		t.Fatal("the partially received dataset survived the abort")
+	}
+	local, err := zfs.NewLocalStream("zfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := transfer.NewLocal(direct, local, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Apply(t.Context(), transfer.Request{Source: source, DestinationRoot: destinationRoot, Policy: effective(t)}, nil)
+	if err != nil || !result.Verified || result.Resumed || result.Plan.Mode != "full" {
+		t.Fatalf("post-abort transfer=%+v err=%v", result, err)
+	}
 }

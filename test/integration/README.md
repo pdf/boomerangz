@@ -39,14 +39,15 @@ only worth reading if it is true.
 
 | Behaviour | Owned by |
 | --- | --- |
-| Recursive vs non-recursive snapshot scope | `TestGuestLifecycle/snapshot-scope` |
+| One atomic snapshot over an explicit member set: a root's whole subtree, or the root alone | `TestGuestLifecycle/snapshot-scope` |
+| A sparse member set snapshotted atomically, skipping excluded datasets and holes | `TestGuestRootActorScope/members-nest-under-the-root` |
 | Reference protect, checkpoint, release; wrong destination GUID refused | `TestGuestLifecycle/reference-checkpoint` |
 | Pruning respects foreign holds and the newest snapshot | `TestGuestLifecycle/prune-respects-holds` |
 | Adoption after lineage loss, without disturbing descendants | `TestGuestLifecycle/adopt` |
 | Clean clears metadata and preserves snapshots | `TestGuestLifecycle/clean` |
 | `dataset adopt` and `dataset clean` over the CLI | `TestGuestLifecycle/cli-adopt-and-clean` (gated on `BOOMERANGZ_LIFECYCLE_GUEST_CLI`) |
 | Received-property layering, and which hidden values reach `State.Received` | `TestGuestReceivedPropertyLayers` |
-| A root claimed but not yet snapshotted: lineage resumed, foreign claim refused, inherited markers not authority | `TestGuestInterruptedLineageInitialization` |
+| A root claimed but not yet snapshotted: lineage resumed, foreign claim refused, and a member that sees the root's markers through inheritance gains no state of its own | `TestGuestInterruptedLineageInitialization` |
 
 ### Encryption and raw sends
 
@@ -72,7 +73,13 @@ resolves policy from `ListDatasets` output rather than a literal.
 | Bookmark-based incremental after the source snapshot is pruned | `TestGuestLocalTransfer/bookmark-incremental` |
 | Unrelated destination history refused before sending | `TestGuestLocalTransfer/unrelated-destination-refused` |
 | Reseed recovery of an otherwise-blocked target | `TestGuestLocalTransfer/reseed-recovery` |
+| Members streamed into the root's replica at their root-relative paths under `discard=all`, holes created as placeholders, excluded datasets not sent, one proof per stream and no state on members | `TestGuestRootActorScope/members-nest-under-the-root` |
+| One member advancing without disturbing another member's proof | `TestGuestRootActorScope/a-member-advances-alone` |
+| A hole included again: its replica replaces the placeholder with real renames, the member beneath moved intact with its history, no placeholder left behind | `TestGuestRootActorScope/a-hole-becomes-a-member` |
+| Reseed of a root resetting every member's proof and binding, and the next transfer re-bootstrapping every member - the incident root actor scope was designed against | `TestGuestRootActorScope/reseed-resets-every-member` |
 | Recursive `replicate` with `discard=first` and `discard=all` mapping | `TestGuestLocalTransfer/recursive-mapping` |
+| `replicate=on` turned on for a root that replicated member by member: refused before anything changes with a reseed instruction, and the reseed bootstrapping one recursive stream | `TestGuestReplicateModeSwitch/per-member-to-replicate-needs-a-reseed` |
+| `replicate` turned off again: every member continuing incrementally on its own stream from the recursive replica, with no reseed | `TestGuestReplicateModeSwitch/replicate-to-per-member` |
 | Linux `canmount=noauto` ancestor preparation under an ordinary receive root | `TestGuestLocalTransfer/linux-ancestor-preparation` |
 | Resume after an interrupted receive, for both incremental modes | `TestGuestInterruptedTransferRecovery` |
 | A destination exhausted mid-receive, the source recovery state it retains, and the retry once room returns | `TestGuestDestinationExhaustion` |
@@ -83,8 +90,10 @@ resolves policy from `ListDatasets` output rather than a literal.
 | Behaviour | Owned by |
 | --- | --- |
 | Full bootstrap over `ssh` direct, `ssh-shell` and `native`, with transport recorded in the target binding | `TestGuestSSHTransfer` |
+| A remote that receives into this host's own pool refused before anything is received, until the caller has validated it as local | `TestGuestSSHTransfer` |
 | Full bootstrap, `-i` vs `-I` with a foreign intermediate, receive overrides and namespace isolation, bookmark base after the source snapshot is pruned, resume after an interrupted receive, unrelated-destination refusal, and reseed recovery through the transport's `zfs.ReseedExecutor` - each run over `local`, `ssh-direct`, `ssh-shell` and `native` | `TestGuestTransportParity/<transport>` |
 | Recursive `replicate` with `discard=first` and `discard=all` over each transport: the received subtree, the intermediate receive ancestor prepared remotely, the sibling bases a recursive incremental gathers, and a foreign snapshot on the recursive destination refused | `TestGuestTransportParity/<transport>/recursive-mapping` |
+| Member streams over each transport under `discard=all`: each member at its root-relative path, the hole's placeholder created remotely, a member advancing alone, and the hole's placeholder replaced through the transport's rename once it is included | `TestGuestTransportParity/<transport>/member-streams` |
 
 `TestGuestTransportParity` carries `local` as a control arm rather than as
 coverage: the local engine already owns those behaviours in the table above, so
@@ -95,8 +104,8 @@ failure attributable to the transport instead of to the test.
 
 | Behaviour | Owned by |
 | --- | --- |
-| Scheduling and retirement, checked against the snapshots, marker action, and destroyed snapshots the jobs name | `TestGuestDaemonSchedulingAndRetirement` |
-| Concurrent siblings, ancestor exclusion, conservative destination setup | `TestGuestLocalTransferConcurrency` |
+| One root job snapshotting the root and its member atomically; excluding the member stops its snapshots without marking it inactive; retiring the root clears the whole subtree - checked against the snapshots, marker action, and destroyed snapshots the jobs name | `TestGuestDaemonSchedulingAndRetirement` |
+| Independent roots sharing a target: setup serialized while they share a destination ancestor, the held job reporting `waiting-lock`; concurrent once established; a member sent after its root within the root's job; triggering a member names its root | `TestGuestLocalTransferConcurrency` |
 | Remote outage: `waiting-retry` with reason retained, pending-snapshot coalescing, reconnection, canonical target identity | `TestGuestRemoteOutageReconnection` |
 | Daemon-driven native replication through an imported pairing credential | `TestGuestDaemonNativeReplication` |
 | `prune:<dataset>` jobs reaching `succeeded`, and destroying what falls outside the grid | `TestGuestDaemonPruneJob` |
@@ -114,9 +123,10 @@ failure attributable to the transport instead of to the test.
 | `ssh-shell` operations outside `ssh_shell.replication_roots` refused | `TestGuestAccessControlRefusals/operation-outside-replication-roots` |
 | A receive root outside `ssh_shell.replication_roots` refused before anything is created | `TestGuestAccessControlRefusals/receive-root-outside-replication-roots` |
 | A missing `zfs allow` grant reported with the account, dataset and permissions | `TestGuestAccessControlRefusals/missing-delegation` |
-| `dataset list` status classification from real pool state | `TestGuestDatasetCLI/list` |
+| `dataset list` status classification from real pool state, a descendant reading as a member of its root | `TestGuestDatasetCLI/list` |
 | `dataset inspect` provenance: local authority on the source, and receive isolation plus received state on the replica | `TestGuestDatasetCLI/inspect-source`, `TestGuestDatasetCLI/inspect-received` |
 | `dataset reseed` resolving a configured target, destroying the replica, and leaving the source sendable | `TestGuestDatasetCLI/reseed` |
+| `dataset abort-receive` listing a real interrupted receive, discarding exactly it with `zfs receive -A`, and leaving the source sendable | `TestGuestAbortReceiveCLI` |
 | `identity recover` against owner and lineage markers a real snapshot wrote | `TestGuestIdentityRecoverCLI` |
 | A daemon refused when another process already holds the control socket | `TestGuestDaemonSocketContention/live-socket-refused` |
 | A second daemon under one configuration refused by the lifecycle lock, without displacing the first | `TestGuestDaemonSocketContention/lock-refuses-second-daemon` |
@@ -179,6 +189,20 @@ that remain. Both exist for iteration only: fewer tests ran, and a green
 result no longer says which, so a narrowed run says
 `PARTIAL RUN - NOT VERIFICATION` at both ends and in each stage summary. See
 [AGENTS.md](../../AGENTS.md); an unfiltered run is what "verified" means.
+
+CI runs the suite as parallel shards instead: `BOOMERANGZ_INTEGRATION_SHARD`
+names whole stages, takes neither filter, and each shard boots its own guest.
+`TestCIShardsCoverEveryStage`, a host-safe test in this directory, requires
+the shards in `quality.yml` to run every stage exactly once, so the jobs
+together are an unfiltered run. CI gives each guest the runner's 4 vCPUs with
+`BOOMERANGZ_GUEST_VCPUS`.
+
+The harness provisions a guest once and reuses it. After provisioning it
+flattens the system image into the image cache, keyed by the target's
+`config.sh` and `provision.sh`, and later runs boot a fresh overlay of it
+with a new cloud-init seed, skipping the download and provisioning. A
+provisioned image older than a week is rebuilt, so kernel and OpenZFS updates
+still arrive; CI keeps the cache between runs and keys it by the week too.
 
 A test that waits for an in-process daemon waits on its status subscription,
 through `internal/statuswait`, never by sleeping and re-reading `Status()` or

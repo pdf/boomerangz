@@ -74,6 +74,16 @@ func (e *scopedExecutor) DestroyDataset(ctx context.Context, dataset string, rec
 	}
 	return backend.DestroyDataset(ctx, dataset, recursive)
 }
+func (e *scopedExecutor) RenameDataset(ctx context.Context, from, to string) error {
+	if !e.inside(from) || !e.inside(to) || from == e.root || to == e.root {
+		return fmt.Errorf("rename is outside configured SSH destination scope")
+	}
+	backend, ok := e.backend.(zfs.ReplicaExecutor)
+	if !ok {
+		return fmt.Errorf("destination placeholder replacement is unavailable")
+	}
+	return backend.RenameDataset(ctx, from, to)
+}
 func (e *scopedExecutor) SetProperties(ctx context.Context, dataset string, properties map[string]string) error {
 	if !e.inside(dataset) {
 		return fmt.Errorf("dataset is outside configured SSH destination scope")
@@ -92,7 +102,7 @@ func (*scopedExecutor) GetActivationProperties(context.Context) ([]zfs.Property,
 func (*scopedExecutor) GetStoredProperties(context.Context, []string) ([]zfs.Property, error) {
 	return nil, fmt.Errorf("source operations are unavailable through a destination endpoint")
 }
-func (*scopedExecutor) Snapshot(context.Context, string, string, bool, map[string]string) error {
+func (*scopedExecutor) Snapshot(context.Context, []string, string, map[string]string) error {
 	return fmt.Errorf("source operations are unavailable through a destination endpoint")
 }
 func (*scopedExecutor) DestroySnapshot(context.Context, string) error {

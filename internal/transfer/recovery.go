@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +27,9 @@ type CoalesceResult struct {
 	ReleaseSuperseded bool
 }
 
-// PendingSet coalesces disconnected work independently per source-target pair.
+// PendingSet coalesces disconnected work independently per stream-target pair.
+// A stream is the dataset whose snapshots it sends: a root, or one of its
+// members, each of which keeps its own pending endpoint.
 type PendingSet struct {
 	mu     sync.Mutex
 	jobs   map[string]PendingSnapshot
@@ -124,6 +127,90 @@ func (p *PendingSet) Peek(source, target string) (PendingSnapshot, bool) {
 	defer p.mu.Unlock()
 	snapshot, exists := p.jobs[key]
 	return snapshot, exists
+}
+
+// PeekScope returns pending work for root's own stream, or failing that for the
+// first of its members' streams that has any, so a root's job can name what it
+// carries.
+func (p *PendingSet) PeekScope(root, target string) (PendingSnapshot, bool) {
+	if snapshot, found := p.Peek(root, target); found {
+		return snapshot, true
+	}
+	if _, err := pendingKey(root, target); err != nil {
+		return PendingSnapshot{}, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var keys []string
+	for key := range p.jobs {
+		source, keyTarget, _ := strings.Cut(key, "\x00")
+		if keyTarget == target && strings.HasPrefix(source, root+"/") {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return PendingSnapshot{}, false
+	}
+	slices.Sort(keys)
+	return p.jobs[keys[0]], true
+}
+
+// Reservation is the pending endpoint one stream's attempt carries.
+type Reservation struct {
+	Stream   string
+	Snapshot PendingSnapshot
+}
+
+// BeginStreams reserves each of the request's streams' coalesced pending work
+// and returns the request with those endpoints pinned. Finish ends every
+// reservation, completing each stream that verified the exact endpoint it
+// carried, whether or not the other streams did.
+func (p *PendingSet) BeginStreams(request Request, target string) (Request, []Reservation, error) {
+	streams, err := request.Streams()
+	if err != nil {
+		return request, nil, err
+	}
+	request.Members = slices.Clone(request.Members)
+	var reserved []Reservation
+	for _, stream := range streams {
+		snapshot, found := p.Begin(stream.Dataset, target)
+		if !found {
+			continue
+		}
+		reserved = append(reserved, Reservation{Stream: stream.Dataset, Snapshot: snapshot})
+		if len(request.Members) == 0 {
+			request.Snapshot = snapshot.Name
+			continue
+		}
+		for i := range request.Members {
+			if request.Members[i].Dataset == stream.Dataset {
+				request.Members[i].Snapshot = snapshot.Name
+			}
+		}
+	}
+	return request, reserved, nil
+}
+
+// FinishStreams ends reservations made by BeginStreams against result.
+func (p *PendingSet) FinishStreams(target string, reserved []Reservation, result Result) {
+	verified := make(map[string]string)
+	for _, stream := range StreamResults(result) {
+		if stream.Verified {
+			verified[stream.Plan.Source] = stream.Plan.Snapshot
+		}
+	}
+	for _, reservation := range reserved {
+		snapshot, ok := verified[reservation.Stream]
+		p.End(reservation.Stream, target, reservation.Snapshot, ok && snapshot == reservation.Snapshot.Name)
+	}
+}
+
+// StreamResults returns one result per stream attempted.
+func StreamResults(result Result) []Result {
+	if len(result.Streams) > 0 {
+		return result.Streams
+	}
+	return []Result{result}
 }
 
 // Complete removes work only if it is still the exact item just verified.
@@ -241,9 +328,10 @@ func (r *Roadwarrior) NotBefore() time.Time {
 	return r.notBefore
 }
 
-// Offer coalesces a newly eligible source snapshot while the target is offline.
+// Offer coalesces a newly eligible snapshot, of the root or of one of its
+// members, while the target is offline.
 func (r *Roadwarrior) Offer(snapshot PendingSnapshot) (bool, error) {
-	return r.pending.Offer(r.request.Source, canonicalTarget(r.request), snapshot)
+	return r.pending.Offer(datasetOf(snapshot.Name), canonicalTarget(r.request), snapshot)
 }
 
 // Reconcile resumes durable state first, then sends the newest coalesced or
@@ -257,23 +345,25 @@ func (r *Roadwarrior) Reconcile(ctx context.Context, report Reporter) (RecoveryO
 		// set it, so a caller that shows this outcome as the job's latest state
 		// never shows a retry with no cause.
 		outcome := RecoveryOutcome{Status: "waiting-retry", Reason: r.reason, NotBefore: r.notBefore}
-		if pending, found := r.pending.Peek(r.request.Source, canonicalTarget(r.request)); found {
+		if pending, found := r.pending.PeekScope(r.request.Source, canonicalTarget(r.request)); found {
 			outcome.Pending = pending.Name
 		}
 		return outcome, nil
 	}
-	request := r.request
-	pending, hasPending := r.pending.Begin(request.Source, canonicalTarget(request))
-	completed := false
-	if hasPending {
-		defer func() { r.pending.End(request.Source, canonicalTarget(request), pending, completed) }()
+	target := canonicalTarget(r.request)
+	request, reserved, err := r.pending.BeginStreams(r.request, target)
+	if err != nil {
+		return RecoveryOutcome{Status: "blocked"}, err
 	}
-	if hasPending {
-		request.Snapshot = pending.Name
+	var last Result
+	defer func() { r.pending.FinishStreams(target, reserved, last) }()
+	outcome := RecoveryOutcome{Status: "probing"}
+	if len(reserved) > 0 {
+		outcome.Pending = reserved[0].Snapshot.Name
 	}
-	outcome := RecoveryOutcome{Status: "probing", Pending: request.Snapshot}
 	for attempts := 0; attempts < 2; attempts++ {
 		result, err := r.engine.Apply(ctx, request, report)
+		last = result
 		outcome.Results = append(outcome.Results, result)
 		if err != nil {
 			var temporary interface{ Temporary() bool }
@@ -292,7 +382,6 @@ func (r *Roadwarrior) Reconcile(ctx context.Context, report Reporter) (RecoveryO
 		}
 		r.failures, r.notBefore, r.reason = 0, time.Time{}, ""
 		if result.Plan.Mode != "resume" {
-			completed = hasPending && result.Verified && result.Plan.Snapshot == pending.Name
 			outcome.Status = "succeeded"
 			return outcome, nil
 		}

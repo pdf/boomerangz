@@ -69,7 +69,7 @@ func (e *clientExecutor) InspectDatasetIdentity(ctx context.Context, dataset str
 	if err != nil {
 		return zfs.DatasetIdentity{}, e.client.mapError(err)
 	}
-	return zfs.DatasetIdentity{Name: response.GetName(), Type: zfs.DatasetType(response.GetType()), GUID: response.GetGuid(), Pool: response.GetPool(), PoolGUID: response.GetPoolGuid()}, nil
+	return zfs.DatasetIdentity{Name: response.GetName(), Type: zfs.DatasetType(response.GetType()), GUID: response.GetGuid(), Pool: response.GetPool(), PoolGUID: response.GetPoolGuid(), Placeholder: response.GetPlaceholder()}, nil
 }
 
 func (e *clientExecutor) InspectState(ctx context.Context, dataset string, recursive bool) (zfs.State, error) {
@@ -100,6 +100,11 @@ func (e *clientExecutor) DestroyDataset(ctx context.Context, dataset string, rec
 	return e.client.mapError(err)
 }
 
+func (e *clientExecutor) RenameDataset(ctx context.Context, from, to string) error {
+	_, err := e.client.remote.RenameDataset(ctx, &RenameDatasetRequest{From: from, To: to})
+	return e.client.mapError(err)
+}
+
 func (e *clientExecutor) SetProperties(ctx context.Context, dataset string, properties map[string]string) error {
 	_, err := e.client.remote.SetProperties(ctx, &SetPropertiesRequest{Dataset: dataset, Properties: maps.Clone(properties)})
 	return e.client.mapError(err)
@@ -116,7 +121,7 @@ func (*clientExecutor) GetActivationProperties(context.Context) ([]zfs.Property,
 func (*clientExecutor) GetStoredProperties(context.Context, []string) ([]zfs.Property, error) {
 	return nil, fmt.Errorf("source property queries are unavailable through remote replication RPC")
 }
-func (*clientExecutor) Snapshot(context.Context, string, string, bool, map[string]string) error {
+func (*clientExecutor) Snapshot(context.Context, []string, string, map[string]string) error {
 	return fmt.Errorf("source snapshot mutations are unavailable through remote replication RPC")
 }
 func (*clientExecutor) DestroySnapshot(context.Context, string) error {

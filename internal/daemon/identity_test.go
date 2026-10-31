@@ -38,6 +38,26 @@ func runOf(t *testing.T, subscription *Subscription, job string) []Event {
 	}
 }
 
+// runsOf follows several jobs at once until each reaches a terminal state.
+// Their transitions may share one update, which runOf would cut short.
+func runsOf(t *testing.T, subscription *Subscription, jobs ...string) map[string][]Event {
+	t.Helper()
+	runs := make(map[string][]Event, len(jobs))
+	done := make(map[string]bool, len(jobs))
+	for len(done) < len(jobs) {
+		for _, event := range receive(t, subscription).Transitions {
+			if !slices.Contains(jobs, event.Job) || done[event.Job] {
+				continue
+			}
+			runs[event.Job] = append(runs[event.Job], event)
+			if slices.Contains([]string{"succeeded", "failed", "blocked", "waiting-retry", "cancelled", "scheduled"}, event.State) {
+				done[event.Job] = true
+			}
+		}
+	}
+	return runs
+}
+
 func stateOf(t *testing.T, run []Event, state string) Event {
 	t.Helper()
 	index := slices.IndexFunc(run, func(event Event) bool { return event.State == state })
@@ -107,7 +127,7 @@ func TestLocalTransferNamesWhatItSentAndWhereItLanded(t *testing.T) {
 	job := "local:" + reportSource + ":" + reportDestination
 	newest := snapshotAt(t, source, 4)
 
-	if !runtime.enqueueLocal(reportSource, reportDestination, effective, "") {
+	if !runtime.enqueueLocal(reportSource, reportDestination, effective, nil) {
 		t.Fatal("local job was not accepted")
 	}
 	run := runOf(t, subscription, job)
@@ -123,7 +143,7 @@ func TestLocalTransferNamesWhatItSentAndWhereItLanded(t *testing.T) {
 
 	// A newer snapshot is sent incrementally from the one already received.
 	later := source.addSnapshot(t, 10)
-	if !runtime.enqueueLocal(reportSource, reportDestination, effective, "") {
+	if !runtime.enqueueLocal(reportSource, reportDestination, effective, nil) {
 		t.Fatal("second local job was not accepted")
 	}
 	run = runOf(t, subscription, job)
@@ -153,7 +173,7 @@ func TestTransferRetryNamesThePendingSnapshotItCarried(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !runtime.enqueueLocal(reportSource, reportDestination, effective, "") {
+	if !runtime.enqueueLocal(reportSource, reportDestination, effective, nil) {
 		t.Fatal("local job was not accepted")
 	}
 	run := runOf(t, subscription, job)
@@ -192,7 +212,7 @@ func TestRemoteTransferNamesTheSnapshotItsLastPassLanded(t *testing.T) {
 	runtime, _, source, destination, effective := remoteReportRuntime(t)
 	subscription := subscribe(t, runtime.status)
 	job := "remote:" + reportSource + ":" + reportRemote
-	road, err := runtime.road(reportSource, reportRemote, effective)
+	road, err := runtime.road(reportSource, reportRemote, effective, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +225,7 @@ func TestRemoteTransferNamesTheSnapshotItsLastPassLanded(t *testing.T) {
 	}
 	destination.mu.Lock()
 	destination.inventory = append(destination.inventory, zfs.Dataset{Name: reportDestination, Type: zfs.Filesystem, EncryptionRoot: "-"})
-	destination.identities[reportDestination] = zfs.DatasetIdentity{Name: reportDestination, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: 11}
+	destination.identities[reportDestination] = zfs.DatasetIdentity{Name: reportDestination, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: destination.identities["backup"].PoolGUID}
 	destination.states[reportDestination] = zfs.State{
 		Objects:      []zfs.Object{{Name: reportDestination, Type: "filesystem", GUID: 20, CreateTXG: 20}},
 		ResumeTokens: map[string]string{reportDestination: "1-resume-token"},
@@ -213,7 +233,7 @@ func TestRemoteTransferNamesTheSnapshotItsLastPassLanded(t *testing.T) {
 	destination.mu.Unlock()
 	later := source.addSnapshot(t, 10)
 
-	if !runtime.enqueueRemote(reportSource, reportRemote, effective, "") {
+	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
 		t.Fatal("remote job was not accepted")
 	}
 	run := runOf(t, subscription, job)
@@ -248,7 +268,8 @@ func TestScheduledSnapshotNamesTheSnapshotThatSetTheDeadline(t *testing.T) {
 	properties = append(properties, zfs.Property{Dataset: reportSource, Name: policy.Namespace + "policy", Value: "1x1h", Source: zfs.SourceLocal})
 	effective := policy.Resolve(zfs.Dataset{Name: reportSource, Type: zfs.Filesystem, EncryptionRoot: "-"}, nil, properties, nil)
 
-	if !runtime.enqueueSnapshot(Schedule{Dataset: reportSource, Policy: effective}) {
+	member := ScheduleMember{Dataset: reportSource, Grid: effective.Grid}
+	if !runtime.enqueueSnapshot(Schedule{Dataset: reportSource, Policy: effective, Members: []ScheduleMember{member}, Due: []string{reportSource}}) {
 		t.Fatal("snapshot job was not accepted")
 	}
 	run := runOf(t, subscription, "snapshot:"+reportSource)
@@ -425,7 +446,7 @@ func TestADeactivatedQueuedTransferNamesNoSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !runtime.enqueueLocal(reportSource, reportDestination, effective, "") {
+	if !runtime.enqueueLocal(reportSource, reportDestination, effective, nil) {
 		t.Fatal("local job was not accepted")
 	}
 	runtime.local.RemoveScope(reportSource, "dataset deactivated")
@@ -433,5 +454,75 @@ func TestADeactivatedQueuedTransferNamesNoSnapshot(t *testing.T) {
 	requireOneRun(t, run)
 	if cancelled := stateOf(t, run, "cancelled"); cancelled.Snapshot != "" {
 		t.Fatalf("a transfer removed from its queue named %s; it never took a snapshot", cancelled.Snapshot)
+	}
+}
+
+func TestSnapshotTakesOnlyTheMembersNotAlreadySatisfied(t *testing.T) {
+	t.Parallel()
+	const daily = reportSource + "/daily"
+	source, properties := newReportPool(t)
+	source.inventory = append(source.inventory, zfs.Dataset{Name: daily, Type: zfs.Filesystem, EncryptionRoot: "-"})
+	source.states[daily] = zfs.State{Objects: []zfs.Object{{Name: daily, Type: "filesystem", GUID: 5, CreateTXG: 1}}}
+	now := time.Date(2026, 9, 6, 12, 30, 0, 0, time.UTC)
+	// The member was snapshotted an hour ago, under the root's lineage: its own
+	// daily grid is satisfied, the root's five-minute grid is not.
+	metadata, err := lifecycle.NewMetadata(reportLineage, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Snapshot(t.Context(), []string{daily}, metadata.Name(), metadata.Properties()); err != nil {
+		t.Fatal(err)
+	}
+	runtime, _ := newReportRuntime(t, source, memoryStream{source: source, destination: source})
+	runtime.now = func() time.Time { return now }
+	if err := runtime.management.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		runtime.management.Close()
+		runtime.management.wait.Wait()
+	})
+	subscription := subscribe(t, runtime.status)
+	// No targets, so the run is about which members get a snapshot.
+	properties = slices.DeleteFunc(properties, func(row zfs.Property) bool { return row.Name == policy.Namespace+"local" })
+	properties = append(properties, zfs.Property{Dataset: reportSource, Name: policy.Namespace + "policy", Value: "12x5m", Source: zfs.SourceLocal})
+	effective := policy.Resolve(zfs.Dataset{Name: reportSource, Type: zfs.Filesystem, EncryptionRoot: "-"}, nil, properties, nil)
+	dailyGrid, err := policy.ParseGrid("14x1d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := rootWithMembers(t, reportSource, "12x5m", map[string]string{daily: "14x1d"})
+	entries[0].Policy = effective
+	if _, _, err := runtime.scheduler.Update(entries, now); err != nil {
+		t.Fatal(err)
+	}
+	schedule, found := runtime.scheduler.Lookup(reportSource)
+	if !found {
+		t.Fatal("root was not scheduled")
+	}
+	// As a restarted daemon sees it: every member due, nothing forced.
+	schedule.Due = []string{reportSource, daily}
+	if !runtime.enqueueSnapshot(schedule) {
+		t.Fatal("snapshot job was not accepted")
+	}
+	run := runOf(t, subscription, "snapshot:"+reportSource)
+	succeeded := stateOf(t, run, "succeeded")
+	if !strings.HasPrefix(succeeded.Snapshot, reportSource+"@") {
+		t.Fatalf("succeeded identity = %+v", succeeded.Identity)
+	}
+	// Pruning runs as its own job afterwards, so what is on disk races it; what
+	// the snapshot job asked for does not.
+	source.mu.Lock()
+	calls := slices.Clone(source.snapshotted)
+	source.mu.Unlock()
+	if len(calls) != 2 || !slices.Equal(calls[1], []string{reportSource}) {
+		t.Fatalf("snapshot calls = %q, want the fixture's and then the root alone", calls)
+	}
+	item, _ := runtime.scheduler.entry(reportSource)
+	if got, want := item.members[daily].next, now.Add(-time.Hour).Add(dailyGrid.Cadence()); !got.Equal(want) {
+		t.Fatalf("member deadline = %s, want the one its snapshot sets, %s", got, want)
+	}
+	if got, want := item.members[reportSource].next, now.Add(5*time.Minute); !got.Equal(want) {
+		t.Fatalf("root deadline = %s, want %s", got, want)
 	}
 }

@@ -4,6 +4,7 @@ package transfer_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -105,7 +106,7 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 	}
 	known := map[string]struct{}{"home": {}}
 	effective := policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, known)
-	metadata, err := snapshots.CreateSnapshot(t.Context(), source, false, time.Now().UTC(), effective)
+	metadata, err := snapshots.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC(), effective)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +137,15 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 		if engineErr != nil {
 			t.Fatal(engineErr)
 		}
+		// The guest is both hosts, so the remote receives into this host's own
+		// pool: refused until the caller has validated it as local. Timed
+		// benchmark iterations skip the refusal.
+		if benchmark == nil {
+			if _, loopbackErr := engine.Apply(t.Context(), request, nil); !errors.As(loopbackErr, new(*transfer.HostLocalError)) {
+				t.Fatalf("%s: a remote on this host's own pool was not refused: %v", mode, loopbackErr)
+			}
+		}
+		request.HostLocal = true
 		result, applyErr := engine.Apply(t.Context(), request, nil)
 		if applyErr != nil || !result.Verified {
 			t.Fatalf("%s result=%+v err=%v", mode, result, applyErr)
@@ -204,7 +214,8 @@ func runGuestRemoteTransfers(t testing.TB, benchmark *testing.B) {
 			if openErr != nil {
 				tb.Fatal(openErr)
 			}
-			nativeRequest := transfer.Request{Source: source, DestinationRoot: root, Snapshot: source + "@" + metadata.Name(), Policy: effective, Transport: "native", RemoteName: "home", CanonicalTarget: nativeEndpoint.CanonicalTarget()}
+			// The guest is both hosts; the remote reaches this host's pool.
+			nativeRequest := transfer.Request{Source: source, DestinationRoot: root, Snapshot: source + "@" + metadata.Name(), Policy: effective, Transport: "native", RemoteName: "home", CanonicalTarget: nativeEndpoint.CanonicalTarget(), HostLocal: true}
 			nativeEngine, engineErr := transfer.NewRemote(direct, nativeEndpoint.Executor(), nativeEndpoint.Stream(), installation)
 			if engineErr != nil {
 				tb.Fatal(engineErr)

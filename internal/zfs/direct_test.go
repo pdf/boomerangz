@@ -16,16 +16,30 @@ type fakeRunner struct {
 
 func TestInspectDatasetIdentity(t *testing.T) {
 	t.Parallel()
-	dataset := &fakeRunner{output: []byte("tank/data\tfilesystem\t42\n")}
-	pool := &fakeRunner{output: []byte("tank\tguid\t99\n")}
-	direct := &Direct{runner: dataset, poolRunner: pool}
-	identity, err := direct.InspectDatasetIdentity(t.Context(), "tank/data")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := DatasetIdentity{Name: "tank/data", Type: Filesystem, GUID: 42, Pool: "tank", PoolGUID: 99}
-	if !reflect.DeepEqual(identity, want) {
-		t.Fatalf("identity=%#v want=%#v", identity, want)
+	for _, tc := range []struct {
+		name        string
+		marker      string
+		placeholder bool
+	}{
+		{"unset", "-\t-", false},
+		{"local", "on\tlocal", true},
+		// Replicas received beneath a placeholder inherit its marker.
+		{"inherited", "on\tinherited from tank", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dataset := &fakeRunner{output: []byte("tank/data\ttype\tfilesystem\t-\ntank/data\tguid\t42\t-\ntank/data\t" + PlaceholderProperty + "\t" + tc.marker + "\n")}
+			pool := &fakeRunner{output: []byte("tank\tguid\t99\n")}
+			direct := &Direct{runner: dataset, poolRunner: pool}
+			identity, err := direct.InspectDatasetIdentity(t.Context(), "tank/data")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := DatasetIdentity{Name: "tank/data", Type: Filesystem, GUID: 42, Pool: "tank", PoolGUID: 99, Placeholder: tc.placeholder}
+			if !reflect.DeepEqual(identity, want) {
+				t.Fatalf("identity=%#v want=%#v", identity, want)
+			}
+		})
 	}
 }
 
@@ -150,16 +164,35 @@ func TestSnapshotBuildsDeterministicArguments(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{}
 	direct := &Direct{runner: runner}
-	err := direct.Snapshot(context.Background(), "tank/data", "boomerangz-test", true, map[string]string{
+	// A sparse set: tank/data/hole is deliberately absent, which -r cannot say.
+	err := direct.Snapshot(context.Background(), []string{"tank/data/hole/deep", "tank/data"}, "boomerangz-test", map[string]string{
 		"org.boomerangz:state:snapshot": "abc",
 		"org.boomerangz:state:created":  "now",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "-r", "-o", "org.boomerangz:state:created=now", "-o", "org.boomerangz:state:snapshot=abc", "tank/data@boomerangz-test"}
+	want := []string{"snapshot", "-o", "org.boomerangz:state:created=now", "-o", "org.boomerangz:state:snapshot=abc", "tank/data/hole/deep@boomerangz-test", "tank/data@boomerangz-test"}
 	if !reflect.DeepEqual(runner.args, want) {
 		t.Fatalf("arguments = %#v, want %#v", runner.args, want)
+	}
+}
+
+func TestSnapshotRejectsMalformedSets(t *testing.T) {
+	t.Parallel()
+	for name, datasets := range map[string][]string{
+		"empty":    nil,
+		"repeated": {"tank/data", "tank/data"},
+		"invalid":  {"tank/data", "tank/data@nope"},
+	} {
+		runner := &fakeRunner{}
+		direct := &Direct{runner: runner}
+		if err := direct.Snapshot(context.Background(), datasets, "boomerangz-test", nil); err == nil {
+			t.Errorf("%s: accepted %q", name, datasets)
+		}
+		if runner.args != nil {
+			t.Errorf("%s: runner invoked with %#v", name, runner.args)
+		}
 	}
 }
 
@@ -190,5 +223,26 @@ func TestReseedOperationsUseBoundedArguments(t *testing.T) {
 	}
 	if !reflect.DeepEqual(runner.args, []string{"destroy", "-r", "backup/data"}) {
 		t.Fatalf("destroy args=%v", runner.args)
+	}
+}
+
+func TestStoredPropertiesAreCanonical(t *testing.T) {
+	t.Parallel()
+	rows := []string{
+		"tank/b\torg.boomerangz:local\tbackup\tlocal\n",
+		"tank/a\torg.boomerangz:state:owner\tme\tlocal\n",
+		"tank/a\torg.boomerangz:enabled\ton\tlocal\n",
+	}
+	read := func(lines ...string) []Property {
+		t.Helper()
+		properties, err := (&Direct{runner: &fakeRunner{output: []byte(strings.Join(lines, ""))}}).GetStoredProperties(t.Context(), []string{"tank/a", "tank/b"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return properties
+	}
+	// The same rows in another order are the same stored properties.
+	if a, b := read(rows...), read(rows[2], rows[0], rows[1]); !reflect.DeepEqual(a, b) {
+		t.Fatalf("order changed the result:\n%v\n%v", a, b)
 	}
 }

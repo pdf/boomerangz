@@ -47,9 +47,20 @@ export BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE=$destination_device
 readonly partial_run_banner='PARTIAL RUN - NOT VERIFICATION'
 readonly integration_stages=${BOOMERANGZ_INTEGRATION_STAGES:-}
 readonly integration_filter=${BOOMERANGZ_INTEGRATION_FILTER:-}
+# A shard is one of the parallel CI jobs: it runs whole stages, unfiltered,
+# and the shards CI defines together cover every stage, which a host-safe
+# test checks. It is not a way to narrow a run, so it takes neither of the
+# variables above.
+readonly integration_shard=${BOOMERANGZ_INTEGRATION_SHARD:-}
+if [[ -n $integration_shard && (-n $integration_stages || -n $integration_filter) ]]; then
+	printf 'BOOMERANGZ_INTEGRATION_SHARD runs whole stages and cannot be combined with a stage or test filter\n' >&2
+	exit 1
+fi
 selected_stages=()
 if [[ -n $integration_stages ]]; then
 	IFS=', ' read -r -a selected_stages <<<"$integration_stages"
+elif [[ -n $integration_shard ]]; then
+	IFS=', ' read -r -a selected_stages <<<"$integration_shard"
 fi
 readonly selected_stages
 for requested in ${selected_stages[@]+"${selected_stages[@]}"}; do
@@ -70,6 +81,10 @@ else
 fi
 
 announce_partial_run() {
+	if [[ -n $integration_shard ]]; then
+		printf '=== integration shard: %s (%s) ===\n' "$integration_shard" "$1"
+		return 0
+	fi
 	[[ $partial_run == yes ]] || return 0
 	printf '=== %s (%s) ===\n' \
 		"$partial_run_banner" "$1"
@@ -78,7 +93,7 @@ announce_partial_run() {
 }
 
 stage_selected() {
-	[[ -n $integration_stages ]] || return 0
+	[[ -n $integration_stages || -n $integration_shard ]] || return 0
 	local candidate
 	for candidate in ${selected_stages[@]+"${selected_stages[@]}"}; do
 		[[ $candidate == "$1" ]] && return 0
@@ -126,7 +141,11 @@ run_stage() {
 	local name=$1
 	shift
 	if ! stage_selected "$name"; then
-		printf 'integration stage %s: not selected (%s)\n' "$name" "$partial_run_banner"
+		if [[ -n $integration_shard ]]; then
+			printf 'integration stage %s: run by another shard\n' "$name"
+		else
+			printf 'integration stage %s: not selected (%s)\n' "$name" "$partial_run_banner"
+		fi
 		return 0
 	fi
 	local status=0

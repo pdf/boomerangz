@@ -12,6 +12,8 @@ readonly release_dir=${BOOMERANGZ_RELEASE_DIR:-}
 readonly integration_mode=${BOOMERANGZ_INTEGRATION_MODE:-test}
 readonly integration_stages=${BOOMERANGZ_INTEGRATION_STAGES:-}
 readonly integration_filter=${BOOMERANGZ_INTEGRATION_FILTER:-}
+# One of CI's parallel jobs: whole stages, unfiltered. See run-common.sh.
+readonly integration_shard=${BOOMERANGZ_INTEGRATION_SHARD:-}
 readonly partial_run_banner='PARTIAL RUN - NOT VERIFICATION'
 
 [[ $target =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
@@ -22,15 +24,19 @@ readonly partial_run_banner='PARTIAL RUN - NOT VERIFICATION'
 	printf 'boomerangz integration: invalid mode %q\n' "$integration_mode" >&2
 	exit 1
 }
-if [[ -n $integration_stages || -n $integration_filter ]]; then
+if [[ -n $integration_stages || -n $integration_filter || -n $integration_shard ]]; then
 	[[ $integration_mode == test ]] || {
 		printf 'boomerangz integration: stage and test filters apply to test mode only, not %q\n' \
 			"$integration_mode" >&2
 		exit 1
 	}
 fi
+if [[ -n $integration_shard && (-n $integration_stages || -n $integration_filter) ]]; then
+	printf 'boomerangz integration: a shard runs whole stages and takes no stage or test filter\n' >&2
+	exit 1
+fi
 readonly stage_lister=$repository/test/integration/guest/run-common.sh
-for requested in ${integration_stages//,/ }; do
+for requested in ${integration_stages//,/ } ${integration_shard//,/ }; do
 	"$stage_lister" --list-stages | grep -qxF -- "$requested" || {
 		printf 'boomerangz integration: unknown stage %q; known stages: %s\n' \
 			"$requested" "$("$stage_lister" --list-stages | tr '\n' ' ')" >&2
@@ -45,6 +51,15 @@ readonly target_dir=$repository/test/integration/targets/$target
 }
 # shellcheck source=/dev/null
 source "$target_dir/config.sh"
+# The adapter's vCPU count suits a shared workstation; a dedicated CI runner
+# can give the guest all of its own.
+if [[ -n ${BOOMERANGZ_GUEST_VCPUS:-} ]]; then
+	[[ $BOOMERANGZ_GUEST_VCPUS =~ ^[1-9][0-9]?$ ]] || {
+		printf 'boomerangz integration: invalid BOOMERANGZ_GUEST_VCPUS %q\n' "$BOOMERANGZ_GUEST_VCPUS" >&2
+		exit 1
+	}
+	target_vcpus=$BOOMERANGZ_GUEST_VCPUS
+fi
 
 readonly ssh_port=${BOOMERANGZ_CI_SSH_PORT:-22222}
 run_id=ci-$(printf '%s-%s-%s' "${GITHUB_RUN_ID:-local-$(date +%s)-$RANDOM}" "${GITHUB_RUN_ATTEMPT:-1}" "$target" | sha256sum | cut -c1-16)
@@ -59,11 +74,19 @@ readonly source_image=$run_root/source.qcow2
 readonly destination_image=$run_root/destination.qcow2
 readonly seed_image=$run_root/seed.img
 readonly guest_artifacts=/var/tmp/boomerangz-integration-$run_id
-# Base images are shared across runs rather than re-downloaded per run ID.
-# On CI this is a per-job directory and so always a miss, which is fine - the
-# point is local iteration, where the run root is fresh every time.
+# Base images, and the system images provisioned from them, are shared across
+# runs rather than rebuilt per run ID. CI restores this directory from its
+# cache; locally it persists between runs.
 readonly image_cache=${BOOMERANGZ_IMAGE_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/boomerangz-integration}
 readonly base_image=$image_cache/$target_image_name
+# A provisioned image is keyed by everything that shapes it: the base image
+# and the target's provisioning inputs. It is reused for a week at most, so
+# the guest still picks up kernel and OpenZFS updates without any input
+# changing.
+provisioned_key=$(cat "$target_dir/config.sh" "$target_dir/provision.sh" | sha256sum | cut -c1-16)
+readonly provisioned_key
+readonly provisioned_image=$image_cache/$target-provisioned-$provisioned_key.qcow2
+readonly provisioned_max_age_minutes=$((7 * 24 * 60))
 
 qemu_pid=
 boot_index=0
@@ -92,6 +115,10 @@ record_failure() {
 # that were selected. Say so at both ends of the run, where it cannot be
 # mistaken for the verifying run CI performs.
 announce_partial_run() {
+	if [[ -n $integration_shard ]]; then
+		printf '=== integration shard: %s (%s) ===\n' "$integration_shard" "$1"
+		return 0
+	fi
 	[[ -n $integration_stages || -n $integration_filter ]] || return 0
 	printf '=== %s (%s) ===\n' "$partial_run_banner" "$1"
 	printf 'stages: %s\nfilter: %s\n' \
@@ -197,6 +224,11 @@ start_qemu() {
 	wait_for_ssh
 }
 
+# shellcheck disable=SC2312 # find's status is not the signal; its output is.
+provisioned_fresh() {
+	[[ -f $provisioned_image && -n $(find "$provisioned_image" -mmin -"$provisioned_max_age_minutes" -print) ]]
+}
+
 for name in \
 	target_image_name target_image_url target_image_sha256 target_image_format \
 	target_system_size target_guest_user target_source_device target_destination_device \
@@ -228,7 +260,9 @@ uname -a >"$diagnostics/host-uname.txt"
 # qcow2 backing-file reference to this path, so it must stay readable for the
 # whole run rather than be consumed like scratch.
 mkdir -p "$image_cache"
-if printf '%s  %s\n' "$target_image_sha256" "$base_image" | sha256sum --status --check - 2>/dev/null; then
+if provisioned_fresh; then
+	: # The provisioned image stands alone; the base image is not needed.
+elif printf '%s  %s\n' "$target_image_sha256" "$base_image" | sha256sum --status --check - 2>/dev/null; then
 	printf 'boomerangz integration: reusing cached %s\n' "$target_image_name"
 else
 	download=$(mktemp "$image_cache/.$target_image_name.XXXXXX")
@@ -245,24 +279,43 @@ else
 	# previous file or the complete new one, never a partial download.
 	mv -f -- "$download" "$base_image"
 fi
-"$target_dir/prepare-image.sh" "$base_image" "$system_image" "$target_system_size"
+provisioned=no
+if provisioned_fresh; then
+	printf 'boomerangz integration: reusing provisioned %s\n' "$(basename -- "$provisioned_image")"
+	"$target_dir/prepare-image.sh" "$provisioned_image" "$system_image" "$target_system_size"
+	provisioned=yes
+else
+	"$target_dir/prepare-image.sh" "$base_image" "$system_image" "$target_system_size"
+fi
 qemu-img create -f qcow2 "$source_image" 2G
 qemu-img create -f qcow2 "$destination_image" 2G
 
 ssh-keygen -q -t ed25519 -N '' -f "$private_key"
 "$target_dir/seed.sh" "$seed_image" "$(<"$private_key.pub")" "boomerangz-$run_id" "$target_guest_user"
 
-start_qemu
-ssh_guest "mkdir -p /home/$target_guest_user/integration/target"
-copy_to_guest "$target_dir/provision.sh"
-ssh_guest "mv /home/$target_guest_user/integration/provision.sh /home/$target_guest_user/integration/target/provision.sh"
-ssh_guest "$target_provision_command"
-ssh_guest "$target_poweroff_command" || true
-for _ in {1..60}; do
-	kill -0 "$qemu_pid" 2>/dev/null || break
-	sleep 1
-done
-stop_qemu
+if [[ $provisioned == no ]]; then
+	start_qemu
+	ssh_guest "mkdir -p /home/$target_guest_user/integration/target"
+	copy_to_guest "$target_dir/provision.sh"
+	ssh_guest "mv /home/$target_guest_user/integration/provision.sh /home/$target_guest_user/integration/target/provision.sh"
+	ssh_guest "$target_provision_command"
+	ssh_guest "$target_poweroff_command" || true
+	for _ in {1..60}; do
+		kill -0 "$qemu_pid" 2>/dev/null || break
+		sleep 1
+	done
+	stop_qemu
+	# Flatten the provisioned system into the cache for later runs. Each run
+	# boots it with a fresh seed, so cloud-init treats it as a new instance and
+	# installs that run's key. Renamed into place so a concurrent run sees the
+	# previous image or the complete new one; superseded images are removed.
+	staged=$(mktemp "$image_cache/.$target-provisioned.XXXXXX")
+	qemu-img convert -O qcow2 "$system_image" "$staged"
+	chmod 0444 "$staged"
+	mv -f -- "$staged" "$provisioned_image"
+	find "$image_cache" -maxdepth 1 -name "$target-provisioned-*.qcow2" ! -name "$(basename -- "$provisioned_image")" -delete
+	"$target_dir/prepare-image.sh" "$provisioned_image" "$system_image" "$target_system_size"
+fi
 
 start_qemu
 ssh_guest 'uname -a; cat /etc/os-release; lsblk -o NAME,SIZE,TYPE,SERIAL' >"$diagnostics/guest-environment.txt"
@@ -298,6 +351,7 @@ announce_partial_run start
 ssh_guest "BOOMERANGZ_INTEGRATION_RUN=$run_id BOOMERANGZ_INTEGRATION_MODE=$integration_mode \
  BOOMERANGZ_INTEGRATION_STAGES=$(printf '%q' "$integration_stages") \
  BOOMERANGZ_INTEGRATION_FILTER=$(printf '%q' "$integration_filter") \
+ BOOMERANGZ_INTEGRATION_SHARD=$(printf '%q' "$integration_shard") \
  /home/$target_guest_user/integration/target/run.sh $guest_artifacts $run_id $target_source_device $target_destination_device" | tee "$diagnostics/test-output.txt"
 
 ssh_guest "$target_poweroff_command" || true

@@ -72,6 +72,7 @@ export default defineConfig({
         items: [
           { text: 'General', link: '/operations/' },
           { text: 'Recovery and maintenance', link: '/operations/recovery' },
+          { text: 'Upgrade notes', link: '/operations/upgrading' },
           { text: 'Troubleshooting', link: '/operations/troubleshooting' }
         ]
       },

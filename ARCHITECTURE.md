@@ -27,7 +27,7 @@ over Unix sockets and optional TCP.
   parser and dispatches to the matched command's `Run(env *commandEnvironment)`.
 - [internal/cli/commands.go](internal/cli/commands.go) - the full command
   tree (`daemon`, `status`, `trigger`, `pairing {create,import,list,revoke}`,
-  `ssh-shell` (hidden), `dataset {list,inspect,adopt,reseed,clean}`,
+  `ssh-shell` (hidden), `dataset {list,inspect,adopt,reseed,abort-receive,clean}`,
   `identity recover`, `config {check,show,reload}`, `version`). This is the
   fastest place to see the whole CLI surface at a glance.
 - `boomerangz daemon` (`daemonCommand.Run`) is the long-running service:
@@ -75,7 +75,9 @@ Roughly bottom-up, in dependency order:
   `local.go` (`Local` executor: `Preview`/`Apply`), `binding.go` (verifies a
   source is bound to the correct destination, not just a same-named one),
   `resume.go` (interrupted-receive resume), `reseed.go` (destructive
-  full-resync path), `recovery.go` (`PendingSet` coalescing and the
+  full-resync path, and aborting interrupted receives), `hostlocal.go`
+  (refusing a remote that receives into this host's own pools until it is
+  validated as local), `recovery.go` (`PendingSet` coalescing and the
   `Roadwarrior` reconnect/retry loop for flaky remotes).
 - **replication** - transport implementations sharing one gRPC service
   contract (`proto/boomerangz/replication/v1/remote.proto`):
@@ -125,17 +127,27 @@ Roughly bottom-up, in dependency order:
 argv in [internal/zfs/stream.go](internal/zfs/stream.go), and wired together
 per transfer in [internal/transfer/plan.go](internal/transfer/plan.go).
 
+**Actor roots own their subtrees** ([design/root-actor-scope.md](design/root-actor-scope.md)).
+A dataset is an actor root iff it is enabled and no ancestor is; discovery's
+`markRoots` decides this and sets `CoveredBy` on every other dataset in the
+subtree, `Member` on those the root manages, and `Members` (root first,
+parents before children) on the root. Lineage, owner, target bindings,
+reference proofs and jobs exist only for roots; members carry no
+`state:*` property. Each member keeps its own grid, send options, incremental
+mode, receive overrides and targets; `discard` and `replicate` are the root's.
+Under `replicate=on` the whole subtree is one `-R` stream on the root's policy.
+
 | Property | Resolves to | ZFS effect |
 | --- | --- | --- |
-| `enabled` | `Effective.Enabled` | Gates participation (`lifecycle.ActiveRoot` check in `plan.Build`), not a send flag. |
+| `enabled` | `Effective.Enabled` | Decides actor roots and member sets in discovery; `lifecycle.ActiveRoot` then requires activation set locally on the root itself. Not a send flag. |
 | `policy` (grid) | `Effective.Grid` | Drives which snapshot gets sent (scheduler/pruning), not send flags. |
 | `large_blocks` | `Send.LargeBlocks` | `-L` |
 | `compressed` | `Send.Compressed` | `-c` |
 | `raw` | `Send.Raw` | `-w`; defaults to `on` for encrypted datasets (resolve.go:89-91) |
 | `props` | `Send.Props` | `-p`; forced `on` when `replicate=on` (resolve.go:128-130) |
-| `replicate` | `Send.Replicate` | `-R` |
+| `replicate` | `Send.Replicate` | `-R` on the root's one stream; otherwise one stream per member. Root only. |
 | `incremental` | `all`/`latest` | Chooses `-I` vs `-i` in `plan.Build` (plan.go:431-435) |
-| `discard` | `off`/`first`/`all` | Receive-side `-d`/`-e` via `MapReceiveDataset`/`receiveArgs` (stream.go:158-171) |
+| `discard` | `off`/`first`/`all` | Maps the root's destination (`Request.mapped`); every stream then receives exactly into its root-relative path beneath it. Root only. |
 | `set_prop:<name>` | `SetProperties[name]` | Receive-side `-o name=value` |
 | `ignore_prop:<name>` | `IgnoreProperties` | Receive-side `-x name` |
 
@@ -173,11 +185,15 @@ Implications for correct receive behavior:
 - **`set_prop` beats `ignore_prop` on conflict**: a key in both loses its
   `IgnoreProperties` entry with a warning, and only `set_prop`'s `-o`
   survives (resolve.go:209-215).
-- **`discard` changes the destination path, not just a flag**, via
-  `MapReceiveDataset` (`first` strips the source's leading component, `all`
-  keeps only the last). `plan.Build` re-derives this mapping from current
-  inventory on every plan rather than trusting a cached value, since a wrong
-  mapping can misroute an entire dataset tree.
+- **`discard` changes the destination path, not just a flag**. It maps the
+  root (`first` strips the source's leading component, `all` keeps only the
+  last); each member lands at its path relative to the root beneath that.
+  The planner computes every destination and receives into it exactly
+  (`ReceiveExact`), never passing `-d`/`-e`: receive deriving a member's
+  destination from its own name would put it beside the root's replica
+  under `discard=all`. `plan.Build` re-derives the mapping on every plan
+  rather than trusting a cached value, since a wrong mapping can misroute an
+  entire dataset tree.
 - **`canmount` gets an implicit safety default**: unless
   `set_prop:canmount` is explicit, filesystem receives get
   `canmount=noauto` injected (plan.go:360-364), layered on top of `-u`.
@@ -213,7 +229,7 @@ ZFS-native recovery/ownership state - there is no separate database.
 | `state:lineage` | Same as above | Per-root lineage UUID, shared by the root's owned snapshots ([internal/lifecycle/ownership.go](internal/lifecycle/ownership.go), `LineageProperty`). |
 | `state:snapshot` | `lifecycle.Metadata.Properties()` at snapshot creation | Per-snapshot UUID embedded on the snapshot itself, not the dataset. |
 | `state:created` | Same as above | RFC3339Nano creation timestamp, also embedded per snapshot. |
-| `state:reference:<target-id>:<snapshot-uuid>` | `Service.ProtectSet` | JSON `Reference` proof binding a hold/bookmark pair to a proven source snapshot for one replication target ([internal/lifecycle/reference.go](internal/lifecycle/reference.go)). |
+| `state:reference:<target-id>:<stream-id>:<snapshot-uuid>` | `Service.ProtectSet` | JSON `Reference` proof for one stream's endpoint on one target: the stream's own snapshot, plus its descendants' for a `-R` stream, each held and later bookmarked ([internal/lifecycle/reference.go](internal/lifecycle/reference.go)). One per member stream, so members at different instants advance independently. |
 | `state:target:<target-id>` | `transfer` binding logic | JSON `TargetBinding` recording a source's persistent identity for one configured destination ([internal/transfer/binding.go](internal/transfer/binding.go)). |
 | `state:target:<target-id>:suspended` | `transfer.SetTargetSuspended` | Marks a target unverified/suspended pending adoption revalidation. |
 | `state:inactive` | `Service.ReconcileInactive` | JSON `InactiveMarker` recording when an owned root first went inactive, for delayed retirement ([internal/lifecycle/inactive.go](internal/lifecycle/inactive.go)). |
@@ -279,18 +295,22 @@ Cross-cutting rules that hold across all of these:
 
 ## Scheduler behavior (`internal/daemon/scheduler.go`)
 
-`Scheduler` tracks one `deadline{policy, cadence, next, pending}` per
-schedulable root, independent of `discovery`'s periodic scans. It is a plain
+`Scheduler` tracks one `deadline{policy, members, order, replicate, pending}`
+per schedulable root, with a `memberDeadline{grid, cadence, next}` for each
+member, independent of `discovery`'s periodic scans. A root's deadline is its
+earliest member's; a fired root is due for exactly the members whose own
+deadlines have passed. A replication root has one timed member, itself, and
+is due for its whole subtree whenever it fires. It is a plain
 mutex-guarded map plus a broadcast `wake` channel (closed and replaced on
 every mutation - `signal()` - to release whichever goroutine is blocked in
 `Next`).
 
 - **Schedulability** (`isSchedulable`): a discovery entry qualifies only if
-  it is not covered by an ancestor root (`CoveredBy == ""`), was actually
-  inspected, has policy `Enabled` and `Valid()` (no parse errors), has no
-  active lifecycle transition (`lifecycle.ActiveRoot(...) == nil`), and its
-  retention grid has a positive `Cadence()`. Anything else is silently
-  excluded from scheduling, not errored.
+  it is an actor root (`CoveredBy == ""`), was actually inspected, has policy
+  `Enabled` and `Valid()` (no parse errors), and passes
+  `lifecycle.ActiveRoot`; `Update` then drops a root none of whose members
+  has a positive `Cadence()`. Anything else is silently excluded from
+  scheduling, not errored.
 - **`Update(entries, now)`** is called after every completed discovery
   generation (`Runtime.applyGeneration`, runtime.go:452). It atomically
   replaces the whole entry set: a root whose cadence is unchanged from the
@@ -313,21 +333,23 @@ every mutation - `signal()` - to release whichever goroutine is blocked in
   while true, `Next` will never re-select that dataset, so exactly one
   snapshot job can be in flight per root at a time. Only `Complete` or
   `Retry` clear it.
-- **`Complete(dataset, completed)`**: called after a snapshot actually
-  lands (runtime.go:655). Sets `pending = false` and `next = completed +
-  cadence` - deliberately anchored to actual completion time, not the
+- **`Complete(dataset, due, completed, deferred)`**: called after a
+  snapshot actually lands. Sets `pending = false`, advances each due member
+  to `completed + cadence`, and moves each deferred member to the deadline
+  its newest snapshot already sets - deliberately anchored to actual
+  completion time, not the
   original deadline, so a run that starts late doesn't cause the next one
   to fire early, and so missed periods (daemon was down, dataset was
   blocked) are coalesced into a single catch-up snapshot rather than
   replayed as a backlog burst.
 - **`Retry(dataset, notBefore)`**: called on every non-success path out of
-  `enqueueSnapshot` (gate admission failure, job-queue drop, stale-deadline
-  re-check, `CreateSnapshot` error) to clear `pending` and push `next` out
-  to a backoff time, usually `now + ReconcileInterval` or `now + 1s` for
+  `enqueueSnapshot` (gate admission failure, job-queue drop, `CreateSnapshot`
+  error) to clear `pending` and push members already due out to a backoff
+  time, leaving members due later alone, usually `now + ReconcileInterval` or `now + 1s` for
   queue drops. This is the mechanism that turns a single missed attempt
   back into a live, re-selectable entry instead of a stuck root.
-- **`Lookup(dataset)`** (used by `Runtime.Trigger`, runtime.go:1191) returns
-  a `Schedule` without touching `pending`, so manual triggers and the
+- **`Lookup(dataset)`** (used by `Runtime.Trigger`) returns a `Schedule`
+  with every member due, without touching `pending`, so manual triggers and the
   timer-driven path can both produce a `Schedule` for the same dataset
   concurrently; `Trigger` sets `Schedule.Force = true` on the result.
   `Force` bypasses the deadline re-check in `enqueueSnapshot` (send the
@@ -336,10 +358,10 @@ every mutation - `signal()` - to release whichever goroutine is blocked in
   since a manual trigger's caller is expected to retry deliberately rather
   than have the scheduler silently reschedule it.
 - **Double-checked deadline at execution time**: `enqueueSnapshot`
-  (runtime.go:616) re-derives the true next-due time from ZFS state itself
-  via `nextOwnedSnapshot` (latest owned snapshot's creation time + cadence,
-  or the zero time if the root has no authoritative snapshot yet) and skips
-  creating a snapshot (rescheduling instead) if that still isn't due. This
+  re-derives each due member's true next-due time from ZFS state itself via
+  `satisfiedMembers` (that member's latest owned snapshot's creation time +
+  its own cadence) and leaves out, deferring, every member that still isn't
+  due; if none is, it creates nothing and reports `scheduled`. This
   makes the in-memory `Scheduler` an optimization/wakeup mechanism rather
   than the source of truth - ZFS-recorded snapshot ownership is what
   actually gates snapshot creation, so drift between the scheduler's `next`

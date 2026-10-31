@@ -22,13 +22,17 @@ This example assumes the recommended `discard=first` layout, where
 
 ```sh
 sudo zfs allow -u boomerangz \
-  canmount,create,destroy,mount,receive:append,userprop \
+  canmount,create,destroy,mount,receive:append,rename,userprop \
   backup/boomerangz
 ```
 
 Add receive-property permissions only for properties you explicitly configure.
 Boomerangz uses `receive:append`, not the broader `receive` permission, because
-it never requests a forced rollback with `zfs receive -F`.
+it never requests a forced rollback with `zfs receive -F`. `rename` lets it
+replace an empty placeholder it created for an excluded dataset, or for a root
+only its members sent to, once that dataset's own replica arrives: it moves the
+placeholder aside, receives the replica in its place, and moves the replicas
+that were beneath the placeholder back beneath the replica.
 For `discard=off`, the configured receive dataset starts absent and can be
 destroyed by reseed, so grant the same permissions on its existing parent. See
 [Receive path mapping](/reference/properties#receive-path-mapping).

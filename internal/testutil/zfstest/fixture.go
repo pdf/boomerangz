@@ -105,6 +105,17 @@ func destroyTree(ctx context.Context, dataset string) error {
 	return nil
 }
 
+// Subtree names root and every filesystem and volume beneath it: the member
+// set a replication root snapshots, since its one stream carries all of them.
+func Subtree(tb testing.TB, root string) []string {
+	tb.Helper()
+	output, err := exec.CommandContext(tb.Context(), "zfs", "list", "-H", "-o", "name", "-t", "filesystem,volume", "-r", root).CombinedOutput()
+	if err != nil {
+		tb.Fatalf("guest zfs list %s: %v: %s", root, err, output)
+	}
+	return strings.Fields(string(output))
+}
+
 func fixtureCommand(tb testing.TB, args ...string) {
 	tb.Helper()
 	if output, err := exec.CommandContext(tb.Context(), "zfs", args...).CombinedOutput(); err != nil {

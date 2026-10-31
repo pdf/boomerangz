@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,6 +54,8 @@ type Direct struct {
 	runner         CommandRunner
 	poolRunner     CommandRunner
 	identityRunner CommandRunner
+	// batch overrides inspectionBatch, so tests can split a small inventory.
+	batch int
 }
 
 // NewDirect creates a direct executor for an explicit zfs executable path.
@@ -90,31 +93,46 @@ func (d *Direct) InspectDatasetIdentity(ctx context.Context, dataset string) (Da
 	if err := validateDataset(dataset); err != nil {
 		return result, err
 	}
-	output, err := d.runner.Run(ctx, "list", "-H", "-p", "-d", "0", "-t", "filesystem,volume", "-o", "name,type,guid", dataset)
+	// zfs get, unlike zfs list, reports where the placeholder marker comes
+	// from: a placeholder's own marker is local, and the replicas received
+	// beneath it inherit it.
+	output, err := d.runner.Run(ctx, "get", "-H", "-p", "-t", "filesystem,volume", "-o", "name,property,value,source", "type,guid,"+PlaceholderProperty, dataset)
 	if err != nil {
 		return result, err
 	}
-	err = parseTable(output, 3, func(fields []string) error {
-		if result.Name != "" || fields[0] != dataset {
+	seen := make(map[string]bool, 3)
+	err = parseTable(output, 4, func(fields []string) error {
+		if fields[0] != dataset || seen[fields[1]] {
 			return fmt.Errorf("unexpected dataset identity row %q", fields[0])
 		}
-		typeName := DatasetType(fields[1])
-		if typeName != Filesystem && typeName != Volume {
-			return fmt.Errorf("unsupported dataset type %q", fields[1])
+		seen[fields[1]] = true
+		switch fields[1] {
+		case "type":
+			typeName := DatasetType(fields[2])
+			if typeName != Filesystem && typeName != Volume {
+				return fmt.Errorf("unsupported dataset type %q", fields[2])
+			}
+			result.Type = typeName
+		case "guid":
+			guid, parseErr := strconv.ParseUint(fields[2], 10, 64)
+			if parseErr != nil || guid == 0 {
+				return fmt.Errorf("invalid dataset GUID")
+			}
+			result.GUID = guid
+		case PlaceholderProperty:
+			result.Placeholder = fields[3] == string(SourceLocal) && fields[2] == "on"
+		default:
+			return fmt.Errorf("unexpected dataset identity property %q", fields[1])
 		}
-		guid, parseErr := strconv.ParseUint(fields[2], 10, 64)
-		if parseErr != nil || guid == 0 {
-			return fmt.Errorf("invalid dataset GUID")
-		}
-		result.Name, result.Type, result.GUID = fields[0], typeName, guid
 		return nil
 	})
 	if err != nil {
 		return DatasetIdentity{}, err
 	}
-	if result.Name == "" {
+	if result.Type == "" || result.GUID == 0 {
 		return DatasetIdentity{}, fmt.Errorf("dataset identity is missing")
 	}
+	result.Name = dataset
 	result.Pool, _, _ = strings.Cut(dataset, "/")
 	if d.poolRunner == nil {
 		return DatasetIdentity{}, fmt.Errorf("pool identity query is unavailable")
@@ -234,21 +252,31 @@ func parseProperties(output []byte) ([]Property, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Canonical, like an inspection: a dataset's stored properties are
+	// compared across scans, and ZFS promises no order for user properties.
+	slices.SortFunc(properties, compareProperties)
 	return properties, nil
 }
 
 // Snapshot creates a snapshot with validated internal properties.
-func (d *Direct) Snapshot(ctx context.Context, dataset, snapshot string, recursive bool, properties map[string]string) error {
-	if err := validateDataset(dataset); err != nil {
-		return err
+func (d *Direct) Snapshot(ctx context.Context, datasets []string, snapshot string, properties map[string]string) error {
+	if len(datasets) == 0 {
+		return fmt.Errorf("snapshot requires at least one dataset")
 	}
 	if err := validateComponent("snapshot", snapshot); err != nil {
 		return err
 	}
-	args := []string{"snapshot"}
-	if recursive {
-		args = append(args, "-r")
+	seen := make(map[string]bool, len(datasets))
+	for _, dataset := range datasets {
+		if err := validateDataset(dataset); err != nil {
+			return err
+		}
+		if seen[dataset] {
+			return fmt.Errorf("snapshot set repeats dataset %q", dataset)
+		}
+		seen[dataset] = true
 	}
+	args := []string{"snapshot"}
 	keys := make([]string, 0, len(properties))
 	for key := range properties {
 		if !strings.HasPrefix(key, propertyNamespace) {
@@ -260,7 +288,14 @@ func (d *Direct) Snapshot(ctx context.Context, dataset, snapshot string, recursi
 	for _, key := range keys {
 		args = append(args, "-o", key+"="+properties[key])
 	}
-	_, err := d.runner.Run(ctx, append(args, dataset+"@"+snapshot)...)
+	// One invocation, so the whole set shares a transaction group. Names are
+	// ordered for a reproducible command line, not because ZFS requires it.
+	names := make([]string, 0, len(datasets))
+	for _, dataset := range datasets {
+		names = append(names, dataset+"@"+snapshot)
+	}
+	sort.Strings(names)
+	_, err := d.runner.Run(ctx, append(args, names...)...)
 	return err
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -334,4 +335,379 @@ func TestEncryptedReplicationDescendant(t *testing.T) {
 			}
 		})
 	}
+}
+
+func rootFixture(t *testing.T, datasets []string, properties ...zfs.Property) (*fakeReader, *Generation) {
+	t.Helper()
+	f := &fakeReader{}
+	for _, name := range datasets {
+		f.datasets = append(f.datasets, zfs.Dataset{Name: name, Type: zfs.Filesystem, EncryptionRoot: "-"})
+	}
+	f.properties = properties
+	s, err := New(f, Options{BatchSize: 8, Remotes: []string{"offsite"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.Scan(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, g
+}
+
+func local(dataset, key, value string) zfs.Property {
+	return zfs.Property{Dataset: dataset, Name: policy.Namespace + key, Value: value, Source: zfs.SourceLocal}
+}
+
+func TestRootOwnsSparseSubtree(t *testing.T) {
+	t.Parallel()
+	_, g := rootFixture(t,
+		[]string{"tank", "tank/root", "tank/root/first", "tank/root/first/second", "tank/root/first/other", "tank/root/kept"},
+		local("tank/root", "enabled", "on"),
+		local("tank/root", "local", "backup"),
+		local("tank/root/first", "enabled", "off"),
+		local("tank/root/first/second", "enabled", "on"),
+	)
+	root, _ := g.Inspect("tank/root")
+	if root.CoveredBy != "" || root.Member {
+		t.Fatalf("root is covered: %#v", root)
+	}
+	if want := []string{"tank/root", "tank/root/first/second", "tank/root/kept"}; !slices.Equal(root.Members, want) {
+		t.Fatalf("members = %q, want %q", root.Members, want)
+	}
+	for name, member := range map[string]bool{
+		"tank/root/first":        false,
+		"tank/root/first/other":  false,
+		"tank/root/first/second": true,
+		"tank/root/kept":         true,
+	} {
+		entry, _ := g.Inspect(name)
+		// Coverage is ownership: every dataset inside the root names it,
+		// member or not, so none can be scheduled or operated on alone.
+		if entry.CoveredBy != "tank/root" || entry.Member != member || len(entry.Members) != 0 {
+			t.Errorf("%s: covered by %q, member %t, members %q", name, entry.CoveredBy, entry.Member, entry.Members)
+		}
+		if err := entry.ErrCovered(); err == nil {
+			t.Errorf("%s: not refused as an independent root", name)
+		}
+		if !entry.Inspected {
+			t.Errorf("%s: a root's subtree must be inspected", name)
+		}
+	}
+	// A locally enabled dataset beneath an enabled one is a member, not the
+	// independent peer root it would have been when activation alone decided.
+	second, _ := g.Inspect("tank/root/first/second")
+	if second.Policy.Values[policy.Namespace+"enabled"].Dataset != "tank/root/first/second" {
+		t.Fatal("fixture: second should hold its own activation")
+	}
+}
+
+func TestMembersSendWithTheirOwnOptionsUnderTheRootsMapping(t *testing.T) {
+	t.Parallel()
+	_, g := rootFixture(t,
+		[]string{"tank", "tank/root", "tank/root/raw", "tank/root/tree"},
+		local("tank/root", "enabled", "on"),
+		local("tank/root", "local", "backup"),
+		local("tank/root", "discard", "first"),
+		local("tank/root/raw", "raw", "on"),
+		local("tank/root/raw", "remote", "offsite"),
+		local("tank/root/tree", "replicate", "on"),
+		local("tank/root/tree", "discard", "all"),
+	)
+	raw, _ := g.Inspect("tank/root/raw")
+	if !raw.Member || !raw.Policy.Send.Raw || !slices.Contains(raw.Policy.Remote, "offsite") || len(raw.Policy.Warnings) != 0 {
+		t.Fatalf("member options were not honoured: %#v", raw.Policy)
+	}
+	tree, _ := g.Inspect("tank/root/tree")
+	if !tree.Member || tree.Policy.Send.Replicate || !tree.Policy.Requested.Replicate {
+		t.Fatalf("a member's replicate must be ignored, not honoured: %#v", tree.Policy)
+	}
+	if tree.Policy.Discard != policy.DiscardFirst {
+		t.Fatalf("a member's discard must follow the root: %v", tree.Policy.Discard)
+	}
+	if len(tree.Policy.Warnings) != 2 {
+		t.Fatalf("expected replicate and discard warnings, got %q", tree.Policy.Warnings)
+	}
+}
+
+func TestInvalidPoliciesDoNotReleaseOwnership(t *testing.T) {
+	t.Parallel()
+	_, g := rootFixture(t,
+		[]string{"tank", "tank/root", "tank/root/broken", "tank/root/broken/below", "tank/bad", "tank/bad/child"},
+		local("tank/root", "enabled", "on"),
+		local("tank/root", "local", "backup"),
+		local("tank/root/broken", "remote", "missing"),
+		local("tank/bad", "enabled", "on"),
+		local("tank/bad", "remote", "missing"),
+		local("tank/bad/child", "enabled", "on"),
+		local("tank/bad/child", "remote", "offsite"),
+	)
+	root, _ := g.Inspect("tank/root")
+	broken, _ := g.Inspect("tank/root/broken")
+	if broken.Member || broken.CoveredBy != "tank/root" || slices.Contains(root.Members, "tank/root/broken") {
+		t.Fatalf("an invalid member was kept: %#v", broken)
+	}
+	if !slices.ContainsFunc(root.Policy.Warnings, func(w string) bool { return strings.Contains(w, "tank/root/broken") }) {
+		t.Fatalf("the root does not say which member it dropped: %q", root.Policy.Warnings)
+	}
+	// broken inherits its invalid remote into below, so it is excluded too.
+	below, _ := g.Inspect("tank/root/broken/below")
+	if below.Member || below.CoveredBy != "tank/root" {
+		t.Fatalf("below: %#v", below)
+	}
+	// An invalid root keeps its subtree; its valid child does not become a
+	// root that fixing the parent would then have to absorb.
+	child, _ := g.Inspect("tank/bad/child")
+	if child.CoveredBy != "tank/bad" || !child.Member {
+		t.Fatalf("an invalid root released its child: %#v", child)
+	}
+}
+
+func TestReplicationRootCarriesDisabledDescendants(t *testing.T) {
+	t.Parallel()
+	_, g := rootFixture(t,
+		[]string{"tank", "tank/tree", "tank/tree/off", "tank/tree/off/deep"},
+		local("tank/tree", "enabled", "on"),
+		local("tank/tree", "replicate", "on"),
+		local("tank/tree", "local", "backup"),
+		local("tank/tree/off", "enabled", "off"),
+	)
+	root, _ := g.Inspect("tank/tree")
+	if want := []string{"tank/tree", "tank/tree/off", "tank/tree/off/deep"}; !slices.Equal(root.Members, want) {
+		t.Fatalf("members = %q, want %q", root.Members, want)
+	}
+	off, _ := g.Inspect("tank/tree/off")
+	if !off.Member || len(off.Policy.Warnings) != 1 || !strings.Contains(off.Policy.Warnings[0], "although it is disabled here") {
+		t.Fatalf("an excluded descendant under -R needs its own warning, not a governs-differing one: %q", off.Policy.Warnings)
+	}
+}
+
+func collisionScan(t *testing.T, destinations map[string]RemoteDestination, datasets []string, properties ...zfs.Property) *Generation {
+	t.Helper()
+	f := &fakeReader{properties: properties}
+	for _, name := range datasets {
+		f.datasets = append(f.datasets, zfs.Dataset{Name: name, Type: zfs.Filesystem, EncryptionRoot: "-"})
+	}
+	s, err := New(f, Options{BatchSize: 8, Remotes: []string{"near", "far", "unknown"}, Destinations: destinations})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.Scan(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// requireCollision requires root to stay valid with exactly target blocked, for
+// a reason naming other.
+func requireCollision(t *testing.T, g *Generation, root, target string, remote bool, other string) {
+	t.Helper()
+	entry, _ := g.Inspect(root)
+	if !entry.Policy.Valid() {
+		t.Errorf("%s should stay valid, with only its target blocked: %q", root, entry.Policy.Errors)
+	}
+	err := entry.ErrBlocked(target, remote)
+	if err == nil || !strings.Contains(err.Error(), other) {
+		t.Errorf("%s should be blocked from %s, naming %s: %v (blocked %+v)", root, target, other, err, entry.Blocked)
+	}
+}
+
+// requireUnblocked requires root to be valid with no target blocked.
+func requireUnblocked(t *testing.T, g *Generation, root string) {
+	t.Helper()
+	if entry, _ := g.Inspect(root); !entry.Policy.Valid() || len(entry.Blocked) != 0 {
+		t.Errorf("%s should be valid and unblocked: errors %q, blocked %+v", root, entry.Policy.Errors, entry.Blocked)
+	}
+}
+
+func TestCollidingReplicasBlockTheirTargets(t *testing.T) {
+	t.Parallel()
+	datasets := []string{"tank", "tank/a", "tank/a/home", "tank/a/home/docs", "tank/b", "tank/b/home", "tank/c", "tank/c/data", "tank/x", "tank/x/data", "backup"}
+	enabled := func(root string, extra ...string) []zfs.Property {
+		rows := []zfs.Property{local(root, "enabled", "on")}
+		for i := 0; i+1 < len(extra); i += 2 {
+			rows = append(rows, local(root, extra[i], extra[i+1]))
+		}
+		return rows
+	}
+	t.Run("equal leaves under discard=all", func(t *testing.T) {
+		t.Parallel()
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "all")...)
+		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
+		g := collisionScan(t, nil, datasets, rows...)
+		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
+		requireCollision(t, g, "tank/b/home", "backup", false, "tank/a/home")
+	})
+	t.Run("one replica inside another", func(t *testing.T) {
+		t.Parallel()
+		// tank/c/data maps to backup/c/data under discard=first; tank/x/data
+		// to backup/c/data/data under discard=all from backup/c/data.
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/c/data", "local", "backup", "discard", "first")...)
+		rows = append(rows, enabled("tank/x/data", "local", "backup/c/data", "discard", "all")...)
+		g := collisionScan(t, nil, datasets, rows...)
+		requireCollision(t, g, "tank/c/data", "backup", false, "tank/x/data")
+		requireCollision(t, g, "tank/x/data", "backup/c/data", false, "tank/c/data")
+	})
+	t.Run("disjoint siblings", func(t *testing.T) {
+		t.Parallel()
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "first")...)
+		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "first")...)
+		g := collisionScan(t, nil, datasets, rows...)
+		requireUnblocked(t, g, "tank/a/home")
+		requireUnblocked(t, g, "tank/b/home")
+	})
+	t.Run("one root's own targets", func(t *testing.T) {
+		t.Parallel()
+		// backup/home and backup/home/home: reseeding the first would
+		// destroy the second.
+		g := collisionScan(t, nil, datasets, enabled("tank/a/home", "local", "backup,backup/home", "discard", "all")...)
+		requireCollision(t, g, "tank/a/home", "backup", false, "backup/home/home")
+		requireCollision(t, g, "tank/a/home", "backup/home", false, "backup/home")
+	})
+	t.Run("replica inside an actor root", func(t *testing.T) {
+		t.Parallel()
+		// Received replicas would inherit tank/a's activation and be
+		// snapshotted as its members.
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a")...)
+		rows = append(rows, enabled("tank/c/data", "local", "tank/a/home", "discard", "all")...)
+		g := collisionScan(t, nil, datasets, rows...)
+		requireCollision(t, g, "tank/c/data", "tank/a/home", false, "actor root tank/a")
+		requireUnblocked(t, g, "tank/a")
+	})
+	t.Run("a member's target", func(t *testing.T) {
+		t.Parallel()
+		// Only a member sends to backup, but its replica lives under its
+		// root's, so the roots collide.
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "discard", "all")...)
+		rows = append(rows, local("tank/a/home/docs", "local", "backup"))
+		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
+		g := collisionScan(t, nil, datasets, rows...)
+		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
+		requireCollision(t, g, "tank/b/home", "backup", false, "tank/a/home")
+	})
+	t.Run("remotes sharing a namespace", func(t *testing.T) {
+		t.Parallel()
+		destinations := map[string]RemoteDestination{
+			"near": {Namespace: "ssh://host:22", Root: "pool/backup"},
+			"far":  {Namespace: "ssh://host:22", Root: "pool/backup"},
+		}
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "remote", "near", "discard", "all")...)
+		rows = append(rows, enabled("tank/b/home", "remote", "far", "discard", "all")...)
+		g := collisionScan(t, destinations, datasets, rows...)
+		requireCollision(t, g, "tank/a/home", "near", true, "remote far")
+		requireCollision(t, g, "tank/b/home", "far", true, "remote near")
+	})
+	t.Run("remotes in different namespaces", func(t *testing.T) {
+		t.Parallel()
+		destinations := map[string]RemoteDestination{
+			"near": {Namespace: "ssh://host:22", Root: "pool/backup"},
+			"far":  {Namespace: "native://other:9000", Root: "pool/backup"},
+		}
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "remote", "near", "discard", "all")...)
+		rows = append(rows, enabled("tank/b/home", "remote", "far", "discard", "all")...)
+		// A local target at the same path is a different namespace too.
+		rows = append(rows, enabled("tank/c/data", "local", "pool/backup", "discard", "all")...)
+		g := collisionScan(t, destinations, datasets, rows...)
+		requireUnblocked(t, g, "tank/a/home")
+		requireUnblocked(t, g, "tank/b/home")
+	})
+	// bound records a stored binding proving root's replica at mapped on a
+	// local target.
+	bound := func(root, target, mapped string) zfs.Property {
+		return local(root, "state:target:"+target, `{"version":1,"transport":"local","destination_root":"`+target+`","mapped_dataset":"`+mapped+`"}`)
+	}
+	t.Run("an established replica keeps its target", func(t *testing.T) {
+		t.Parallel()
+		// tank/a/home has been replicating to backup/home; tank/b/home is
+		// new configuration that would land on the same dataset.
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "all")...)
+		rows = append(rows, bound("tank/a/home", "backup", "backup/home"))
+		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
+		g := collisionScan(t, nil, datasets, rows...)
+		requireUnblocked(t, g, "tank/a/home")
+		requireCollision(t, g, "tank/b/home", "backup", false, "tank/a/home")
+	})
+	t.Run("a binding elsewhere proves nothing here", func(t *testing.T) {
+		t.Parallel()
+		// The stored binding is for a different mapping, so neither side is
+		// established at backup/home.
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "all")...)
+		rows = append(rows, bound("tank/a/home", "backup", "backup/a/home"))
+		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
+		g := collisionScan(t, nil, datasets, rows...)
+		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
+		requireCollision(t, g, "tank/b/home", "backup", false, "tank/a/home")
+	})
+	t.Run("both established", func(t *testing.T) {
+		t.Parallel()
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "local", "backup", "discard", "all")...)
+		rows = append(rows, bound("tank/a/home", "backup", "backup/home"))
+		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
+		rows = append(rows, bound("tank/b/home", "backup", "backup/home"))
+		g := collisionScan(t, nil, datasets, rows...)
+		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
+		requireCollision(t, g, "tank/b/home", "backup", false, "tank/a/home")
+	})
+	t.Run("only the colliding target is blocked", func(t *testing.T) {
+		t.Parallel()
+		destinations := map[string]RemoteDestination{"near": {Namespace: "ssh://host:22", Root: "pool/backup"}}
+		var rows []zfs.Property
+		rows = append(rows, enabled("tank/a/home", "local", "backup", "remote", "near", "discard", "all")...)
+		rows = append(rows, enabled("tank/b/home", "local", "backup", "discard", "all")...)
+		g := collisionScan(t, destinations, datasets, rows...)
+		requireCollision(t, g, "tank/a/home", "backup", false, "tank/b/home")
+		if entry, _ := g.Inspect("tank/a/home"); entry.ErrBlocked("near", true) != nil {
+			t.Errorf("the remote target was blocked by a collision on another: %+v", entry.Blocked)
+		}
+	})
+}
+
+func TestRemoteDestinationOfCanonicalTargets(t *testing.T) {
+	t.Parallel()
+	for canonical, want := range map[string]RemoteDestination{
+		"ssh://replicator@Backup.Example.net:22/pool/data": {Namespace: "ssh://backup.example.net:22", Root: "pool/data"},
+		"native://10.0.0.5:9443/tank/replicas":             {Namespace: "native://10.0.0.5:9443", Root: "tank/replicas"},
+	} {
+		got, err := RemoteDestinationOf(canonical)
+		if err != nil || got != want {
+			t.Errorf("%s: got %+v err %v, want %+v", canonical, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "ssh:///pool", "ssh://host:22/", "pool/data"} {
+		if _, err := RemoteDestinationOf(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestRemoteOnThisHostIsCheckedAgainstLocalDatasets(t *testing.T) {
+	t.Parallel()
+	datasets := []string{"tank", "tank/data", "tank/x", "tank/x/data", "backup", "backup/near"}
+	properties := []zfs.Property{
+		local("tank/data", "enabled", "on"),
+		local("tank/data", "remote", "near"),
+		local("tank/data", "discard", "first"),
+		local("tank/x/data", "enabled", "on"),
+		local("tank/x/data", "local", "backup/near"),
+		local("tank/x/data", "discard", "all"),
+	}
+	// Both map to backup/near/data: tank/data on the remote, tank/x/data on
+	// this host. Only a remote known to be this host shares the namespace.
+	elsewhere := map[string]RemoteDestination{"near": {Namespace: "ssh://backup.example.net:22", Root: "backup/near"}}
+	requireUnblocked(t, collisionScan(t, elsewhere, datasets, properties...), "tank/data")
+	here := map[string]RemoteDestination{"near": {Namespace: "local", Root: "backup/near"}}
+	g := collisionScan(t, here, datasets, properties...)
+	requireCollision(t, g, "tank/data", "near", true, "tank/x/data")
+	requireCollision(t, g, "tank/x/data", "backup/near", false, "tank/data")
 }

@@ -50,6 +50,71 @@ type LocalTargetInspection struct {
 type localIdentityReader interface {
 	ListDatasets(context.Context) ([]zfs.Dataset, error)
 	InspectDatasetIdentity(context.Context, string) (zfs.DatasetIdentity, error)
+	InspectState(context.Context, string, bool) (zfs.State, error)
+}
+
+// placeholderAt reports whether dataset is a placeholder, with the identity it
+// read to decide. The identity says whether the marker is set, in one query;
+// only a marked dataset is inspected in full, since a state inspection costs
+// commands per snapshot.
+func placeholderAt(ctx context.Context, reader localIdentityReader, dataset string) (zfs.DatasetIdentity, bool, error) {
+	identity, err := reader.InspectDatasetIdentity(ctx, dataset)
+	if err != nil || !identity.Placeholder {
+		return identity, false, err
+	}
+	state, err := reader.InspectState(ctx, dataset, false)
+	if err != nil {
+		return identity, false, err
+	}
+	return identity, isPlaceholder(state, dataset), nil
+}
+
+// isPlaceholder reports whether state shows dataset as a placeholder: marked
+// locally when boomerangz created it as a receive parent, and never given a
+// snapshot or bookmark since. Anything else is treated as a real dataset.
+func isPlaceholder(state zfs.State, dataset string) bool {
+	marked := false
+	for _, property := range state.Properties {
+		if property.Dataset == dataset && property.Name == zfs.PlaceholderProperty && property.Source == zfs.SourceLocal && property.Value == "on" {
+			marked = true
+		}
+	}
+	if !marked || state.ResumeTokens[dataset] != "" {
+		return false
+	}
+	for _, object := range state.Objects {
+		if (object.Type == "snapshot" || object.Type == "bookmark") && datasetOf(object.Name) == dataset {
+			return false
+		}
+	}
+	return true
+}
+
+// nearestReal returns name, or its nearest ancestor present in inventory that
+// is not a placeholder. A placeholder is never a replica, so it can never
+// anchor a target binding or stand for a replica's existence: anchoring a
+// binding on one would block the replica it stood in for from ever replacing
+// it. Only datasets inside the configured root can be placeholders, so nothing
+// above it is inspected.
+func nearestReal(ctx context.Context, reader localIdentityReader, name, configuredRoot string, inventory []zfs.Dataset) (zfs.DatasetIdentity, error) {
+	for candidate := nearestExisting(name, inventory); candidate != ""; {
+		if !inside(candidate, configuredRoot) {
+			return reader.InspectDatasetIdentity(ctx, candidate)
+		}
+		identity, placeholder, err := placeholderAt(ctx, reader, candidate)
+		if err != nil {
+			return zfs.DatasetIdentity{}, err
+		}
+		if !placeholder {
+			return identity, nil
+		}
+		index := strings.LastIndexByte(candidate, '/')
+		if index < 0 {
+			return zfs.DatasetIdentity{}, nil
+		}
+		candidate = nearestExisting(candidate[:index], inventory)
+	}
+	return zfs.DatasetIdentity{}, nil
 }
 
 // InspectTarget resolves an unbound target through its nearest existing ancestor.
@@ -65,7 +130,7 @@ func InspectTarget(ctx context.Context, reader localIdentityReader, request Requ
 		inspection.Status = "invalid-mapping"
 		return inspection, fmt.Errorf("unsupported or incomplete target transport")
 	}
-	mapped, err := zfs.MapReceiveDataset(request.Source, request.DestinationRoot, zfs.ReceiveDiscard(request.Policy.Discard))
+	mapped, _, err := request.mapped(request.Source)
 	if err != nil {
 		inspection.Status = "invalid-mapping"
 		return inspection, err
@@ -76,12 +141,12 @@ func InspectTarget(ctx context.Context, reader localIdentityReader, request Requ
 		inspection.Status = "unavailable"
 		return inspection, err
 	}
-	anchor := ""
-	for _, dataset := range inventory {
-		if inside(mapped, dataset.Name) && len(dataset.Name) > len(anchor) {
-			anchor = dataset.Name
-		}
+	nearest, err := nearestReal(ctx, reader, mapped, request.DestinationRoot, inventory)
+	if err != nil {
+		inspection.Status = "unavailable"
+		return inspection, err
 	}
+	anchor := nearest.Name
 	if anchor == "" {
 		inspection.Status = "unavailable"
 		return inspection, fmt.Errorf("destination has no existing ancestor")

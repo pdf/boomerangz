@@ -11,40 +11,56 @@ import (
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
-// BuildResume reconstructs an interrupted receive exclusively from durable ZFS
-// state. It never guesses which source snapshot belongs to an opaque token.
+// BuildResume reconstructs an interrupted receive of the stream view describes
+// exclusively from durable ZFS state. It never guesses which source snapshot
+// belongs to an opaque token: the token must lie inside the stream's mapped
+// destination and match a proof of that stream alone. Other members' streams
+// play no part, since a token can only belong to the one stream that wrote it.
 func BuildResume(request Request, view View, installation string) (Plan, lifecycle.Reference, error) {
 	plan := Plan{Source: request.Source}
 	var zero lifecycle.Reference
 	if err := zfs.ValidateDataset(request.Source); err != nil {
 		return plan, zero, err
 	}
-	p := request.Policy.Clone()
-	if !p.Enabled || !p.Valid() {
+	rootPolicy := request.Policy.Clone()
+	if !rootPolicy.Enabled || !rootPolicy.Valid() {
 		return plan, zero, fmt.Errorf("source policy must be enabled and valid")
 	}
-	if err := lifecycle.ActiveRoot(p, request.Source); err != nil {
+	if err := lifecycle.ActiveRoot(rootPolicy, request.Source); err != nil {
+		return plan, zero, err
+	}
+	streamName := view.Stream
+	if streamName == "" {
+		streamName = request.Source
+	}
+	stream, err := request.stream(streamName)
+	if err != nil {
+		return plan, zero, err
+	}
+	plan.Source = stream.Dataset
+	p, err := streamPolicy(request, stream)
+	if err != nil {
 		return plan, zero, err
 	}
 	transport, canonical := requestTransport(request), canonicalTarget(request)
 	switch transport {
 	case "local":
-		if !slices.Contains(p.Local, request.DestinationRoot) || canonical != canonicalLocalTarget(request.DestinationRoot) {
+		if (stream.Dataset == request.Source && !slices.Contains(rootPolicy.Local, request.DestinationRoot)) || canonical != canonicalLocalTarget(request.DestinationRoot) {
 			return plan, zero, fmt.Errorf("destination is not configured by the source local property")
 		}
 	case "ssh", "native":
-		if request.RemoteName == "" || !slices.Contains(p.Remote, request.RemoteName) || canonical == "" || strings.ContainsAny(canonical, "\x00\r\n") {
+		if request.RemoteName == "" || (stream.Dataset == request.Source && !slices.Contains(rootPolicy.Remote, request.RemoteName)) || canonical == "" || strings.ContainsAny(canonical, "\x00\r\n") {
 			return plan, zero, fmt.Errorf("remote is not configured with a canonical target")
 		}
 	default:
 		return plan, zero, fmt.Errorf("unsupported transfer transport %q", transport)
 	}
-	target, err := zfs.MapReceiveDataset(request.Source, request.DestinationRoot, zfs.ReceiveDiscard(p.Discard))
+	mappedRoot, target, err := request.mapped(stream.Dataset)
 	if err != nil {
 		return plan, zero, err
 	}
 	plan.Destination = target
-	if transport == "local" && (inside(target, request.Source) || inside(request.Source, target)) {
+	if transport == "local" && (inside(mappedRoot, request.Source) || inside(request.Source, mappedRoot)) {
 		return plan, zero, fmt.Errorf("source and destination scopes overlap")
 	}
 	if len(view.Source.ResumeTokens) != 0 || len(view.Destination.ResumeTokens) != 1 {
@@ -78,8 +94,8 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 		}
 		inventory[dataset.Name] = dataset
 	}
-	root, exists := inventory[request.Source]
-	if !exists || (root.Type != zfs.Filesystem && root.Type != zfs.Volume) || root.EncryptionRoot == "" {
+	sent, exists := inventory[stream.Dataset]
+	if !exists || (sent.Type != zfs.Filesystem && sent.Type != zfs.Volume) || sent.EncryptionRoot == "" {
 		return plan, zero, fmt.Errorf("source dataset lacks complete matching inventory")
 	}
 	destinationDatasets := make(map[string]zfs.Dataset)
@@ -114,7 +130,7 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 	if view.BindingIdentity.Name == "" {
 		return plan, zero, fmt.Errorf("bound destination identity is missing")
 	}
-	wanted, err := bindingForTarget(request, target, view.BindingIdentity, transport, canonical)
+	wanted, err := bindingForTarget(request, mappedRoot, view.BindingIdentity, transport, canonical)
 	if err != nil || *stored != wanted {
 		return plan, zero, fmt.Errorf("resumable target differs from persistent binding")
 	}
@@ -128,11 +144,11 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 	var candidateTXG uint64
 	tied := false
 	for _, ref := range refs {
-		if ref.Target != canonical {
+		if ref.Target != canonical || ref.Dataset != stream.Dataset {
 			continue
 		}
 		valid := true
-		for _, member := range ref.Members() {
+		for _, member := range ref.Sources {
 			name := member.Dataset + "@" + member.Metadata.Name()
 			object, exists := sourceObjects[name]
 			if !exists || object.Type != "snapshot" || object.GUID != member.GUID || !slices.Contains(view.Source.Holds[name], ref.HoldName()) {
@@ -146,8 +162,7 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 			}
 		}
 		if valid {
-			rootSnapshot := ref.SnapshotName(request.Source)
-			txg := sourceObjects[rootSnapshot].CreateTXG
+			txg := sourceObjects[ref.SnapshotName()].CreateTXG
 			if txg == 0 {
 				continue
 			}
@@ -163,8 +178,8 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 	}
 	ref := candidate
 	tokenCovered := false
-	for _, member := range ref.Members() {
-		mappedDataset := target + strings.TrimPrefix(member.Dataset, request.Source)
+	for _, member := range ref.Sources {
+		mappedDataset := mappedRoot + strings.TrimPrefix(member.Dataset, request.Source)
 		if tokenDataset == mappedDataset {
 			tokenCovered = true
 		}
@@ -182,7 +197,7 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 		expected := Expected{Source: member.Dataset + "@" + member.Metadata.Name(), Destination: mappedDataset + "@" + member.Metadata.Name(), GUID: member.GUID, Metadata: &metadata}
 		plan.Expected = append(plan.Expected, expected)
 		plan.Endpoints = append(plan.Endpoints, expected)
-		if member.Dataset == request.Source {
+		if member.Dataset == stream.Dataset {
 			plan.Snapshot = expected.Source
 		}
 	}
@@ -191,7 +206,7 @@ func BuildResume(request Request, view View, installation string) (Plan, lifecyc
 	}
 	plan.Mode = "resume"
 	plan.Warnings = slices.Clone(p.Warnings)
-	plan.Send = zfs.SendOptions{Source: request.Source, ResumeToken: token}
+	plan.Send = zfs.SendOptions{Source: stream.Dataset, ResumeToken: token}
 	// OpenZFS requires a resumed stream to be received into the exact dataset
 	// that owns the token, including a descendant interrupted by recursive send.
 	plan.Receive = zfs.ReceiveOptions{Root: tokenDataset, Discard: zfs.ReceiveExact, Set: maps.Clone(p.SetProperties), Exclude: slices.Clone(p.IgnoreProperties)}

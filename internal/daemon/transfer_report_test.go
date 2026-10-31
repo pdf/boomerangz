@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -36,6 +37,8 @@ type memoryZFS struct {
 	inventory  []zfs.Dataset
 	identities map[string]zfs.DatasetIdentity
 	states     map[string]zfs.State
+	// snapshotted records each Snapshot call's datasets, in order.
+	snapshotted [][]string
 }
 
 func (m *memoryZFS) state(object string) zfs.State {
@@ -74,12 +77,20 @@ func (*memoryZFS) GetStoredProperties(context.Context, []string) ([]zfs.Property
 	return nil, nil
 }
 
-func (m *memoryZFS) InspectState(_ context.Context, dataset string, _ bool) (zfs.State, error) {
+func (m *memoryZFS) InspectState(_ context.Context, dataset string, recursive bool) (zfs.State, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state, found := m.states[dataset]
 	if !found {
 		return zfs.State{}, fmt.Errorf("dataset absent: %s", dataset)
+	}
+	if recursive {
+		state = mergeStates(state)
+		for _, name := range slices.Sorted(maps.Keys(m.states)) {
+			if strings.HasPrefix(name, dataset+"/") {
+				state = mergeStates(state, m.states[name])
+			}
+		}
 	}
 	var cloned zfs.State
 	data, err := json.Marshal(state)
@@ -87,6 +98,81 @@ func (m *memoryZFS) InspectState(_ context.Context, dataset string, _ bool) (zfs
 		err = json.Unmarshal(data, &cloned)
 	}
 	return cloned, err
+}
+
+// mergeStates combines per-dataset states into one, as a recursive inspection
+// reports a subtree.
+func mergeStates(states ...zfs.State) zfs.State {
+	var merged zfs.State
+	for _, state := range states {
+		merged.Objects = append(merged.Objects, state.Objects...)
+		merged.Properties = append(merged.Properties, state.Properties...)
+		for name, holds := range state.Holds {
+			if merged.Holds == nil {
+				merged.Holds = make(map[string][]string)
+			}
+			merged.Holds[name] = holds
+		}
+		for name, clones := range state.Clones {
+			if merged.Clones == nil {
+				merged.Clones = make(map[string][]string)
+			}
+			merged.Clones[name] = clones
+		}
+		for name, received := range state.Received {
+			if merged.Received == nil {
+				merged.Received = make(map[string]map[string]string)
+			}
+			merged.Received[name] = received
+		}
+		for name, token := range state.ResumeTokens {
+			if merged.ResumeTokens == nil {
+				merged.ResumeTokens = make(map[string]string)
+			}
+			merged.ResumeTokens[name] = token
+		}
+	}
+	return merged
+}
+
+// Snapshot creates the snapshot on every named dataset at one new txg.
+func (m *memoryZFS) Snapshot(_ context.Context, datasets []string, name string, properties map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var txg uint64
+	for _, state := range m.states {
+		for _, object := range state.Objects {
+			txg = max(txg, object.CreateTXG)
+		}
+	}
+	txg++
+	m.snapshotted = append(m.snapshotted, slices.Clone(datasets))
+	for i, dataset := range datasets {
+		if _, found := m.states[dataset]; !found {
+			return fmt.Errorf("dataset absent: %s", dataset)
+		}
+		full := dataset + "@" + name
+		m.update(dataset, func(state *zfs.State) {
+			state.Objects = append(state.Objects, zfs.Object{Name: full, Type: "snapshot", GUID: 1000 + 10*txg + uint64(i), CreateTXG: txg})
+			for key, value := range properties {
+				state.Properties = append(state.Properties, zfs.Property{Dataset: full, Name: key, Value: value, Source: zfs.SourceLocal})
+			}
+		})
+	}
+	return nil
+}
+
+func (m *memoryZFS) DestroySnapshot(_ context.Context, snapshot string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.state(snapshot).Holds[snapshot]) > 0 {
+		return fmt.Errorf("snapshot is held: %s", snapshot)
+	}
+	m.update(snapshot, func(state *zfs.State) {
+		state.Objects = slices.DeleteFunc(state.Objects, func(object zfs.Object) bool { return object.Name == snapshot })
+		state.Properties = slices.DeleteFunc(state.Properties, func(row zfs.Property) bool { return row.Dataset == snapshot })
+	})
+	return nil
 }
 
 func (m *memoryZFS) SetProperties(_ context.Context, object string, values map[string]string) error {
@@ -210,7 +296,7 @@ func (m *memoryZFS) receive(root string, snapshot zfs.Object) {
 	defer m.mu.Unlock()
 	if _, found := m.states[root]; !found {
 		m.inventory = append(m.inventory, zfs.Dataset{Name: root, Type: zfs.Filesystem, EncryptionRoot: "-"})
-		m.identities[root] = zfs.DatasetIdentity{Name: root, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: 11}
+		m.identities[root] = zfs.DatasetIdentity{Name: root, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: m.identities["backup"].PoolGUID}
 		m.states[root] = zfs.State{Objects: []zfs.Object{{Name: root, Type: "filesystem", GUID: 20, CreateTXG: 20}}}
 	}
 	m.update(root, func(state *zfs.State) {
@@ -380,8 +466,9 @@ func remoteReportRuntime(t *testing.T) (*Runtime, *transitionLog, *memoryZFS, *m
 	properties = append(properties, zfs.Property{Dataset: reportSource, Name: policy.Namespace + "remote", Value: reportRemote, Source: zfs.SourceLocal})
 	source.states[reportSource] = zfs.State{Objects: source.states[reportSource].Objects, Properties: append(source.states[reportSource].Properties, properties[len(properties)-1])}
 	destination := &memoryZFS{
-		inventory:  []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem}},
-		identities: map[string]zfs.DatasetIdentity{"backup": source.identities["backup"]},
+		inventory: []zfs.Dataset{{Name: "backup", Type: zfs.Filesystem}},
+		// Another host's backup pool: same name, its own GUID.
+		identities: map[string]zfs.DatasetIdentity{"backup": {Name: "backup", Type: zfs.Filesystem, GUID: 30, Pool: "backup", PoolGUID: 31}},
 		states:     map[string]zfs.State{},
 	}
 	runtime, log := newReportRuntime(t, source, memoryStream{source: source, destination: source})
@@ -396,7 +483,7 @@ func TestRemoteJobReportsTransferPhases(t *testing.T) {
 	runtime, log, _, _, effective := remoteReportRuntime(t)
 	job := "remote:" + reportSource + ":" + reportRemote
 
-	if !runtime.enqueueRemote(reportSource, reportRemote, effective, "") {
+	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
 		t.Fatal("remote job was not accepted")
 	}
 	states := log.waitRun(t, job, 0)
@@ -407,7 +494,7 @@ func TestRemoteJobReportsTransferPhases(t *testing.T) {
 	// The target now holds the newest snapshot. The job probes and succeeds
 	// without sending, and says so by never reporting sending.
 	from := log.count(job)
-	if !runtime.enqueueRemote(reportSource, reportRemote, effective, "") {
+	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
 		t.Fatal("second remote job was not accepted")
 	}
 	states = log.waitRun(t, job, from)
@@ -420,7 +507,7 @@ func TestRemoteResumeReportsEachSend(t *testing.T) {
 	t.Parallel()
 	runtime, log, source, destination, effective := remoteReportRuntime(t)
 	job := "remote:" + reportSource + ":" + reportRemote
-	road, err := runtime.road(reportSource, reportRemote, effective)
+	road, err := runtime.road(reportSource, reportRemote, effective, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +523,7 @@ func TestRemoteResumeReportsEachSend(t *testing.T) {
 	}
 	destination.mu.Lock()
 	destination.inventory = append(destination.inventory, zfs.Dataset{Name: reportDestination, Type: zfs.Filesystem, EncryptionRoot: "-"})
-	destination.identities[reportDestination] = zfs.DatasetIdentity{Name: reportDestination, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: 11}
+	destination.identities[reportDestination] = zfs.DatasetIdentity{Name: reportDestination, Type: zfs.Filesystem, GUID: 20, Pool: "backup", PoolGUID: destination.identities["backup"].PoolGUID}
 	destination.states[reportDestination] = zfs.State{
 		Objects:      []zfs.Object{{Name: reportDestination, Type: "filesystem", GUID: 20, CreateTXG: 20}},
 		ResumeTokens: map[string]string{reportDestination: "1-resume-token"},
@@ -446,7 +533,7 @@ func TestRemoteResumeReportsEachSend(t *testing.T) {
 	// after the resume has something of its own to send.
 	source.addSnapshot(t, 10)
 
-	if !runtime.enqueueRemote(reportSource, reportRemote, effective, "") {
+	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
 		t.Fatal("remote job was not accepted")
 	}
 	states := log.waitRun(t, job, 0)
@@ -462,7 +549,7 @@ func TestLocalJobReportsPlanningBeforeSending(t *testing.T) {
 	effective := policy.Resolve(zfs.Dataset{Name: reportSource, Type: zfs.Filesystem, EncryptionRoot: "-"}, nil, properties, nil)
 	job := "local:" + reportSource + ":" + reportDestination
 
-	if !runtime.enqueueLocal(reportSource, reportDestination, effective, "") {
+	if !runtime.enqueueLocal(reportSource, reportDestination, effective, nil) {
 		t.Fatal("local job was not accepted")
 	}
 	states := log.waitRun(t, job, 0)
@@ -516,4 +603,48 @@ func TestTransferReporterRecordsProgressUnderSending(t *testing.T) {
 	}
 	sample(3)
 	waitBytes(3)
+}
+
+func TestRemoteOnThisHostIsRevalidatedBeforeReceiving(t *testing.T) {
+	t.Parallel()
+	runtime, log, source, destination, effective := remoteReportRuntime(t)
+	// The remote reaches this host's own backup pool, as an SSH remote
+	// addressed back at localhost would.
+	destination.mu.Lock()
+	destination.identities["backup"] = source.identities["backup"]
+	destination.mu.Unlock()
+	job := "remote:" + reportSource + ":" + reportRemote
+
+	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
+		t.Fatal("remote job was not accepted")
+	}
+	states := log.waitRun(t, job, 0)
+	if last := states[len(states)-1]; !strings.Contains(last, "this host") || slices.Contains(states, "sending") {
+		t.Fatalf("a loopback remote was not refused before sending: %v", states)
+	}
+	destination.mu.Lock()
+	_, received := destination.states[reportDestination]
+	destination.mu.Unlock()
+	if received {
+		t.Fatal("the refused remote received a replica")
+	}
+	runtime.mu.Lock()
+	learned := runtime.hostLocal[reportRemote]
+	runtime.mu.Unlock()
+	if !learned {
+		t.Fatal("the daemon did not learn that the remote is on this host")
+	}
+	// Discovery now checks the remote's replicas as local ones; with nothing
+	// to overlap, the next attempt goes ahead marked as validated.
+	road, err := runtime.road(reportSource, reportRemote, effective, nil)
+	if err != nil || !road.request.HostLocal {
+		t.Fatalf("road=%+v err=%v", road.request, err)
+	}
+	from := log.count(job)
+	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
+		t.Fatal("second remote job was not accepted")
+	}
+	if states := log.waitRun(t, job, from); states[len(states)-1] != "succeeded" {
+		t.Fatalf("revalidated remote job states = %v", states)
+	}
 }
