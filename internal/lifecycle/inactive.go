@@ -74,11 +74,14 @@ func exactDatasetGUID(state zfs.State, dataset string) (uint64, error) {
 func decodeInactiveMarker(state zfs.State, dataset string) (*InactiveMarker, error) {
 	var marker *InactiveMarker
 	for _, property := range state.Properties {
-		if property.Dataset != dataset || property.Name != InactiveProperty {
+		// A received marker is another installation's record of when its root
+		// went inactive: provenance, whether it shows or is masked by a local
+		// value. Only a local marker is read.
+		if property.Dataset != dataset || property.Name != InactiveProperty || property.Source != zfs.SourceLocal {
 			continue
 		}
-		if marker != nil || property.Source != zfs.SourceLocal {
-			return nil, fmt.Errorf("inactive marker must be unambiguous and explicitly local")
+		if marker != nil {
+			return nil, fmt.Errorf("inactive marker must be unambiguous")
 		}
 		var decoded InactiveMarker
 		decoder := json.NewDecoder(bytes.NewBufferString(property.Value))
@@ -90,9 +93,6 @@ func decodeInactiveMarker(state zfs.State, dataset string) (*InactiveMarker, err
 			return nil, fmt.Errorf("invalid inactive marker")
 		}
 		marker = &decoded
-	}
-	if state.Received[dataset][InactiveProperty] != "" {
-		return nil, fmt.Errorf("received inactive marker is not authority")
 	}
 	return marker, nil
 }

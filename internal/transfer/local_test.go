@@ -662,3 +662,41 @@ func TestApplyReportsNoVerifyingAfterFailedStream(t *testing.T) {
 		t.Fatalf("reports = %v, want %v", reports, want)
 	}
 }
+
+// A replica promoted by adoption keeps its source's bindings and suspension
+// markers, shown as received or masked by local values. They describe the
+// sending installation's destinations, never this root's.
+func TestReceivedTargetStateIsProvenance(t *testing.T) {
+	t.Parallel()
+	request := Request{Source: "tank/data", DestinationRoot: "backup", Policy: policy.Effective{Discard: policy.DiscardFirst}}
+	binding, err := bindingFor(request, "backup/data", zfs.DatasetIdentity{Name: "backup", Type: zfs.Filesystem, GUID: 10, Pool: "backup", PoolGUID: 11})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := encodeBinding(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := canonicalLocalTarget(request.DestinationRoot)
+	bindingKey, suspendedKey := targetBindingProperty(canonical), targetSuspendedProperty(canonical)
+	received := zfs.State{
+		Properties: []zfs.Property{
+			{Dataset: request.Source, Name: bindingKey, Value: `{"foreign":true}`, Source: zfs.SourceReceived},
+			{Dataset: request.Source, Name: suspendedKey, Value: "unverified", Source: zfs.SourceReceived},
+		},
+		Received: map[string]map[string]string{request.Source: {bindingKey: `{"foreign":true}`, suspendedKey: "unverified"}},
+	}
+	if stored, err := storedTargetBinding(received, request.Source, canonical); err != nil || stored != nil {
+		t.Fatalf("received binding was read as this root's: %+v err=%v", stored, err)
+	}
+	if suspended, err := TargetSuspended(received, request.Source, canonical); err != nil || suspended {
+		t.Fatalf("received suspension was read as this root's: %v err=%v", suspended, err)
+	}
+	masked := zfs.State{
+		Properties: []zfs.Property{{Dataset: request.Source, Name: bindingKey, Value: encoded, Source: zfs.SourceLocal}},
+		Received:   received.Received,
+	}
+	if stored, err := storedTargetBinding(masked, request.Source, canonical); err != nil || stored == nil || *stored != binding {
+		t.Fatalf("local binding over a hidden received one: %+v err=%v", stored, err)
+	}
+}

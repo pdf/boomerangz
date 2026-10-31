@@ -245,16 +245,14 @@ func TargetSuspended(state zfs.State, root, canonical string) (bool, error) {
 	property := targetSuspendedProperty(canonical)
 	found := false
 	for _, row := range state.Properties {
-		if row.Dataset != root || row.Name != property {
+		// A received marker is the sending installation's gate, not this one's.
+		if row.Dataset != root || row.Name != property || row.Source != zfs.SourceLocal {
 			continue
 		}
-		if row.Source != zfs.SourceLocal || found || row.Value != "unverified" {
+		if found || row.Value != "unverified" {
 			return false, fmt.Errorf("target suspension marker is invalid")
 		}
 		found = true
-	}
-	if state.Received[root][property] != "" {
-		return false, fmt.Errorf("hidden received target suspension marker requires explicit resolution")
 	}
 	return found, nil
 }
@@ -303,20 +301,19 @@ func storedTargetBinding(state zfs.State, root, canonical string) (*TargetBindin
 	property := targetBindingProperty(canonical)
 	var binding *TargetBinding
 	for _, row := range state.Properties {
-		if row.Dataset != root || row.Name != property {
+		// A received binding names the sending installation's destination,
+		// which says nothing about where this root replicates.
+		if row.Dataset != root || row.Name != property || row.Source != zfs.SourceLocal {
 			continue
 		}
-		if row.Source != zfs.SourceLocal || binding != nil {
-			return nil, fmt.Errorf("target binding must be unambiguous and explicitly local")
+		if binding != nil {
+			return nil, fmt.Errorf("target binding must be unambiguous")
 		}
 		var decoded TargetBinding
 		if err := json.Unmarshal([]byte(row.Value), &decoded); err != nil {
 			return nil, fmt.Errorf("invalid target binding: %w", err)
 		}
 		binding = &decoded
-	}
-	if state.Received[root][property] != "" {
-		return nil, fmt.Errorf("hidden received target binding requires explicit resolution")
 	}
 	return binding, nil
 }

@@ -61,10 +61,13 @@ func RootAuthority(state zfs.State, root, installation string) (string, error) {
 	if values[OwnerProperty] != installation {
 		return "", fmt.Errorf("dormant foreign lineage on %s: owner %s does not match installation %s", root, values[OwnerProperty], installation)
 	}
-	for _, key := range []string{OwnerProperty, LineageProperty} {
-		if hidden := state.Received[root][key]; hidden != "" && hidden != values[key] {
-			return "", fmt.Errorf("conflicting received authority metadata on %s", root)
-		}
+	// A replica promoted by adoption keeps the sending installation's owner as
+	// a hidden received value. That is provenance, and the local owner set by
+	// adoption is the authority. Lineage is different: a promoted replica
+	// continues its source's lineage, so a received lineage that disagrees
+	// means the root's snapshots belong to some other history.
+	if hidden := state.Received[root][LineageProperty]; hidden != "" && hidden != values[LineageProperty] {
+		return "", fmt.Errorf("conflicting received lineage on %s", root)
 	}
 	return values[LineageProperty], nil
 }

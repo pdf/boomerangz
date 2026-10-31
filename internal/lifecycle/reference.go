@@ -347,9 +347,6 @@ func (s *Service) ProtectSet(ctx context.Context, dataset, stream string, snapsh
 			return Reference{}, &StateChangedError{}
 		}
 	}
-	if state.Received[dataset][r.property()] != "" {
-		return Reference{}, fmt.Errorf("received reference proof requires explicit resolution")
-	}
 	if !exists {
 		for _, source := range r.sources() {
 			if slices.Contains(state.Holds[r.sourceSnapshot(source)], r.hold()) {

@@ -408,3 +408,29 @@ func TestProtectSetRefusesProofOverThePropertyLimit(t *testing.T) {
 		t.Fatalf("refused proof wrote %v", b.writes)
 	}
 }
+
+// A replica promoted by adoption keeps its source's proofs as hidden received
+// values, and a target this installation shares with the source hashes to the
+// same key. The received proof is the source's record: protection goes ahead.
+func TestProtectIgnoresReceivedProofs(t *testing.T) {
+	t.Parallel()
+	b := backendWithSnapshots(t)
+	addTestAuthority(b)
+	s, _ := NewService(b, testInstallation)
+	snapshot := b.state.Objects[1].Name
+	prior, err := s.Protect(t.Context(), "tank/data", snapshot, "local:backup/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the received copy of the proof remains, as after a receive -x.
+	if err := s.ReleaseReference(t.Context(), "tank/data", prior); err != nil {
+		t.Fatal(err)
+	}
+	b.state.Received = map[string]map[string]string{"tank/data": {prior.PropertyName(): "source installation's proof"}}
+	if _, err := s.Protect(t.Context(), "tank/data", snapshot, "local:backup/data"); err != nil {
+		t.Fatalf("received proof blocked protection: %v", err)
+	}
+	if len(b.state.Holds[snapshot]) != 1 {
+		t.Fatalf("holds = %v", b.state.Holds)
+	}
+}
