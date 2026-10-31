@@ -74,9 +74,22 @@ func (d *Direct) CheckPermissions(ctx context.Context, dataset string, required 
 	granted := effectivePermissions(blocks, dataset, identity)
 	missing := slices.DeleteFunc(required, func(permission string) bool { return granted[permission] })
 	if len(missing) > 0 {
-		return fmt.Errorf("effective account %s lacks delegated ZFS permissions on %s: %s", identity.name, dataset, strings.Join(missing, ","))
+		return &MissingPermissionsError{Account: identity.name, Dataset: dataset, Missing: missing}
 	}
 	return nil
+}
+
+// MissingPermissionsError reports the requested delegated permissions an
+// account lacks on a dataset, sorted. It is the one way CheckPermissions says
+// that delegation, rather than inspecting it, came up short.
+type MissingPermissionsError struct {
+	Account string
+	Dataset string
+	Missing []string
+}
+
+func (e *MissingPermissionsError) Error() string {
+	return fmt.Sprintf("effective account %s lacks delegated ZFS permissions on %s: %s", e.Account, e.Dataset, strings.Join(e.Missing, ","))
 }
 
 func validPermission(permission string) bool {

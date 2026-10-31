@@ -159,3 +159,12 @@ message CheckPermissionsRequest {
 }
 
 message CheckPermissionsResponse {}
+
+// MissingPermissions is the detail a FailedPrecondition CheckPermissions
+// status carries when the endpoint's account lacks delegated permissions,
+// so the caller learns which ones without parsing the message.
+message MissingPermissions {
+  string account = 1;
+  string dataset = 2;
+  repeated string permissions = 3;
+}

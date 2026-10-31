@@ -1586,6 +1586,69 @@ func (*CheckPermissionsResponse) Descriptor() ([]byte, []int) {
 	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{30}
 }
 
+// MissingPermissions is the detail a FailedPrecondition CheckPermissions
+// status carries when the endpoint's account lacks delegated permissions,
+// so the caller learns which ones without parsing the message.
+type MissingPermissions struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Account       string                 `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
+	Dataset       string                 `protobuf:"bytes,2,opt,name=dataset,proto3" json:"dataset,omitempty"`
+	Permissions   []string               `protobuf:"bytes,3,rep,name=permissions,proto3" json:"permissions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MissingPermissions) Reset() {
+	*x = MissingPermissions{}
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MissingPermissions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MissingPermissions) ProtoMessage() {}
+
+func (x *MissingPermissions) ProtoReflect() protoreflect.Message {
+	mi := &file_boomerangz_replication_v1_remote_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MissingPermissions.ProtoReflect.Descriptor instead.
+func (*MissingPermissions) Descriptor() ([]byte, []int) {
+	return file_boomerangz_replication_v1_remote_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *MissingPermissions) GetAccount() string {
+	if x != nil {
+		return x.Account
+	}
+	return ""
+}
+
+func (x *MissingPermissions) GetDataset() string {
+	if x != nil {
+		return x.Dataset
+	}
+	return ""
+}
+
+func (x *MissingPermissions) GetPermissions() []string {
+	if x != nil {
+		return x.Permissions
+	}
+	return nil
+}
+
 var File_boomerangz_replication_v1_remote_proto protoreflect.FileDescriptor
 
 const file_boomerangz_replication_v1_remote_proto_rawDesc = "" +
@@ -1691,7 +1754,11 @@ const file_boomerangz_replication_v1_remote_proto_rawDesc = "" +
 	"\x17CheckPermissionsRequest\x12\x18\n" +
 	"\adataset\x18\x01 \x01(\tR\adataset\x12 \n" +
 	"\vpermissions\x18\x02 \x03(\tR\vpermissions\"\x1a\n" +
-	"\x18CheckPermissionsResponse2\xa4\v\n" +
+	"\x18CheckPermissionsResponse\"j\n" +
+	"\x12MissingPermissions\x12\x18\n" +
+	"\aaccount\x18\x01 \x01(\tR\aaccount\x12\x18\n" +
+	"\adataset\x18\x02 \x01(\tR\adataset\x12 \n" +
+	"\vpermissions\x18\x03 \x03(\tR\vpermissions2\xa4\v\n" +
 	"\rRemoteService\x12o\n" +
 	"\fCapabilities\x12..boomerangz.replication.v1.CapabilitiesRequest\x1a/.boomerangz.replication.v1.CapabilitiesResponse\x12o\n" +
 	"\fListDatasets\x12..boomerangz.replication.v1.ListDatasetsRequest\x1a/.boomerangz.replication.v1.ListDatasetsResponse\x12\x8d\x01\n" +
@@ -1718,7 +1785,7 @@ func file_boomerangz_replication_v1_remote_proto_rawDescGZIP() []byte {
 	return file_boomerangz_replication_v1_remote_proto_rawDescData
 }
 
-var file_boomerangz_replication_v1_remote_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_boomerangz_replication_v1_remote_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_boomerangz_replication_v1_remote_proto_goTypes = []any{
 	(*CapabilitiesRequest)(nil),            // 0: boomerangz.replication.v1.CapabilitiesRequest
 	(*CapabilitiesResponse)(nil),           // 1: boomerangz.replication.v1.CapabilitiesResponse
@@ -1751,8 +1818,9 @@ var file_boomerangz_replication_v1_remote_proto_goTypes = []any{
 	(*ReceiveResponse)(nil),                // 28: boomerangz.replication.v1.ReceiveResponse
 	(*CheckPermissionsRequest)(nil),        // 29: boomerangz.replication.v1.CheckPermissionsRequest
 	(*CheckPermissionsResponse)(nil),       // 30: boomerangz.replication.v1.CheckPermissionsResponse
-	nil,                                    // 31: boomerangz.replication.v1.SetPropertiesRequest.PropertiesEntry
-	nil,                                    // 32: boomerangz.replication.v1.ReceiveOptions.SetEntry
+	(*MissingPermissions)(nil),             // 31: boomerangz.replication.v1.MissingPermissions
+	nil,                                    // 32: boomerangz.replication.v1.SetPropertiesRequest.PropertiesEntry
+	nil,                                    // 33: boomerangz.replication.v1.ReceiveOptions.SetEntry
 }
 var file_boomerangz_replication_v1_remote_proto_depIdxs = []int32{
 	3,  // 0: boomerangz.replication.v1.ListDatasetsResponse.datasets:type_name -> boomerangz.replication.v1.Dataset
@@ -1762,8 +1830,8 @@ var file_boomerangz_replication_v1_remote_proto_depIdxs = []int32{
 	11, // 4: boomerangz.replication.v1.InspectStateResponse.resume_tokens:type_name -> boomerangz.replication.v1.NamedValue
 	12, // 5: boomerangz.replication.v1.InspectStateResponse.clones:type_name -> boomerangz.replication.v1.NamedValues
 	12, // 6: boomerangz.replication.v1.InspectStateResponse.holds:type_name -> boomerangz.replication.v1.NamedValues
-	31, // 7: boomerangz.replication.v1.SetPropertiesRequest.properties:type_name -> boomerangz.replication.v1.SetPropertiesRequest.PropertiesEntry
-	32, // 8: boomerangz.replication.v1.ReceiveOptions.set:type_name -> boomerangz.replication.v1.ReceiveOptions.SetEntry
+	32, // 7: boomerangz.replication.v1.SetPropertiesRequest.properties:type_name -> boomerangz.replication.v1.SetPropertiesRequest.PropertiesEntry
+	33, // 8: boomerangz.replication.v1.ReceiveOptions.set:type_name -> boomerangz.replication.v1.ReceiveOptions.SetEntry
 	26, // 9: boomerangz.replication.v1.ReceiveRequest.options:type_name -> boomerangz.replication.v1.ReceiveOptions
 	0,  // 10: boomerangz.replication.v1.RemoteService.Capabilities:input_type -> boomerangz.replication.v1.CapabilitiesRequest
 	2,  // 11: boomerangz.replication.v1.RemoteService.ListDatasets:input_type -> boomerangz.replication.v1.ListDatasetsRequest
@@ -1807,7 +1875,7 @@ func file_boomerangz_replication_v1_remote_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_boomerangz_replication_v1_remote_proto_rawDesc), len(file_boomerangz_replication_v1_remote_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   33,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
