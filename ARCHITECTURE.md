@@ -463,6 +463,17 @@ every mutation - `signal()` - to release whichever goroutine is blocked in
   `sync.Mutex`; there's no per-dataset locking. `Next`'s O(n) full-map scan
   on every wake is intentional simplicity over an ordered heap - the entry
   count is bounded by managed dataset roots, not by scan/event volume.
+- **Snapshot and prune jobs run alongside transfers.** They take the root's
+  lock, and a transfer takes its target's, so retention and snapshotting carry
+  on through a long send. A snapshot or prune landing while a transfer
+  prepares moves that stream's history, and `transfer.Local` plans the stream
+  again inside the same attempt (`applySettled`, at most
+  `preparationAttempts` times) rather than failing it with
+  `PreparationChangedError`; a snapshot landing after preparation is the next
+  run's, through the job's dirty flag. Only a stream's endpoints and base are
+  held, so a prune after preparation may still destroy a `send -I`
+  intermediate before it is sent; verification then expects only the
+  intermediates the source still has (`settleIntermediates`).
 
 ## Protobuf / gRPC surface
 
