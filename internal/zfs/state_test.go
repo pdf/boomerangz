@@ -47,14 +47,30 @@ func (r *stateRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 		var out strings.Builder
 		for _, object := range objects {
 			if keys != "all" {
-				out.WriteString(object + "\torg.boomerangz:state:lineage\t-\thidden\t-\n")
+				out.WriteString(projectRows(args[4], object+"\torg.boomerangz:state:lineage\t-\thidden\t-\n"))
 				continue
 			}
-			out.WriteString(object + "\torg.boomerangz:enabled\ton\t-\tlocal\n" + object + "\tcompression\tzstd\t-\tlocal\n")
+			out.WriteString(projectRows(args[4], object+"\torg.boomerangz:enabled\ton\t-\tlocal\n"+object+"\tcompression\tzstd\t-\tlocal\n"))
 		}
 		return []byte(out.String()), nil
 	}
 	return nil, nil
+}
+
+// projectRows answers a property query the way zfs does, with only the columns
+// it asked for: rows are written as name, property, value, received, source.
+func projectRows(columns, rows string) string {
+	index := map[string]int{"name": 0, "property": 1, "value": 2, "received": 3, "source": 4}
+	var out strings.Builder
+	for row := range strings.Lines(rows) {
+		fields := strings.Split(strings.TrimSuffix(row, "\n"), "\t")
+		var projected []string
+		for column := range strings.SplitSeq(columns, ",") {
+			projected = append(projected, fields[index[column]])
+		}
+		out.WriteString(strings.Join(projected, "\t") + "\n")
+	}
+	return out.String()
 }
 
 func TestInspectStateBoundsRepeatedInventoryChurn(t *testing.T) {
@@ -198,11 +214,13 @@ func TestRenameDatasetArguments(t *testing.T) {
 }
 
 // recordedPool answers list, get and holds for a fixed set of objects, one or
-// many per query, the way zfs does: one row per property of each object named.
+// many per query, the way zfs does: one row per property of each object named,
+// with the columns asked for. A query for all lists what all shows; a query
+// naming keys answers each of them, hidden or not, and "-" for an unset one.
 type recordedPool struct {
 	inventory string
-	all       map[string]string // object -> its "get all" rows
-	state     map[string]string // object -> its fixed-key rows
+	all       map[string]string // object -> the rows "get all" lists
+	hidden    map[string]string // object -> rows only a query naming the key reveals
 	holds     map[string]string // snapshot -> its hold rows
 	calls     [][]string
 }
@@ -214,11 +232,20 @@ func (r *recordedPool) Run(_ context.Context, args ...string) ([]byte, error) {
 	case "list":
 		return []byte(r.inventory), nil
 	case "get":
+		columns, keys := args[4], args[5]
 		for _, object := range args[6:] {
-			if args[5] == "all" {
-				out.WriteString(r.all[object])
-			} else {
-				out.WriteString(r.state[object])
+			if keys == "all" {
+				out.WriteString(projectRows(columns, r.all[object]))
+				continue
+			}
+			for key := range strings.SplitSeq(keys, ",") {
+				row := object + "\t" + key + "\t-\t-\t-\n"
+				for line := range strings.Lines(r.all[object] + r.hidden[object]) {
+					if strings.Split(line, "\t")[1] == key {
+						row = line
+					}
+				}
+				out.WriteString(projectRows(columns, row))
 			}
 		}
 	case "holds":
@@ -239,22 +266,23 @@ func newRecordedPool() *recordedPool {
 			"tank/data#a\tbookmark\t2\t101\t6\n" +
 			"tank/data@d\tsnapshot\t5\t104\t9\n",
 		all: map[string]string{
-			"tank/data": "tank/data\t" + ns + "enabled\ton\t-\tlocal\n" +
+			// enabled is set locally over a received value it masks.
+			"tank/data": "tank/data\t" + ns + "enabled\ton\toff\tlocal\n" +
 				"tank/data\t" + ns + "state:owner\towner\t-\tlocal\n" +
+				"tank/data\t" + ns + "state:lineage\tline\t-\tlocal\n" +
+				"tank/data\t" + ns + "state:target:t\tbinding\t-\tlocal\n" +
 				"tank/data\treceive_resume_token\t1-token\t-\t-\n" +
-				"tank/data\tcompression\tzstd\t-\tlocal\n",
+				"tank/data\tcompression\tzstd\tlz4\tlocal\n",
 			"tank/data@a": "tank/data@a\t" + ns + "state:snapshot\tsnap-a\t-\tlocal\n" +
 				"tank/data@a\tclones\tpool/clone\t-\t-\n",
 			"tank/data@b": "tank/data@b\t" + ns + "state:snapshot\tsnap-b\tsnap-b\treceived\n",
 			"tank/data@c": "tank/data@c\t" + ns + "enabled\toff\t-\tlocal\n",
-			"tank/data@d": "",
-		},
-		state: map[string]string{
-			"tank/data":   "tank/data\t" + ns + "state:lineage\tline\t-\tlocal\n",
-			"tank/data@a": "tank/data@a\t" + ns + "state:lineage\t-\thidden-a\t-\n",
-			"tank/data@b": "tank/data@b\t" + ns + "state:snapshot\tsnap-b\tsnap-b\treceived\n",
-			"tank/data@c": "",
 			"tank/data@d": "tank/data@d\t" + ns + "state:lineage\tline\t-\tlocal\n",
+		},
+		hidden: map[string]string{
+			"tank/data@a": "tank/data@a\t" + ns + "state:lineage\t-\thidden-a\t-\n",
+			// all omits this, and it is no fixed key, so it is not read.
+			"tank/data@c": "tank/data@c\t" + ns + "state:target:t\t-\thidden-c\t-\n",
 		},
 		holds: map[string]string{
 			"tank/data@a": "tank/data@a\tz-hold\t123\ntank/data@a\ta-hold\t123\n",
@@ -288,6 +316,50 @@ func TestBatchedInspectionMatchesOneQueryPerObject(t *testing.T) {
 	// The fixture exercises what the regrouping must preserve.
 	if want.ResumeTokens["tank/data"] != "1-token" || len(want.Clones["tank/data@a"]) != 1 || want.Received["tank/data@a"][propertyNamespace+"state:lineage"] != "hidden-a" || !slices.Equal(want.Holds["tank/data@a"], []string{"a-hold", "z-hold"}) {
 		t.Fatalf("fixture not exercised: %#v", want)
+	}
+}
+
+// The received column multiplies what a property query costs in ZFS, so it is
+// asked only for the namespace's keys, never for all, and the state read is
+// still what one query for all with the received column would have produced.
+func TestInspectionAsksForReceivedValuesOnlyInTheNamespace(t *testing.T) {
+	t.Parallel()
+	ns := propertyNamespace
+	pool := newRecordedPool()
+	state, err := (&Direct{runner: pool}).InspectState(t.Context(), "tank/data", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received []string
+	for _, call := range pool.calls {
+		if call[0] != "get" || !strings.Contains(call[4], "received") {
+			continue
+		}
+		if call[5] == "all" {
+			t.Fatalf("asked for the received column of every property: %v", call)
+		}
+		received = append(received, call[5])
+	}
+	want := ns + "enabled," + ns + "state:lineage," + ns + "state:owner," + ns + "state:snapshot," + ns + "state:target:t"
+	if !slices.Equal(received, []string{want}) {
+		t.Fatalf("received column asked for %q, want the keys all listed and the fixed keys %q", received, want)
+	}
+	// A received value masked by a local one, and a hidden fixed key.
+	if state.Received["tank/data"][ns+"enabled"] != "off" || state.Received["tank/data@a"][ns+"state:lineage"] != "hidden-a" {
+		t.Fatalf("received values not read: %#v", state.Received)
+	}
+	// Named for the chunk because tank/data lists it, but all omits it on
+	// tank/data@c and it is no fixed key, so it is not read there.
+	if value, ok := state.Received["tank/data@c"][ns+"state:target:t"]; ok {
+		t.Fatalf("read a hidden value all omits for a key that is not fixed: %q", value)
+	}
+	for object, values := range state.Received {
+		if _, ok := values["compression"]; ok {
+			t.Fatalf("read a received value outside the namespace on %s", object)
+		}
+	}
+	if !slices.Contains(state.Properties, Property{Dataset: "tank/data@b", Name: ns + "state:snapshot", Value: "snap-b", Source: SourceReceived}) {
+		t.Fatalf("received property missing: %#v", state.Properties)
 	}
 }
 
