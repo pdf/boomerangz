@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -251,6 +252,9 @@ func parseProperties(output []byte) ([]Property, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Canonical, like an inspection: a dataset's stored properties are
+	// compared across scans, and ZFS promises no order for user properties.
+	slices.SortFunc(properties, compareProperties)
 	return properties, nil
 }
 

@@ -299,3 +299,23 @@ func TestBatchedInspectionRefusesARowForAnUnnamedObject(t *testing.T) {
 		t.Fatalf("a row for an object the query did not name was accepted: %v", err)
 	}
 }
+
+func TestInspectionIgnoresTheOrderZFSListsPropertiesIn(t *testing.T) {
+	t.Parallel()
+	ns := propertyNamespace
+	ordered := newRecordedPool()
+	ordered.all["tank/data@a"] = "tank/data@a\t" + ns + "state:created\t2026\t-\tlocal\n" + "tank/data@a\t" + ns + "state:lineage\tline\t-\tlocal\n" + "tank/data@a\t" + ns + "state:snapshot\tsnap-a\t-\tlocal\n"
+	reversed := newRecordedPool()
+	reversed.all["tank/data@a"] = "tank/data@a\t" + ns + "state:snapshot\tsnap-a\t-\tlocal\n" + "tank/data@a\t" + ns + "state:lineage\tline\t-\tlocal\n" + "tank/data@a\t" + ns + "state:created\t2026\t-\tlocal\n"
+	want, err := (&Direct{runner: ordered}).InspectState(t.Context(), "tank/data", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := (&Direct{runner: reversed}).InspectState(t.Context(), "tank/data", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the same properties in another order read as a different state:\n got %#v\nwant %#v", got.Properties, want.Properties)
+	}
+}

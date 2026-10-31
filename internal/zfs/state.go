@@ -1,6 +1,7 @@
 package zfs
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -179,6 +180,13 @@ func (d *Direct) inspectState(ctx context.Context, dataset string, recursive boo
 	for _, snapshot := range snapshots {
 		slices.Sort(state.Holds[snapshot])
 	}
+	// ZFS lists an object's user properties, and a snapshot's clones, in no
+	// promised order, and the order can change when one is removed. Callers
+	// compare inspections to detect change, so the state is canonical.
+	slices.SortFunc(state.Properties, compareProperties)
+	for _, clones := range state.Clones {
+		slices.Sort(clones)
+	}
 	return state, nil
 }
 
@@ -229,6 +237,12 @@ func disappearedObject(err error, chunk []string) string {
 		}
 	}
 	return strings.Join(chunk, ", ")
+}
+
+// compareProperties orders properties canonically: by dataset, then name,
+// source and value.
+func compareProperties(a, b Property) int {
+	return cmp.Or(strings.Compare(a.Dataset, b.Dataset), strings.Compare(a.Name, b.Name), strings.Compare(string(a.Source), string(b.Source)), strings.Compare(a.Value, b.Value))
 }
 
 func validateObject(name string) error {

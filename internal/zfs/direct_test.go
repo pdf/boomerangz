@@ -225,3 +225,24 @@ func TestReseedOperationsUseBoundedArguments(t *testing.T) {
 		t.Fatalf("destroy args=%v", runner.args)
 	}
 }
+
+func TestStoredPropertiesAreCanonical(t *testing.T) {
+	t.Parallel()
+	rows := []string{
+		"tank/b\torg.boomerangz:local\tbackup\tlocal\n",
+		"tank/a\torg.boomerangz:state:owner\tme\tlocal\n",
+		"tank/a\torg.boomerangz:enabled\ton\tlocal\n",
+	}
+	read := func(lines ...string) []Property {
+		t.Helper()
+		properties, err := (&Direct{runner: &fakeRunner{output: []byte(strings.Join(lines, ""))}}).GetStoredProperties(t.Context(), []string{"tank/a", "tank/b"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return properties
+	}
+	// The same rows in another order are the same stored properties.
+	if a, b := read(rows...), read(rows[2], rows[0], rows[1]); !reflect.DeepEqual(a, b) {
+		t.Fatalf("order changed the result:\n%v\n%v", a, b)
+	}
+}
