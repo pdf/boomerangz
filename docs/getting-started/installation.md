@@ -2,26 +2,48 @@
 
 ## Supported platforms
 
-The currently supported targets, each with OpenZFS, are:
+The currently supported targets are CachyOS, Ubuntu 26.04 LTS and Ubuntu 26.10,
+each with OpenZFS. The packages may also work on compatible Arch Linux, Ubuntu
+and Debian systems, but those are not currently supported.
 
-- CachyOS;
-- Ubuntu 26.04 LTS;
-- Ubuntu 26.10.
+## Choose a package
 
-Every release is tested on each of them before it is published. The Arch User
-Repository packages may also work on compatible Arch Linux systems, and the
-Ubuntu package on other Ubuntu releases and on Debian, but those systems are
-not currently supported.
+::: code-group
 
-## Ubuntu
+```text [Arch Linux / derivatives]
+boomerangz      Build from the release source archive
+boomerangz-bin  Install a prebuilt static binary
+```
 
-Install from the Boomerangz apt repository, which carries the latest release
-for `amd64` and `arm64`. The package is the same on every Ubuntu release, so
-the repository has a single suite, `stable`.
+```text [Ubuntu]
+boomerangz      Install a prebuilt static binary
+```
 
-Add the repository's signing key and source, then install:
+:::
 
-```sh
+Every package installs the same executable, systemd unit, configuration,
+restricted SSH login-shell wrapper, manual pages, and shell completions, and
+creates the `boomerangz` account. None enables or starts the service. Prebuilt
+packages support `x86_64` and `aarch64`.
+
+## Install the package
+
+::: code-group
+
+```sh [Arch Linux / derivatives]
+# Install one with your preferred AUR workflow, and always inspect an AUR
+# build recipe before running it. The source package builds with CGO
+# disabled and Arch's PIE hardening; the two packages conflict.
+# Example with an installed AUR helper:
+paru -S boomerangz
+
+# Or choose the prebuilt release:
+paru -S boomerangz-bin
+```
+
+```sh [Ubuntu]
+# Add the repository's signing key and source. The repository carries the
+# latest release in a single suite, stable, for every Ubuntu release.
 sudo install -d -m 0755 /etc/apt/keyrings
 curl -fsSL https://boomerangz.org/apt/boomerangz-archive-keyring.gpg |
   sudo tee /etc/apt/keyrings/boomerangz.gpg >/dev/null
@@ -36,63 +58,27 @@ sudo apt update
 sudo apt install boomerangz
 ```
 
-The package depends on `zfsutils-linux` and recommends `openssh-client` for
-SSH destinations. It installs a static executable, the systemd unit,
-configuration, restricted SSH login-shell wrapper, manual pages, and shell
-completions, and creates the `boomerangz` account. It does not enable or start
-the service.
-
-Each release's `.deb` files are also attached to its GitHub release and covered
-by its `SHA256SUMS`, for installing a specific version with
-`sudo apt install ./boomerangz_<version>_<arch>.deb`.
-
-## Arch Linux
-
-### Choose a package
-
-::: code-group
-
-```text [Arch Linux / derivatives]
-boomerangz      Build from the release source archive
-boomerangz-bin  Install a prebuilt static binary
-```
-
 :::
 
-The packages conflict and install the same executable, systemd unit,
-configuration, restricted SSH login-shell wrapper, manual pages, and shell
-completions. The source package builds with CGO disabled and Arch's PIE
-hardening. The binary package supports `x86_64` and `aarch64`.
-
-Install one package with your preferred AUR workflow. Always inspect an AUR
-build recipe before running it.
+Alternatively, install from the files attached to the matching GitHub release:
 
 ::: code-group
 
 ```sh [Arch Linux / derivatives]
-# Example with an installed AUR helper:
-paru -S boomerangz
-
-# Or choose the prebuilt release:
-paru -S boomerangz-bin
-```
-
-:::
-
-Alternatively, download the generated `boomerangz-PKGBUILD` or
-`boomerangz-bin-PKGBUILD` from the matching GitHub release, place it in an empty
-directory as `PKGBUILD`, inspect it, and build as your normal user:
-
-::: code-group
-
-```sh [Arch Linux / derivatives]
+# Download boomerangz-PKGBUILD or boomerangz-bin-PKGBUILD, place it in an
+# empty directory as PKGBUILD, inspect it, and build as your normal user:
 makepkg --syncdeps --install
 ```
 
+```sh [Ubuntu]
+# Download the .deb for your architecture:
+sudo apt install ./boomerangz_<version>_<arch>.deb
+```
+
 :::
 
-Release downloads are covered by SHA-256 checksums in both the package recipe
-and the release's `SHA256SUMS` file.
+Release downloads are covered by the release's `SHA256SUMS` file, and the Arch
+package recipes carry the same checksums.
 
 ## Prepare the service
 
@@ -119,8 +105,21 @@ restoring the same installation; never clone that identity directory to another
 active host.
 
 Removing the package does not destroy datasets, snapshots, or replicated data,
-and neither removing nor purging it removes the `boomerangz` account or
-`/var/lib/boomerangz`, which holds the installation identity. On Ubuntu,
-`apt remove` keeps `/etc/boomerangz/config.toml` and `apt purge` removes it.
-Use the preview-first [clean procedure](/operations/recovery#explicit-clean)
-before removal only when you intentionally want to retire Boomerangz metadata.
+and leaves the `boomerangz` account and `/var/lib/boomerangz` in place. Use the
+preview-first [clean procedure](/operations/recovery#explicit-clean) before
+removal only when you intentionally want to retire Boomerangz metadata.
+
+::: code-group
+
+```sh [Arch Linux / derivatives]
+# A modified configuration is kept as /etc/boomerangz/config.toml.pacsave.
+sudo pacman -R boomerangz    # or boomerangz-bin
+```
+
+```sh [Ubuntu]
+# remove keeps /etc/boomerangz/config.toml; purge also removes it.
+sudo apt remove boomerangz
+sudo apt purge boomerangz
+```
+
+:::

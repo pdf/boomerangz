@@ -2,7 +2,33 @@
 
 ::: code-group
 
-```text [Arch Linux / Ubuntu]
+```text [Arch Linux / derivatives]
+/usr/bin/boomerangz
+    Executable.
+
+/usr/lib/boomerangz/boomerangz-shell
+    Restricted login-shell wrapper for the packaged boomerangz account.
+
+/etc/boomerangz/config.toml
+    Protected primary configuration.
+
+/etc/boomerangz/config.d/*.toml
+    Configuration drop-ins, applied in filename order.
+
+/etc/boomerangz/credentials.d/
+    Imported pairing bundles and dedicated SSH credentials.
+
+/var/lib/boomerangz/identity/
+    Persistent installation identity and managed certificate material.
+
+/run/boomerangz/boomerangz.sock
+    Local status and control socket; boomerangz:boomerangz, mode 0660.
+
+/usr/lib/systemd/system/boomerangz.service
+    systemd service unit, including start and live-reload actions.
+```
+
+```text [Ubuntu]
 /usr/bin/boomerangz
     Executable.
 

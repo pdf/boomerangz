@@ -68,7 +68,11 @@ Create the account's SSH directory:
 
 ::: code-group
 
-```sh [Arch Linux / Ubuntu]
+```sh [Arch Linux / derivatives]
+sudo install -d -m 0700 -o boomerangz -g boomerangz /var/lib/boomerangz/.ssh
+```
+
+```sh [Ubuntu]
 sudo install -d -m 0700 -o boomerangz -g boomerangz /var/lib/boomerangz/.ssh
 ```
 
@@ -109,7 +113,16 @@ user home:
 
 ::: code-group
 
-```sh [Arch Linux / Ubuntu]
+```sh [Arch Linux / derivatives]
+sudo useradd --system --user-group --create-home \
+  --home-dir /var/lib/boomerangz-replication \
+  --shell /bin/sh boomerangz-replication
+sudo install -d -m 0700 \
+  -o boomerangz-replication -g boomerangz-replication \
+  /var/lib/boomerangz-replication/.ssh
+```
+
+```sh [Ubuntu]
 sudo useradd --system --user-group --create-home \
   --home-dir /var/lib/boomerangz-replication \
   --shell /bin/sh boomerangz-replication
