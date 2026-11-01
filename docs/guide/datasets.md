@@ -126,6 +126,20 @@ placeholder and the replicas beneath move under it with their history. The
 same happens when a root starts sending to a destination only its members used
 before. This needs the `rename` permission on the destination.
 
+A placeholder is created with `org.boomerangz:state:placeholder=on`, and every
+replica is received with the same property set locally to `off`, so the
+replicas beneath a placeholder do not inherit its marker. `zfs get` shows the
+difference:
+
+```sh
+zfs get -r -o name,value,source org.boomerangz:state:placeholder backup/boomerangz/home
+```
+
+A replica received before this behaviour was introduced picks up its local
+`off` on its next receive. Until then it shows the marker as `on`, inherited
+from the placeholder above it; Boomerangz honours the marker only where it is
+set locally, so that inherited value is harmless.
+
 Each member keeps its own retention grid, send options, incremental mode,
 receive overrides and destinations, including destinations its root does not
 use. A root snapshots exactly the members that are due, atomically, and prunes

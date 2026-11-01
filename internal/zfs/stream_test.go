@@ -22,7 +22,13 @@ func TestStreamArguments(t *testing.T) {
 	}
 	receive := ReceiveOptions{Root: "backup/data", Discard: ReceiveDropFirst, Set: map[string]string{"readonly": "on"}, Exclude: []string{"readonly", "org.boomerangz:enabled", "compression", "compression"}}
 	args, err = receiveArgs(receive)
-	if err != nil || !reflect.DeepEqual(args, []string{"receive", "-u", "-s", "-d", "-o", "readonly=on", "-x", "compression", "-x", "org.boomerangz:enabled", "backup/data"}) {
+	if err != nil || !reflect.DeepEqual(args, []string{"receive", "-u", "-s", "-d", "-o", "readonly=on", "-o", "org.boomerangz:state:placeholder=off", "-x", "compression", "-x", "org.boomerangz:enabled", "backup/data"}) {
+		t.Fatalf("args=%v err=%v", args, err)
+	}
+	// A replica never inherits a placeholder's marker, even when nothing is
+	// overridden and the marker itself is among the exclusions.
+	args, err = receiveArgs(ReceiveOptions{Root: "backup/data", Discard: ReceiveExact, Exclude: []string{PlaceholderProperty}})
+	if err != nil || !reflect.DeepEqual(args, []string{"receive", "-u", "-s", "-o", "org.boomerangz:state:placeholder=off", "backup/data"}) {
 		t.Fatalf("args=%v err=%v", args, err)
 	}
 	send.Base = "tank/data#cursor"

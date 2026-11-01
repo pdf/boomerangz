@@ -241,17 +241,18 @@ ZFS-native recovery/ownership state - there is no separate database.
 | --- | --- | --- |
 | `state:version` | `Service.CreateSnapshot` and `Service.AdoptDataset`, with the owner and lineage; `boomerangz migrate` | The format the root's state is written in, as a decimal integer ([internal/lifecycle/version.go](internal/lifecycle/version.go)). A format version, not a release. A root with state and no marker is format v1, which predates it. |
 | `state:owner` | `lifecycle.RootAuthority` callers (adoption, first management) | Installation UUID that owns a source root ([internal/lifecycle/authority.go](internal/lifecycle/authority.go), `OwnerProperty`). |
-| `state:lineage` | Same as above | Per-root lineage UUID, shared by the root's owned snapshots ([internal/lifecycle/ownership.go](internal/lifecycle/ownership.go), `LineageProperty`). |
+| `state:lineage` | Same as above; on destinations, `Local.reconcile` after each verified receive | Per-root lineage UUID, shared by the root's owned snapshots ([internal/lifecycle/ownership.go](internal/lifecycle/ownership.go), `LineageProperty`). Each stream's replica is also stamped with it locally when it has none ([internal/transfer/local.go](internal/transfer/local.go)), and one that carries another lineage is refused; retirement clears that local copy from each replica it retires (`retireReference`, [internal/daemon/retirement.go](internal/daemon/retirement.go)). |
 | `state:snapshot` | `lifecycle.Metadata.Properties()` at snapshot creation | Per-snapshot UUID embedded on the snapshot itself, not the dataset. The creation time is not stored: the snapshot name encodes it to the nanosecond, and `Ownership` reads it from there. |
 | `state:reference:<target-id>:<stream-id>:<snapshot-uuid>` | `Service.ProtectSet` | Recovery proof for one stream's endpoint on one target: the stream's own snapshot, plus its descendants' for a `-R` stream, each held and later bookmarked ([internal/lifecycle/reference.go](internal/lifecycle/reference.go)). One per member stream, so members at different instants advance independently. The value is fixed-size JSON `{stream, created, recursive}`: the stream relative to the root (omitted for the root's own), the snapshot's creation time (bookmarks carry only the UUID, so the snapshot name cannot be rebuilt without it), and whether the stream carries its subtree. Everything else is derived: the lineage is the root's, the target ID and snapshot UUID are in the key, and the endpoint's snapshots and GUIDs are read from ZFS by `Reference.Sources`. |
 | `state:target:<target-id>` | `transfer` binding logic | A source's persistent identity for one configured destination ([internal/transfer/binding.go](internal/transfer/binding.go)). The value is JSON `{pool_guid, mapped, anchor_guid, anchor}`, in the root's format with no version of its own: `mapped` is the mapped dataset the binding was made for, and `anchor` is stored only while bootstrapping, when it names the mapped dataset's nearest existing ancestor; after the first receive the binding moves to the replica, which `mapped` already names. The rest of the in-memory `TargetBinding` is what configuration says about the target and is rebuilt from it: the key hashes the canonical target, which also encodes the transport and destination root, and the pool and relative path follow from the anchor. |
 | `state:target:<target-id>:suspended` | `transfer.SetTargetSuspended` | Marks a target unverified/suspended pending adoption revalidation. It stays separate from the binding because adoption suspends a remote it cannot reach, which may have no binding yet. |
 | `state:inactive` | `Service.ReconcileInactive` | JSON `InactiveMarker` recording when an owned root first went inactive, for delayed retirement ([internal/lifecycle/inactive.go](internal/lifecycle/inactive.go)). |
+| `state:placeholder` | `zfs.Direct.CreateReceiveParent` (`on`); every `zfs receive` (`off`) | Destination-only. `on` marks a receive parent boomerangz created for a hole and has not yet replaced ([internal/zfs/state.go](internal/zfs/state.go)); `receiveArgs` ([internal/zfs/stream.go](internal/zfs/stream.go)) passes `-o ...=off` on every receive, so a replica and a recursive stream's descendants never inherit a placeholder ancestor's marker. Only a local `on` on a dataset with no snapshot, bookmark or resume token counts (`isPlaceholder`, [internal/transfer/binding.go](internal/transfer/binding.go)), so a replica received before the `off` was introduced is still read correctly. |
 
 Cross-cutting rules that hold across all of these:
 
 - **Ownership (`state:owner`, `state:lineage`) is the authority anchor.**
-  `RootAuthority` (authority.go:32-61) requires both keys to be present,
+  `RootAuthority` (authority.go:41-76) requires both keys to be present,
   unambiguous, and `Source == local` on the *exact* root; a received or
   inherited copy is provenance only, never authority. A locally set owner
   that doesn't match the running installation's UUID is reported as a
@@ -338,7 +339,7 @@ Cross-cutting rules that hold across all of these:
   lineage that disagrees with the local one is refused (`RootAuthority`,
   `storedLineage`).
 - **Discovery reads only a narrow, fixed slice of this namespace globally.**
-  `GetLifecycleProperties` ([internal/zfs/direct.go:186-197](internal/zfs/direct.go#L186-L197))
+  `GetLifecycleProperties` ([internal/zfs/direct.go:204-215](internal/zfs/direct.go#L204-L215))
   fetches only `state:owner`, `state:lineage`, and `state:inactive` across
   every dataset at startup, to reconstruct responsibility without
   enumerating arbitrary user properties; reference and target-binding keys
@@ -355,7 +356,8 @@ Cross-cutting rules that hold across all of these:
 - **Clean and retirement inherit (never destroy) these properties as the
   final step**, after the underlying holds/bookmarks/snapshots they
   describe have already been resolved (`backend.InheritProperty` in
-  clean.go:336, inactive.go:207) - the property is a proof *about* ZFS
+  clean.go:358, inactive.go:207, and retirement.go:177 for a
+  replica's lineage) - the property is a proof *about* ZFS
   state, so it is only cleared once nothing depends on being able to
   reconstruct that proof again.
 
