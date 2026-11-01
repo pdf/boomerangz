@@ -1,0 +1,35 @@
+#!/bin/sh
+
+set -e
+
+shell_path=/usr/lib/boomerangz/boomerangz-shell
+
+# Versions whose upgrade needs operator action. An upgrade from before one of
+# them prints where its notes are.
+action_versions="0.2.0 0.3.0"
+
+case "$1" in
+configure)
+	# The account must exist before tmpfiles hands it /etc/boomerangz and
+	# /var/lib/boomerangz. tmpfiles also runs on every upgrade because dpkg
+	# reinstalls config.toml as root:root whenever it replaces it.
+	systemd-sysusers boomerangz.conf
+	systemd-tmpfiles --create boomerangz.conf
+	add-shell "$shell_path"
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload || true
+	fi
+	if [ -n "$2" ]; then
+		new_version=$(dpkg-query -W -f='${Version}' boomerangz)
+		for version in $action_versions; do
+			if dpkg --compare-versions "$2" lt "$version" &&
+				dpkg --compare-versions "$new_version" ge "$version"; then
+				printf 'boomerangz %s needs action before the daemon runs again:\n' "$version"
+				printf '    https://boomerangz.org/operations/upgrading#v%s\n' "$(printf '%s' "$version" | tr . -)"
+			fi
+		done
+	fi
+	;;
+esac
+
+exit 0

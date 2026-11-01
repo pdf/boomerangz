@@ -93,8 +93,8 @@ A user-visible CLI change is not complete until it also updates:
 - `docs/` - the VitePress site published to boomerangz.org. `docs/reference/cli.md`
   is the flag-by-flag reference; the `docs/guide/` and `docs/operations/` pages
   carry the prose that mentions the affected command.
-- `contrib/` - Arch packaging inputs. Shell completions list flags per
-  subcommand and must be updated in all three (`boomerangz.bash`,
+- `contrib/` - Arch and Ubuntu packaging inputs. Shell completions list flags
+  per subcommand and must be updated in all three (`boomerangz.bash`,
   `_boomerangz`, `boomerangz.fish`), as must `contrib/man/boomerangz.1`.
 
 A change an operator must act on when upgrading - a new delegated
@@ -102,8 +102,10 @@ permission, a configuration or layout change, behaviour that needs a reseed -
 also adds it to the next release's section of `docs/operations/upgrading.md`:
 what changed, what to do, and how to check it. The release workflow leads that
 version's GitHub release with the section, so it reads as the release header.
-Add the version to `action_versions` in `contrib/arch/boomerangz.install` too,
-so upgrading the package across it prints where the notes are. A release
+Add the version to `action_versions` in `contrib/arch/boomerangz.install` and
+`contrib/debian/postinst` too, so upgrading either package across it prints
+where the notes are; `TestActionVersionsMatchUpgradeNotes` keeps the three in
+step. A release
 needing nothing has no section.
 
 Follow the conventions already in `internal/cli/commands.go` rather than

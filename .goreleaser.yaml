@@ -44,6 +44,86 @@ source:
   format: tar.gz
   prefix_template: "{{ .ProjectName }}-v{{ .Version }}-source/"
 
+# One package serves every supported Ubuntu release: the binary is static, and
+# zfsutils-linux is the only thing it needs from the system. The release
+# workflow publishes these to the apt repository only after guest validation.
+nfpms:
+  - id: boomerangz
+    ids:
+      - boomerangz
+    package_name: boomerangz
+    file_name_template: "{{ .ConventionalFileName }}"
+    formats:
+      - deb
+    homepage: https://boomerangz.org
+    maintainer: Peter Fern <apt@boomerangz.org>
+    description: Property-driven ZFS snapshot and replication manager
+    license: MIT
+    section: admin
+    priority: optional
+    bindir: /usr/bin
+    mtime: "{{ .CommitDate }}"
+    dependencies:
+      - zfsutils-linux
+    recommends:
+      - openssh-client
+    contents:
+      - src: contrib/boomerangz-shell
+        dst: /usr/lib/boomerangz/boomerangz-shell
+        file_info:
+          mode: 0755
+      - src: LICENSE
+        dst: /usr/share/doc/boomerangz/copyright
+        file_info:
+          mode: 0644
+      # Group ownership needs the account, which does not exist at unpack
+      # time; postinst hands both to boomerangz through tmpfiles.
+      - dst: /etc/boomerangz
+        type: dir
+        file_info:
+          mode: 0750
+      - src: contrib/config.toml
+        dst: /etc/boomerangz/config.toml
+        type: config|noreplace
+        file_info:
+          mode: 0640
+      - src: contrib/systemd/boomerangz.service
+        dst: /usr/lib/systemd/system/boomerangz.service
+        file_info:
+          mode: 0644
+      - src: contrib/sysusers.d/boomerangz.conf
+        dst: /usr/lib/sysusers.d/boomerangz.conf
+        file_info:
+          mode: 0644
+      - src: contrib/tmpfiles.d/boomerangz.conf
+        dst: /usr/lib/tmpfiles.d/boomerangz.conf
+        file_info:
+          mode: 0644
+      - src: contrib/man/boomerangz.1
+        dst: /usr/share/man/man1/boomerangz.1
+        file_info:
+          mode: 0644
+      - src: contrib/man/boomerangz.toml.5
+        dst: /usr/share/man/man5/boomerangz.toml.5
+        file_info:
+          mode: 0644
+      - src: contrib/completions/boomerangz.bash
+        dst: /usr/share/bash-completion/completions/boomerangz
+        file_info:
+          mode: 0644
+      - src: contrib/completions/_boomerangz
+        dst: /usr/share/zsh/vendor-completions/_boomerangz
+        file_info:
+          mode: 0644
+      - src: contrib/completions/boomerangz.fish
+        dst: /usr/share/fish/vendor_completions.d/boomerangz.fish
+        file_info:
+          mode: 0644
+    scripts:
+      postinstall: contrib/debian/postinst
+      preremove: contrib/debian/prerm
+      postremove: contrib/debian/postrm
+
 checksum:
   name_template: SHA256SUMS
   algorithm: sha256

@@ -53,7 +53,7 @@ verify_pool_disk "$source_pool" "$source_disk" "$(disk_serial src)"
 verify_pool_disk "$destination_pool" "$destination_disk" "$(disk_serial dst)"
 
 printf 'kernel=%s\n' "$(uname -r)"
-pacman -Q linux-cachyos-lts linux-cachyos-lts-zfs zfs-utils
+zfs version
 printf 'zfs_module=%s\n' "$(modinfo -F version zfs)"
 
 # The probes below need a volume child carrying real bulk: the recursive send

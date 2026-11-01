@@ -350,6 +350,7 @@ if [[ $integration_mode != package ]]; then
 	cp "$repository/test/integration/guest/bootstrap.sh" "$artifacts/"
 	cp "$repository/test/integration/guest/delegated-matrix.sh" "$artifacts/"
 	cp "$repository/test/integration/guest/run-common.sh" "$artifacts/"
+	cp "$repository/test/integration/guest/installed-system.sh" "$artifacts/"
 	cp "$repository/contrib/systemd/boomerangz.service" "$artifacts/"
 	cp "$repository/contrib/boomerangz-shell" "$artifacts/"
 	cp "$repository/contrib/sysusers.d/boomerangz.conf" "$artifacts/boomerangz.sysusers"
@@ -358,6 +359,9 @@ fi
 if [[ -n $release_dir ]]; then
 	mkdir -p "$artifacts/target"
 	cp "$target_dir/package.sh" "$artifacts/target/package.sh"
+	# A target that installs through a package repository validates the one
+	# the release workflow publishes.
+	cp "$repository/.github/scripts/apt-repository.sh" "$artifacts/target/apt-repository.sh"
 	cp -R -- "$release_dir" "$artifacts/release"
 fi
 copy_to_guest "$artifacts" "$target_dir/run.sh"

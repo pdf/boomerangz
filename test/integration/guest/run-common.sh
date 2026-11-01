@@ -31,6 +31,9 @@ readonly destination_pool=boomerangz-test-$run_id-dst
 # daemon's first attempts fail the way a real transport outage does.
 readonly outage_port=2222
 readonly outage_pid_file=$artifact_dir/outage-sshd.pid
+# Arch installs sshd in /usr/bin, Ubuntu in /usr/sbin.
+sshd_binary=$(PATH=$PATH:/usr/sbin:/usr/bin command -v sshd)
+readonly sshd_binary
 export BOOMERANGZ_INTEGRATION_SOURCE_DEVICE=$source_device
 export BOOMERANGZ_INTEGRATION_DESTINATION_DEVICE=$destination_device
 
@@ -110,7 +113,7 @@ run_as_service() {
 
 restore_outage_link() {
 	printf 'restoring the outage SSH link on port %s\n' "$outage_port" >&2
-	sudo /usr/bin/sshd -p "$outage_port" -o "PidFile=$outage_pid_file" </dev/null
+	sudo "$sshd_binary" -p "$outage_port" -o "PidFile=$outage_pid_file" </dev/null
 }
 
 stop_outage_link() {

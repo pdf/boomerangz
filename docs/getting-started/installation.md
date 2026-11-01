@@ -2,11 +2,53 @@
 
 ## Supported platforms
 
-The currently supported target is CachyOS with OpenZFS. The Arch User Repository
-packages may also work on compatible Arch Linux systems, but those systems are
+The currently supported targets, each with OpenZFS, are:
+
+- CachyOS;
+- Ubuntu 26.04 LTS;
+- Ubuntu 26.10.
+
+Every release is tested on each of them before it is published. The Arch User
+Repository packages may also work on compatible Arch Linux systems, and the
+Ubuntu package on other Ubuntu releases and on Debian, but those systems are
 not currently supported.
 
-## Choose a package
+## Ubuntu
+
+Install from the Boomerangz apt repository, which carries the latest release
+for `amd64` and `arm64`. The package is the same on every Ubuntu release, so
+the repository has a single suite, `stable`.
+
+Add the repository's signing key and source, then install:
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://boomerangz.org/apt/boomerangz-archive-keyring.gpg |
+  sudo tee /etc/apt/keyrings/boomerangz.gpg >/dev/null
+sudo tee /etc/apt/sources.list.d/boomerangz.sources >/dev/null <<'SOURCES'
+Types: deb
+URIs: https://boomerangz.org/apt
+Suites: stable
+Components: main
+Signed-By: /etc/apt/keyrings/boomerangz.gpg
+SOURCES
+sudo apt update
+sudo apt install boomerangz
+```
+
+The package depends on `zfsutils-linux` and recommends `openssh-client` for
+SSH destinations. It installs a static executable, the systemd unit,
+configuration, restricted SSH login-shell wrapper, manual pages, and shell
+completions, and creates the `boomerangz` account. It does not enable or start
+the service.
+
+Each release's `.deb` files are also attached to its GitHub release and covered
+by its `SHA256SUMS`, for installing a specific version with
+`sudo apt install ./boomerangz_<version>_<arch>.deb`.
+
+## Arch Linux
+
+### Choose a package
 
 ::: code-group
 
@@ -76,6 +118,9 @@ and the new one; most need nothing. Preserve the configured
 restoring the same installation; never clone that identity directory to another
 active host.
 
-Removing the package does not destroy datasets, snapshots, or replicated data.
+Removing the package does not destroy datasets, snapshots, or replicated data,
+and neither removing nor purging it removes the `boomerangz` account or
+`/var/lib/boomerangz`, which holds the installation identity. On Ubuntu,
+`apt remove` keeps `/etc/boomerangz/config.toml` and `apt purge` removes it.
 Use the preview-first [clean procedure](/operations/recovery#explicit-clean)
 before removal only when you intentionally want to retire Boomerangz metadata.
