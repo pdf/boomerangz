@@ -52,6 +52,19 @@ if [[ ${BOOMERANGZ_INTEGRATION_MODE:-test} == benchmark ]]; then
 	exit 0
 fi
 
+# Pair through a TCP listener the way docs/guide/remotes.md tells an
+# operator to: both commands through sudo, before the service has started.
+# Root writes the token verifiers and managed certificates into the
+# service's identity directory and the bundle into credentials.d; the
+# service must still start, serve the listener, and read the bundle.
+printf '\n[listeners.replication]\nnetwork = "tcp"\naddress = "127.0.0.1:17443"\nadvertised_address = "localhost:17443"\nauth_mode = "mtls+token"\n' |
+	sudo tee -a /etc/boomerangz/config.toml >/dev/null
+pairing_dir=$(mktemp -d)
+# shellcheck disable=SC2024 # The operator's shell writes the bundle, as in the guide.
+(umask 077 && sudo boomerangz pairing create --listener replication --scope status >"$pairing_dir/bundle.json")
+sudo boomerangz pairing import native-check "$pairing_dir/bundle.json"
+rm -rf "$pairing_dir"
+
 sudo systemctl daemon-reload
 sudo systemctl start boomerangz.service
 sudo systemctl is-active boomerangz.service
@@ -71,6 +84,15 @@ if ! sudo test -S /run/boomerangz/boomerangz.sock; then
 	printf 'packaged service did not create its control socket\n' >&2
 	exit 1
 fi
+# The checks docs/operations/troubleshooting.md gives for a service that
+# will not start: nothing the pairing commands wrote may be left to root.
+if [[ -n $(sudo find /var/lib/boomerangz/identity ! -user boomerangz) ]] ||
+	[[ -n $(sudo find /etc/boomerangz/credentials.d -name '*.json' \( ! -group boomerangz -o ! -perm -g=r \)) ]]; then
+	printf 'pairing through sudo left files the service account cannot use:\n' >&2
+	sudo find /var/lib/boomerangz/identity /etc/boomerangz/credentials.d -printf '%u:%g %m %p\n' >&2
+	exit 1
+fi
+sudo -u boomerangz -H boomerangz status --credential native-check >/dev/null
 sudo systemctl reload boomerangz.service
 sudo systemctl is-active boomerangz.service
 if sudo systemctl is-enabled boomerangz.service >/dev/null 2>&1; then
