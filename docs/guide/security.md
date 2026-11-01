@@ -83,7 +83,7 @@ TCP listeners are opt-in and always require TLS plus `token`, `mtls`, or
 - `mtls+token` requires both.
 
 Prefer `mtls+token` for replication over an untrusted network. Grant only the
-scopes a client needs: `status`, `trigger`, `replicate`, `prune`, or `admin`.
+scopes a client needs: `status`, `trigger`, `replicate`, or `admin`.
 The `admin` scope includes every operation.
 
 Bind listeners only to intended interfaces and apply host firewall rules.

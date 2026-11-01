@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/pdf/boomerangz/internal/zfs"
@@ -33,5 +34,34 @@ func TestScopedRenameStaysInsideTheConfiguredRoot(t *testing.T) {
 	}
 	if len(backend.renamed) != 1 {
 		t.Fatalf("backend saw %v", backend.renamed)
+	}
+}
+
+type snapshotBackend struct {
+	zfs.Destination
+	destroyed []string
+}
+
+func (b *snapshotBackend) DestroySnapshot(_ context.Context, snapshot string) error {
+	b.destroyed = append(b.destroyed, snapshot)
+	return nil
+}
+
+func TestScopedDestroySnapshotStaysInsideTheConfiguredRoot(t *testing.T) {
+	t.Parallel()
+	backend := &snapshotBackend{}
+	scoped := &scopedExecutor{backend: backend, root: "tank/a"}
+	for _, snapshot := range []string{"tank/a@s", "tank/a/x@s"} {
+		if err := scoped.DestroySnapshot(t.Context(), snapshot); err != nil {
+			t.Fatalf("destroy %s: %v", snapshot, err)
+		}
+	}
+	for _, snapshot := range []string{"tank@s", "tank/b@s", "tank/ab@s", "tank/a", "tank/a/x", "tank/a#b", "tank/a@s,t", "tank/a@s%t"} {
+		if err := scoped.DestroySnapshot(t.Context(), snapshot); err == nil {
+			t.Errorf("destroyed %s", snapshot)
+		}
+	}
+	if !slices.Equal(backend.destroyed, []string{"tank/a@s", "tank/a/x@s"}) {
+		t.Fatalf("backend saw %v", backend.destroyed)
 	}
 }

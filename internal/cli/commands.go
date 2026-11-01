@@ -210,7 +210,7 @@ type pairingCreateCommand struct {
 	Listener   string        `help:"Configured TCP listener name; inferred when exactly one is configured."`
 	ClientCert string        `name:"client-cert" type:"existingfile" help:"External mTLS client certificate."`
 	ClientKey  string        `name:"client-key" type:"existingfile" help:"External mTLS client private key."`
-	Scopes     []string      `name:"scope" default:"status" enum:"status,trigger,replicate,prune,admin" help:"Authorized scope; repeat as needed. Allowed: ${enum}."`
+	Scopes     []string      `name:"scope" default:"status" enum:"status,trigger,replicate,admin" help:"Authorized scope; repeat as needed. Allowed: ${enum}."`
 	ExpiresIn  time.Duration `name:"expires-in" default:"0s" help:"Token lifetime; zero means no expiry."`
 }
 

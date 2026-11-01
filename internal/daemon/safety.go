@@ -32,7 +32,7 @@ type TargetChecker struct {
 // TargetEndpoint is one configured remote destination opened for an explicit
 // standalone administrative operation.
 type TargetEndpoint struct {
-	Executor        zfs.Executor
+	Executor        zfs.Destination
 	Transport       string
 	CanonicalTarget string
 	Root            string
@@ -80,7 +80,7 @@ func (s *Safety) Quiescent(ctx context.Context, datasets []string) error {
 	return nil
 }
 
-func checkResumeState(ctx context.Context, executor zfs.Executor, root string) error {
+func checkResumeState(ctx context.Context, executor zfs.Destination, root string) error {
 	state, err := executor.InspectState(ctx, root, true)
 	if err != nil {
 		return err

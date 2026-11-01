@@ -11,7 +11,7 @@ import (
 // attempt. Mode is suitable for status output.
 type Endpoint struct {
 	Mode     string
-	Executor zfs.Executor
+	Executor zfs.Destination
 	Stream   interface {
 		Run(context.Context, zfs.SendOptions, zfs.ReceiveOptions, zfs.Estimate, func(zfs.Progress)) (zfs.Progress, error)
 	}

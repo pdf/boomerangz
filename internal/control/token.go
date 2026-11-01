@@ -20,7 +20,11 @@ import (
 const tokenFilename = "token-verifiers.json"
 const tokenLockFilename = "token-verifiers.lock"
 
-var validScopes = []string{"admin", "prune", "replicate", "status", "trigger"}
+var validScopes = []string{"admin", "replicate", "status", "trigger"}
+
+// retiredScopes were once issued but never authorized anything. A bundle that
+// names one still imports, without it.
+var retiredScopes = []string{"prune"}
 
 // TokenRecord is safe to display: the one-time secret is never retained.
 type TokenRecord struct {

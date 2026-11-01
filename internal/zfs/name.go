@@ -26,6 +26,10 @@ func validateDataset(name string) error {
 // ValidateDataset rejects malformed names and command-option injection.
 func ValidateDataset(name string) error { return validateDataset(name) }
 
+// ValidateSnapshot accepts exactly one snapshot name: a valid dataset, one
+// '@', and a component naming nothing else.
+func ValidateSnapshot(name string) error { return validateSnapshot(name) }
+
 func validateComponent(kind, name string) error {
 	if name == "" || strings.ContainsAny(name, "/@#") {
 		return fmt.Errorf("invalid %s %q", kind, name)
@@ -40,7 +44,9 @@ func validateComponent(kind, name string) error {
 
 func validateSnapshot(name string) error {
 	dataset, snapshot, ok := strings.Cut(name, "@")
-	if !ok || strings.Contains(snapshot, "@") {
+	// `zfs destroy` reads a comma as a list and a percent sign as a range, so
+	// either would destroy more than the one snapshot named.
+	if !ok || strings.ContainsAny(snapshot, "@,%") {
 		return fmt.Errorf("invalid ZFS snapshot name %q", name)
 	}
 	if err := validateDataset(dataset); err != nil {

@@ -20,7 +20,7 @@ type remoteStream interface {
 
 type openedRemote struct {
 	mode     string
-	executor zfs.Executor
+	executor zfs.Destination
 	stream   remoteStream
 	close    func() error
 }

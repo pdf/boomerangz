@@ -90,8 +90,9 @@ preview is blocked when a named root keeps no state for the target.
 | `boomerangz pairing list` | List credentials issued or imported by this installation. |
 | `boomerangz pairing revoke ID` | Revoke one issued pairing. |
 
-Allowed scope values are `status`, `trigger`, `replicate`, `prune`, and
-`admin`. The default is `status`. An expiry of `0s` means no expiry.
+Allowed scope values are `status`, `trigger`, `replicate`, and `admin`.
+`replicate` covers every replication operation, including pruning and retiring
+replicas on the destination. The default is `status`. An expiry of `0s` means no expiry.
 `--client-cert` and `--client-key` must be supplied together.
 
 ## Restricted SSH command

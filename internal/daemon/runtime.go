@@ -41,7 +41,7 @@ type remoteApplier struct {
 	// host's own pools.
 	hostLocal func()
 	// reached is told each time the endpoint opens, or fails to.
-	reached func(context.Context, zfs.Executor, error)
+	reached func(context.Context, zfs.Destination, error)
 }
 
 func (a remoteApplier) Apply(ctx context.Context, request transfer.Request, report transfer.Reporter) (transfer.Result, error) {
@@ -593,7 +593,7 @@ func (r *Runtime) checkLocalDestinations(ctx context.Context) {
 // remoteReached checks a remote's permissions through an endpoint a transfer
 // just opened, when the remote is due a check. A failed open makes the next
 // successful one check again, so a remote that reconnects is rechecked.
-func (r *Runtime) remoteReached(ctx context.Context, name string, client remoteClient, executor zfs.Executor, openErr error) {
+func (r *Runtime) remoteReached(ctx context.Context, name string, client remoteClient, executor zfs.Destination, openErr error) {
 	r.mu.Lock()
 	current := r.remotes[name] == client
 	needs := r.destinationNeedsLocked()
@@ -1384,7 +1384,7 @@ func (r *Runtime) road(dataset, remote string, effective policy.Effective, membe
 	client := r.remotes[remote]
 	request := transfer.Request{Source: dataset, DestinationRoot: setting.Root, Policy: effective.Clone(), Members: slices.Clone(members), Transport: client.Transport(), RemoteName: remote, CanonicalTarget: client.CanonicalTarget(), HostLocal: r.hostLocal[remote]}
 	applier := remoteApplier{source: r.backend, client: client, installation: r.installation, lifecycle: r.lifecycle, hostLocal: func() { r.learnHostLocal(remote, client) },
-		reached: func(ctx context.Context, executor zfs.Executor, err error) {
+		reached: func(ctx context.Context, executor zfs.Destination, err error) {
 			r.remoteReached(ctx, remote, client, executor, err)
 		}}
 	coordinator, err := transfer.NewRoadwarrior(applier, request, r.pending, transfer.DefaultRetryPolicy(), r.now, rand.Float64)

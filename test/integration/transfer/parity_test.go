@@ -51,7 +51,7 @@ type parityTarget struct {
 	engine *transfer.Local
 	// destination is the executor the engine reconciles the receiving side
 	// through: the transport's own for a remote, the local one for local.
-	destination zfs.Executor
+	destination zfs.Destination
 	transport   string
 	remote      string
 	canonical   string
@@ -73,8 +73,9 @@ func (t parityTarget) target() string {
 //
 // TestGuestSSHTransfer proves one full bootstrap per remote mode. Everything
 // after a bootstrap - incremental -i and -I, a bookmark base, resuming an
-// interrupted receive, refusing an unrelated destination - goes through a
-// different zfs.Executor and a different Stream for each transport, and has
+// interrupted receive, refusing an unrelated destination, destroying a
+// replica snapshot - goes through a different zfs.Destination and a different
+// Stream for each transport, and has
 // only ever been exercised locally. local is included as the control arm: the
 // same table, the same source shape, the same assertions, so a difference is
 // attributable to the transport rather than to the test.
@@ -342,11 +343,15 @@ exec zfs "$@"
 				}
 				chainOK = t.Run(name, fn)
 			}
+			// Created by full-bootstrap, destroyed on the all target by
+			// replica-snapshot-destroyed.
+			var first lifecycle.Metadata
 			// Created by incremental-modes, destroyed by bookmark-incremental.
 			var last lifecycle.Metadata
 
 			chain("full-bootstrap", func(t *testing.T) {
-				first, snapErr := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-4*time.Hour),
+				var snapErr error
+				first, snapErr = snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-4*time.Hour),
 					request(t, latestTarget, source, zfs.Filesystem, "").Policy)
 				if snapErr != nil {
 					t.Fatal(snapErr)
@@ -437,6 +442,59 @@ exec zfs "$@"
 				}
 			})
 
+			chain("replica-snapshot-destroyed", func(t *testing.T) {
+				// Destination pruning and target retirement remove replica
+				// snapshots through the transport's own executor. The all
+				// target holds every snapshot since the bootstrap, so its
+				// oldest is one a prune would remove, and the newest stays to
+				// carry the next incremental.
+				oldest := all + "@" + first.Name()
+				for _, refused := range []string{all, oldest + "," + last.Name(), all + "@" + first.Name() + "%" + last.Name()} {
+					if destroyErr := allTarget.destination.DestroySnapshot(t.Context(), refused); destroyErr == nil {
+						t.Fatalf("destroyed %s, which names more than one snapshot", refused)
+					}
+				}
+				if transport.name != "local" {
+					// The source pool is outside every remote's scope. A
+					// sibling root would not do: ssh-shell and native bound
+					// a connection by the server's replication roots, which
+					// here cover every parity root, not by the root the
+					// client chose.
+					outside := source + "@" + first.Name()
+					if exists := exec.CommandContext(t.Context(), "zfs", "list", "-H", outside).Run(); exists != nil {
+						t.Fatalf("control: %s is missing before the refused destroy", outside)
+					}
+					if destroyErr := allTarget.destination.DestroySnapshot(t.Context(), outside); destroyErr == nil {
+						t.Fatalf("destroyed %s outside the endpoint's scope", outside)
+					}
+					if exists := exec.CommandContext(t.Context(), "zfs", "list", "-H", outside).Run(); exists != nil {
+						t.Fatalf("refused destroy removed %s", outside)
+					}
+				}
+				if destroyErr := allTarget.destination.DestroySnapshot(t.Context(), oldest); destroyErr != nil {
+					t.Fatalf("destroy %s: %v", oldest, destroyErr)
+				}
+				if exists := exec.CommandContext(t.Context(), "zfs", "list", "-H", oldest).Run(); exists == nil {
+					t.Fatalf("%s remained after it was destroyed", oldest)
+				}
+				state, stateErr := direct.InspectState(t.Context(), all, false)
+				if stateErr != nil {
+					t.Fatal(stateErr)
+				}
+				if got := len(lifecycle.Snapshots(state, all)); got != 4 {
+					t.Fatalf("destroying one replica left %d destination snapshots, want 4", got)
+				}
+				if _, snapErr := snapshots.CreateSnapshot(t.Context(), source, []string{source}, now.Add(-30*time.Minute),
+					request(t, allTarget, source, zfs.Filesystem, "").Policy); snapErr != nil {
+					t.Fatal(snapErr)
+				}
+				result, applyErr := allTarget.engine.Apply(t.Context(), request(t, allTarget, source, zfs.Filesystem, ""), nil)
+				// bookmark-incremental left the source on incremental=latest.
+				if applyErr != nil || !result.Verified || result.Plan.Mode != "incremental-latest" {
+					t.Fatalf("incremental after the destroy=%+v err=%v", result, applyErr)
+				}
+			})
+
 			chain("unrelated-destination-refused", func(t *testing.T) {
 				// The chain gives weak readiness control - this transport
 				// succeeded a phase ago - but nothing that attributes a
@@ -462,7 +520,7 @@ exec zfs "$@"
 				// source-side binding could be persisted, and recover the
 				// target the refusal above left blocked. This is the only
 				// phase that touches zfs.ReseedExecutor: AbortReceive and
-				// DestroyDataset are not part of zfs.Executor, and the CLI
+				// DestroyDataset are not part of zfs.Destination, and the CLI
 				// refuses the whole operation when an endpoint fails that
 				// assertion, so a remote executor missing them is a defect no
 				// bootstrap can see.

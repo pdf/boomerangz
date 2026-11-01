@@ -188,6 +188,25 @@ func TestCreateReceiveParentArguments(t *testing.T) {
 	}
 }
 
+func TestDestroySnapshotNamesExactlyOneSnapshot(t *testing.T) {
+	t.Parallel()
+	r := &fakeRunner{}
+	d := &Direct{runner: r}
+	if err := d.DestroySnapshot(t.Context(), "backup/a@s"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(r.args, []string{"destroy", "backup/a@s"}) {
+		t.Fatalf("args=%v", r.args)
+	}
+	// A dataset, bookmark, list, or range would destroy more than one snapshot.
+	for _, name := range []string{"backup/a", "backup/a#b", "backup/a@s@t", "backup/a@s,t", "backup/a@s%t", "backup/a@", "-x@s"} {
+		r.args = nil
+		if err := d.DestroySnapshot(t.Context(), name); err == nil || r.args != nil {
+			t.Errorf("destroy %s accepted", name)
+		}
+	}
+}
+
 func TestRenameDatasetArguments(t *testing.T) {
 	t.Parallel()
 	r := &fakeRunner{}

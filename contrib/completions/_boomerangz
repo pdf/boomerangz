@@ -74,7 +74,7 @@ _boomerangz_candidates() {
     --scope=*)
       local prefix=${current%%=*}=
       local value=${current#*=}
-      reply=(status trigger replicate prune admin)
+      reply=(status trigger replicate admin)
       reply=(${(M)reply:#${value}*})
       reply=("${(@)reply/#/${prefix}}")
       return
@@ -93,7 +93,7 @@ _boomerangz_candidates() {
     case $previous in
       --config|--config-dir|--socket|--client-cert|--client-key) completion_kind=files ;;
       --scope)
-        reply=(status trigger replicate prune admin)
+        reply=(status trigger replicate admin)
         reply=(${(M)reply:#${current}*})
         ;;
       --status)

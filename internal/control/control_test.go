@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -514,19 +515,70 @@ func TestTokenStoreNeverListsVerifier(t *testing.T) {
 func TestReplicationScopesAreDistinctFromControlScopes(t *testing.T) {
 	t.Parallel()
 	for method, want := range map[string]string{
-		"/boomerangz.replication.v1.RemoteService/Capabilities":           "replicate",
-		"/boomerangz.replication.v1.RemoteService/ListDatasets":           "replicate",
-		"/boomerangz.replication.v1.RemoteService/InspectDatasetIdentity": "replicate",
-		"/boomerangz.replication.v1.RemoteService/Receive":                "replicate",
-		"/boomerangz.replication.v1.RemoteService/Prune":                  "prune",
-		"/boomerangz.control.v1.StatusService/ListDatasets":               "status",
+		"/boomerangz.control.v1.StatusService/ListDatasets": "status",
+		"/boomerangz.control.v1.ControlService/Trigger":     "trigger",
+		"/boomerangz.control.v1.ControlService/Reload":      "admin",
 	} {
 		if got := methodScope(method); got != want {
 			t.Errorf("methodScope(%q)=%q, want %q", method, got, want)
 		}
 	}
-	if _, err := normalizeScopes([]string{"replicate", "prune"}); err != nil {
-		t.Fatalf("replication scopes rejected: %v", err)
+}
+
+// Every replication operation, destination pruning and retirement included,
+// is part of keeping a target replicated, so one scope covers the service.
+func TestEveryReplicationMethodNeedsReplicateScope(t *testing.T) {
+	t.Parallel()
+	desc := remoterpc.RemoteService_ServiceDesc
+	var methods []string
+	for _, method := range desc.Methods {
+		methods = append(methods, method.MethodName)
+	}
+	for _, stream := range desc.Streams {
+		methods = append(methods, stream.StreamName)
+	}
+	if !slices.Contains(methods, "DestroySnapshot") || !slices.Contains(methods, "Receive") {
+		t.Fatalf("service descriptor lists %v", methods)
+	}
+	for _, method := range methods {
+		full := "/" + desc.ServiceName + "/" + method
+		if got := methodScope(full); got != "replicate" {
+			t.Errorf("methodScope(%q)=%q, want replicate", full, got)
+		}
+	}
+}
+
+func TestRetiredPruneScopeIsNoLongerIssued(t *testing.T) {
+	t.Parallel()
+	if _, err := normalizeScopes([]string{"replicate", "prune"}); err == nil {
+		t.Fatal("prune scope accepted for a new token")
+	}
+}
+
+func TestImportDropsRetiredScopes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	bundle := PairingBundle{Version: 1, Endpoint: "localhost:7443", TrustMode: "system", ServerName: "localhost", TokenID: strings.Repeat("ab", 16), Secret: strings.Repeat("cd", 32)}
+	encode := func(t *testing.T, scopes ...string) []byte {
+		t.Helper()
+		bundle.Scopes = scopes
+		encoded, err := json.Marshal(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+	imported, err := ImportPairingBundle(dir, "old", encode(t, "prune", "replicate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadPairingBundle(imported)
+	if err != nil || !slices.Equal(loaded.Scopes, []string{"replicate"}) {
+		t.Fatalf("loaded scopes=%v err=%v", loaded.Scopes, err)
+	}
+	// A token whose only scope was retired never authorized anything.
+	if _, err := ImportPairingBundle(dir, "only-prune", encode(t, "prune")); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("prune-only bundle imported: %v", err)
 	}
 }
 

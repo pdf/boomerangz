@@ -47,7 +47,7 @@ func IsUnavailable(err error) bool {
 type Endpoint struct {
 	connection *grpc.ClientConn
 	client     *remoterpc.Client
-	executor   zfs.Executor
+	executor   zfs.Destination
 	stream     *remoterpc.Stream
 	canonical  string
 }
@@ -94,7 +94,7 @@ func CanonicalTarget(endpoint, root string) (string, error) {
 }
 
 // Executor exposes destination operations through the shared RPC contract.
-func (e *Endpoint) Executor() zfs.Executor { return e.executor }
+func (e *Endpoint) Executor() zfs.Destination { return e.executor }
 
 // Stream exposes bounded gRPC receive streaming.
 func (e *Endpoint) Stream() *remoterpc.Stream { return e.stream }

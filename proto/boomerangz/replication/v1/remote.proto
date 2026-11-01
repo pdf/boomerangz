@@ -16,6 +16,7 @@ service RemoteService {
   rpc RenameDataset(RenameDatasetRequest) returns (RenameDatasetResponse);
   rpc SetProperties(SetPropertiesRequest) returns (SetPropertiesResponse);
   rpc InheritProperty(InheritPropertyRequest) returns (InheritPropertyResponse);
+  rpc DestroySnapshot(DestroySnapshotRequest) returns (DestroySnapshotResponse);
   rpc Receive(stream ReceiveRequest) returns (ReceiveResponse);
 }
 
@@ -136,6 +137,14 @@ message InheritPropertyRequest {
 message SetPropertiesResponse {}
 
 message InheritPropertyResponse {}
+
+// DestroySnapshotRequest names exactly one snapshot to destroy, as pruning
+// and retiring replicas require.
+message DestroySnapshotRequest {
+  string snapshot = 1;
+}
+
+message DestroySnapshotResponse {}
 
 message ReceiveOptions {
   string root = 1;

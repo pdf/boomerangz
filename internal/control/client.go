@@ -263,6 +263,10 @@ func ImportPairingBundle(credentialsDir, name string, data []byte) (string, erro
 		if identifierErr != nil || len(identifier) != 16 || secretErr != nil || len(secret) != 32 || len(bundle.Scopes) == 0 {
 			return "", fmt.Errorf("pairing bundle token is incomplete")
 		}
+		bundle.Scopes = slices.DeleteFunc(slices.Clone(bundle.Scopes), func(scope string) bool { return slices.Contains(retiredScopes, scope) })
+		if len(bundle.Scopes) == 0 {
+			return "", fmt.Errorf("pairing bundle token grants only retired scopes; issue a new pairing")
+		}
 		if _, err := normalizeScopes(bundle.Scopes); err != nil {
 			return "", err
 		}

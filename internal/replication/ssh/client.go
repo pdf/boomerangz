@@ -39,7 +39,7 @@ type Config struct {
 type Client struct {
 	config      Config
 	command     zfs.CommandFactory
-	exec        zfs.Executor
+	exec        zfs.Destination
 	controlPath string
 	controlDir  string
 }
@@ -142,7 +142,7 @@ func (c *Client) CanonicalTarget() string {
 }
 
 // Executor exposes typed, bounded ZFS operations over this endpoint.
-func (c *Client) Executor() zfs.Executor { return c.exec }
+func (c *Client) Executor() zfs.Destination { return c.exec }
 
 // Probe performs one just-in-time sparse inventory query.
 func (c *Client) Probe(ctx context.Context) ([]zfs.Dataset, error) {

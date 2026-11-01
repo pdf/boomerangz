@@ -267,7 +267,7 @@ func (*failingPermissions) CheckPermissions(context.Context, string, []string) e
 func TestRemoteApplierReportsEachOpen(t *testing.T) {
 	t.Parallel()
 	var reached []error
-	applier := remoteApplier{client: failingRemote{}, reached: func(_ context.Context, _ zfs.Executor, err error) { reached = append(reached, err) }}
+	applier := remoteApplier{client: failingRemote{}, reached: func(_ context.Context, _ zfs.Destination, err error) { reached = append(reached, err) }}
 	if _, err := applier.Apply(t.Context(), transfer.Request{}, nil); err == nil {
 		t.Fatal("a failed open applied")
 	}
