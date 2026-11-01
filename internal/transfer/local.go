@@ -179,7 +179,7 @@ func (e *StreamsError) Unwrap() []error {
 // coordinate other processes and retain a stable effective policy generation.
 type Local struct {
 	backend      Backend
-	target       zfs.Executor
+	target       zfs.Destination
 	stream       Stream
 	lifecycle    *lifecycle.Service
 	installation string
@@ -211,7 +211,7 @@ func NewLocalWithService(backend Backend, stream Stream, installation string, se
 // NewRemote constructs an SSH-capable transfer engine. Source lifecycle writes
 // remain local; destination inspection and reconciliation use the remote typed
 // executor. The stream is responsible for the authenticated transport.
-func NewRemote(source Backend, destination zfs.Executor, stream Stream, installation string) (*Local, error) {
+func NewRemote(source Backend, destination zfs.Destination, stream Stream, installation string) (*Local, error) {
 	service, err := lifecycle.NewService(source, installation)
 	if err != nil {
 		return nil, err
@@ -221,7 +221,7 @@ func NewRemote(source Backend, destination zfs.Executor, stream Stream, installa
 
 // NewRemoteWithService constructs a remote transfer engine using the daemon's
 // shared source lifecycle coordinator.
-func NewRemoteWithService(source Backend, destination zfs.Executor, stream Stream, installation string, service *lifecycle.Service) (*Local, error) {
+func NewRemoteWithService(source Backend, destination zfs.Destination, stream Stream, installation string, service *lifecycle.Service) (*Local, error) {
 	if source == nil || destination == nil || stream == nil {
 		return nil, fmt.Errorf("source, remote destination, and stream are required")
 	}

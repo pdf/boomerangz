@@ -153,7 +153,7 @@ func (p *permissionChecks) begin(key destinationKey, need destinationNeed) bool 
 }
 
 // check runs a due check of key through executor and records it.
-func (p *permissionChecks) check(ctx context.Context, key destinationKey, need destinationNeed, executor zfs.Executor) {
+func (p *permissionChecks) check(ctx context.Context, key destinationKey, need destinationNeed, executor zfs.Destination) {
 	if !p.begin(key, need) {
 		return
 	}
@@ -216,7 +216,7 @@ func (p *permissionChecks) publishLocked() {
 
 // checkDestination checks need at its root or, while the root is absent, at
 // its nearest existing ancestor: the anchor a transfer's own preflight checks.
-func checkDestination(ctx context.Context, executor zfs.Executor, need destinationNeed) daemonstate.DestinationPermissions {
+func checkDestination(ctx context.Context, executor zfs.Destination, need destinationNeed) daemonstate.DestinationPermissions {
 	inventory, err := executor.ListDatasets(ctx)
 	if err != nil {
 		return daemonstate.DestinationPermissions{Error: fmt.Sprintf("list destination datasets: %v", err)}

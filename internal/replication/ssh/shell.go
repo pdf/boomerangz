@@ -172,7 +172,7 @@ func (s *Shell) Close() error {
 }
 
 // Executor exposes destination operations through the shared service.
-func (s *Shell) Executor() zfs.Executor { return s.remote.Executor() }
+func (s *Shell) Executor() zfs.Destination { return s.remote.Executor() }
 
 // NewStream returns a gRPC receive stream over this same SSH session.
 func (s *Shell) NewStream(zfsPath string) (*remoterpc.Stream, error) {

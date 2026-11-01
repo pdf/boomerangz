@@ -51,24 +51,32 @@ type Property struct {
 	Source  PropertySource
 }
 
-// Executor is the typed boundary for every ZFS mutation and query. A future
-// privileged backend must implement these operations without accepting raw
-// commands or flags from its client.
-type Executor interface {
+// Destination is the typed boundary a replication target exposes: the queries
+// and mutations that receiving, verifying, reconciling, pruning, and retiring
+// replicas need. A remote endpoint implements exactly this, so code that holds
+// a Destination cannot reach an operation a remote does not carry.
+type Destination interface {
 	ListDatasets(context.Context) ([]Dataset, error)
 	InspectDatasetIdentity(context.Context, string) (DatasetIdentity, error)
 	CheckPermissions(context.Context, string, []string) error
-	GetActivationProperties(context.Context) ([]Property, error)
-	GetStoredProperties(context.Context, []string) ([]Property, error)
 	InspectState(context.Context, string, bool) (State, error)
 	CreateReceiveParent(context.Context, string) error
 	SetProperties(context.Context, string, map[string]string) error
 	InheritProperty(context.Context, string, string) error
+	DestroySnapshot(context.Context, string) error
+}
+
+// Executor is the typed boundary for every ZFS mutation and query. A future
+// privileged backend must implement these operations without accepting raw
+// commands or flags from its client.
+type Executor interface {
+	Destination
+	GetActivationProperties(context.Context) ([]Property, error)
+	GetStoredProperties(context.Context, []string) ([]Property, error)
 	// Snapshot creates one snapshot name across an explicit set of datasets in
 	// a single atomic transaction group. The set may be sparse, which `-r` cannot
 	// express, so there is no recursive variant.
 	Snapshot(context.Context, []string, string, map[string]string) error
-	DestroySnapshot(context.Context, string) error
 	Bookmark(context.Context, string, string) error
 	DestroyBookmark(context.Context, string) error
 	Hold(context.Context, string, string) error
@@ -78,7 +86,7 @@ type Executor interface {
 // ReseedExecutor exposes the destructive destination operations used only by
 // the explicit, preview-first reseed workflow.
 type ReseedExecutor interface {
-	Executor
+	Destination
 	AbortReceive(context.Context, string) error
 	DestroyDataset(context.Context, string, bool) error
 }
@@ -93,7 +101,7 @@ const PlaceholderProperty = propertyNamespace + "state:placeholder"
 // placeholder with the replica it stood in for: moving the placeholder aside,
 // moving its children beneath the received replica, and removing it.
 type ReplicaExecutor interface {
-	Executor
+	Destination
 	RenameDataset(context.Context, string, string) error
 	DestroyDataset(context.Context, string, bool) error
 }

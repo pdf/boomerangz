@@ -38,8 +38,12 @@ over Unix sockets and optional TCP.
 
 Roughly bottom-up, in dependency order:
 
-- **zfs** - shell-free typed access to OpenZFS. `Executor`/`ReseedExecutor`
-  interfaces (executor.go); `Direct` is the real `os/exec`-backed
+- **zfs** - shell-free typed access to OpenZFS. `Destination`, `Executor`,
+  `ReseedExecutor` and `ReplicaExecutor` interfaces (executor.go):
+  `Destination` is what a replication target exposes, and is all a remote
+  endpoint implements, so code holding a remote cannot compile a call to a
+  source-only operation; `Executor` adds the source side (snapshots, holds,
+  bookmarks, activation queries). `Direct` is the real `os/exec`-backed
   implementation (direct.go, state.go); `stream.go` builds send/receive
   argument vectors and runs the sender->copy->receiver pipeline
   (`RunPipeline`/`LocalStream`), reused by the ssh/rpc/native transports via a
@@ -486,7 +490,9 @@ files are committed and regenerated via `go tool buf generate`.
   `Reload`, `Clean`). This is the local admin API used by the CLI.
 - `replication/v1/remote.proto` - `RemoteService`: dataset
   inspection/mutation RPCs (`InspectState`, `CreateReceiveParent`,
-  `SetProperties`, `InheritProperty`, ...) plus a client-streaming `Receive`.
+  `SetProperties`, `InheritProperty`, `DestroySnapshot`, ...) plus a
+  client-streaming `Receive`. Each RPC is bounded to the endpoint's
+  configured roots, and the client implements `zfs.Destination` with them.
   Shared by both the `ssh-shell` and `native` transports.
 
 ## Tests

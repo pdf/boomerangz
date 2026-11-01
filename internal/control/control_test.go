@@ -518,8 +518,11 @@ func TestReplicationScopesAreDistinctFromControlScopes(t *testing.T) {
 		"/boomerangz.replication.v1.RemoteService/ListDatasets":           "replicate",
 		"/boomerangz.replication.v1.RemoteService/InspectDatasetIdentity": "replicate",
 		"/boomerangz.replication.v1.RemoteService/Receive":                "replicate",
-		"/boomerangz.replication.v1.RemoteService/Prune":                  "prune",
-		"/boomerangz.control.v1.StatusService/ListDatasets":               "status",
+		// Destination pruning and retirement are part of keeping a target
+		// replicated, so a replicate token must be able to remove replicas.
+		"/boomerangz.replication.v1.RemoteService/DestroySnapshot": "replicate",
+		"/boomerangz.replication.v1.RemoteService/Prune":           "prune",
+		"/boomerangz.control.v1.StatusService/ListDatasets":        "status",
 	} {
 		if got := methodScope(method); got != want {
 			t.Errorf("methodScope(%q)=%q, want %q", method, got, want)

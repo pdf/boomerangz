@@ -13,7 +13,7 @@ import (
 // scopedExecutor prevents the direct SSH backend from issuing application
 // operations outside its configured destination subtree and required ancestors.
 type scopedExecutor struct {
-	backend zfs.Executor
+	backend zfs.Destination
 	root    string
 }
 
@@ -96,27 +96,12 @@ func (e *scopedExecutor) InheritProperty(ctx context.Context, dataset, property 
 	}
 	return e.backend.InheritProperty(ctx, dataset, property)
 }
-func (*scopedExecutor) GetActivationProperties(context.Context) ([]zfs.Property, error) {
-	return nil, fmt.Errorf("source operations are unavailable through a destination endpoint")
-}
-func (*scopedExecutor) GetStoredProperties(context.Context, []string) ([]zfs.Property, error) {
-	return nil, fmt.Errorf("source operations are unavailable through a destination endpoint")
-}
-func (*scopedExecutor) Snapshot(context.Context, []string, string, map[string]string) error {
-	return fmt.Errorf("source operations are unavailable through a destination endpoint")
-}
-func (*scopedExecutor) DestroySnapshot(context.Context, string) error {
-	return fmt.Errorf("source operations are unavailable through a destination endpoint")
-}
-func (*scopedExecutor) Bookmark(context.Context, string, string) error {
-	return fmt.Errorf("source operations are unavailable through a destination endpoint")
-}
-func (*scopedExecutor) DestroyBookmark(context.Context, string) error {
-	return fmt.Errorf("source operations are unavailable through a destination endpoint")
-}
-func (*scopedExecutor) Hold(context.Context, string, string) error {
-	return fmt.Errorf("source operations are unavailable through a destination endpoint")
-}
-func (*scopedExecutor) Release(context.Context, string, string) error {
-	return fmt.Errorf("source operations are unavailable through a destination endpoint")
+func (e *scopedExecutor) DestroySnapshot(ctx context.Context, snapshot string) error {
+	if err := zfs.ValidateSnapshot(snapshot); err != nil {
+		return err
+	}
+	if !e.inside(snapshot) {
+		return fmt.Errorf("snapshot is outside configured SSH destination scope")
+	}
+	return e.backend.DestroySnapshot(ctx, snapshot)
 }

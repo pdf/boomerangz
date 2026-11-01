@@ -14,7 +14,7 @@ import (
 )
 
 type retirementEndpoint struct {
-	executor zfs.Executor
+	executor zfs.Destination
 	request  transfer.Request
 	close    func() error
 }

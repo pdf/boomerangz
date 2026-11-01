@@ -30,6 +30,7 @@ const (
 	RemoteService_RenameDataset_FullMethodName          = "/boomerangz.replication.v1.RemoteService/RenameDataset"
 	RemoteService_SetProperties_FullMethodName          = "/boomerangz.replication.v1.RemoteService/SetProperties"
 	RemoteService_InheritProperty_FullMethodName        = "/boomerangz.replication.v1.RemoteService/InheritProperty"
+	RemoteService_DestroySnapshot_FullMethodName        = "/boomerangz.replication.v1.RemoteService/DestroySnapshot"
 	RemoteService_Receive_FullMethodName                = "/boomerangz.replication.v1.RemoteService/Receive"
 )
 
@@ -48,6 +49,7 @@ type RemoteServiceClient interface {
 	RenameDataset(ctx context.Context, in *RenameDatasetRequest, opts ...grpc.CallOption) (*RenameDatasetResponse, error)
 	SetProperties(ctx context.Context, in *SetPropertiesRequest, opts ...grpc.CallOption) (*SetPropertiesResponse, error)
 	InheritProperty(ctx context.Context, in *InheritPropertyRequest, opts ...grpc.CallOption) (*InheritPropertyResponse, error)
+	DestroySnapshot(ctx context.Context, in *DestroySnapshotRequest, opts ...grpc.CallOption) (*DestroySnapshotResponse, error)
 	Receive(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ReceiveRequest, ReceiveResponse], error)
 }
 
@@ -169,6 +171,16 @@ func (c *remoteServiceClient) InheritProperty(ctx context.Context, in *InheritPr
 	return out, nil
 }
 
+func (c *remoteServiceClient) DestroySnapshot(ctx context.Context, in *DestroySnapshotRequest, opts ...grpc.CallOption) (*DestroySnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DestroySnapshotResponse)
+	err := c.cc.Invoke(ctx, RemoteService_DestroySnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *remoteServiceClient) Receive(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ReceiveRequest, ReceiveResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &RemoteService_ServiceDesc.Streams[0], RemoteService_Receive_FullMethodName, cOpts...)
@@ -197,6 +209,7 @@ type RemoteServiceServer interface {
 	RenameDataset(context.Context, *RenameDatasetRequest) (*RenameDatasetResponse, error)
 	SetProperties(context.Context, *SetPropertiesRequest) (*SetPropertiesResponse, error)
 	InheritProperty(context.Context, *InheritPropertyRequest) (*InheritPropertyResponse, error)
+	DestroySnapshot(context.Context, *DestroySnapshotRequest) (*DestroySnapshotResponse, error)
 	Receive(grpc.ClientStreamingServer[ReceiveRequest, ReceiveResponse]) error
 	mustEmbedUnimplementedRemoteServiceServer()
 }
@@ -240,6 +253,9 @@ func (UnimplementedRemoteServiceServer) SetProperties(context.Context, *SetPrope
 }
 func (UnimplementedRemoteServiceServer) InheritProperty(context.Context, *InheritPropertyRequest) (*InheritPropertyResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method InheritProperty not implemented")
+}
+func (UnimplementedRemoteServiceServer) DestroySnapshot(context.Context, *DestroySnapshotRequest) (*DestroySnapshotResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DestroySnapshot not implemented")
 }
 func (UnimplementedRemoteServiceServer) Receive(grpc.ClientStreamingServer[ReceiveRequest, ReceiveResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method Receive not implemented")
@@ -463,6 +479,24 @@ func _RemoteService_InheritProperty_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RemoteService_DestroySnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DestroySnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RemoteServiceServer).DestroySnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RemoteService_DestroySnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RemoteServiceServer).DestroySnapshot(ctx, req.(*DestroySnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RemoteService_Receive_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(RemoteServiceServer).Receive(&grpc.GenericServerStream[ReceiveRequest, ReceiveResponse]{ServerStream: stream})
 }
@@ -520,6 +554,10 @@ var RemoteService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InheritProperty",
 			Handler:    _RemoteService_InheritProperty_Handler,
+		},
+		{
+			MethodName: "DestroySnapshot",
+			Handler:    _RemoteService_DestroySnapshot_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

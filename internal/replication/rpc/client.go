@@ -49,8 +49,8 @@ func (c *Client) Negotiate(ctx context.Context) error {
 	return nil
 }
 
-// Executor returns the destination-only ZFS surface implemented by the RPCs.
-func (c *Client) Executor() zfs.Executor { return &clientExecutor{client: c} }
+// Executor returns the destination ZFS surface implemented by the RPCs.
+func (c *Client) Executor() zfs.Destination { return &clientExecutor{client: c} }
 
 type clientExecutor struct{ client *Client }
 
@@ -124,29 +124,12 @@ func (e *clientExecutor) InheritProperty(ctx context.Context, dataset, property 
 	return e.client.mapError(err)
 }
 
-func (*clientExecutor) GetActivationProperties(context.Context) ([]zfs.Property, error) {
-	return nil, fmt.Errorf("source activation queries are unavailable through remote replication RPC")
-}
-func (*clientExecutor) GetStoredProperties(context.Context, []string) ([]zfs.Property, error) {
-	return nil, fmt.Errorf("source property queries are unavailable through remote replication RPC")
-}
-func (*clientExecutor) Snapshot(context.Context, []string, string, map[string]string) error {
-	return fmt.Errorf("source snapshot mutations are unavailable through remote replication RPC")
-}
-func (*clientExecutor) DestroySnapshot(context.Context, string) error {
-	return fmt.Errorf("source snapshot mutations are unavailable through remote replication RPC")
-}
-func (*clientExecutor) Bookmark(context.Context, string, string) error {
-	return fmt.Errorf("source bookmark mutations are unavailable through remote replication RPC")
-}
-func (*clientExecutor) DestroyBookmark(context.Context, string) error {
-	return fmt.Errorf("source bookmark mutations are unavailable through remote replication RPC")
-}
-func (*clientExecutor) Hold(context.Context, string, string) error {
-	return fmt.Errorf("source hold mutations are unavailable through remote replication RPC")
-}
-func (*clientExecutor) Release(context.Context, string, string) error {
-	return fmt.Errorf("source hold mutations are unavailable through remote replication RPC")
+func (e *clientExecutor) DestroySnapshot(ctx context.Context, snapshot string) error {
+	_, err := e.client.remote.DestroySnapshot(ctx, &DestroySnapshotRequest{Snapshot: snapshot})
+	if status.Code(err) == codes.Unimplemented {
+		return fmt.Errorf("remote endpoint cannot destroy snapshots; upgrade boomerangz on the remote host: %w", err)
+	}
+	return e.client.mapError(err)
 }
 
 func decodeClientState(response *InspectStateResponse) zfs.State {

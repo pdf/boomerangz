@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"net"
+	"os/exec"
 	"reflect"
 	"slices"
 	"strings"
@@ -12,7 +14,11 @@ import (
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
+	replicationrpc "github.com/pdf/boomerangz/internal/replication/rpc"
 	"github.com/pdf/boomerangz/internal/zfs"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 type targetBackend struct {
@@ -68,12 +74,12 @@ func (*targetBackend) EstimateSend(context.Context, zfs.SendOptions) (zfs.Estima
 	return zfs.Estimate{}, nil
 }
 
-func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) {
-	t.Parallel()
-	const installation = "11111111-1111-4111-8111-111111111111"
+// retirementFixture is a target at canonical holding one replica the source
+// proves it owns, beside a foreign snapshot retirement must leave alone.
+func retirementFixture(t *testing.T, canonical string) (*targetBackend, zfs.State, string, lifecycle.Reference) {
+	t.Helper()
 	const lineage = "22222222-2222-4222-8222-222222222222"
 	metadata := lifecycle.Metadata{Lineage: lineage, Snapshot: "33333333-3333-4333-8333-333333333333", Created: time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)}
-	canonical := "local:backup/data"
 	encoded, err := json.Marshal(map[string]any{"pool_guid": 90, "mapped": "backup/data", "anchor_guid": 91})
 	if err != nil {
 		t.Fatal(err)
@@ -93,14 +99,15 @@ func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) 
 			},
 		}},
 	}
-	runtime := &Runtime{backend: backend, installation: installation, config: config.Defaults()}
-	effective := policy.Effective{Local: []string{"backup/data"}, Discard: policy.DiscardOff}
 	reference := lifecycle.Reference{TargetID: lifecycle.TargetID(canonical), Dataset: "tank/data", Metadata: metadata}
 	// The source snapshot was pruned once checkpointed; its bookmark remains.
 	sourceState.Objects = append(sourceState.Objects, zfs.Object{Name: reference.BookmarkName(), Type: "bookmark", GUID: 20})
-	if err := runtime.retireReference(t.Context(), "tank/data", effective, sourceState, lineage, reference); err != nil {
-		t.Fatal(err)
-	}
+	return backend, sourceState, lineage, reference
+}
+
+func checkRetired(t *testing.T, backend *targetBackend, reference lifecycle.Reference) {
+	t.Helper()
+	owned := "backup/data@" + reference.Metadata.Name()
 	state := backend.states["backup/data"]
 	if !reflect.DeepEqual(backend.destroyed, []string{owned}) || slices.ContainsFunc(state.Objects, func(object zfs.Object) bool { return object.Name == owned }) || !slices.ContainsFunc(state.Objects, func(object zfs.Object) bool { return object.Name == "backup/data@foreign" }) {
 		t.Fatalf("unexpected target retirement: destroyed=%v state=%#v", backend.destroyed, state)
@@ -110,4 +117,69 @@ func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) 
 	}) {
 		t.Fatal("retired destination lineage remained local")
 	}
+}
+
+func TestRetireReferenceDestroysOnlyProvenReplicaAndClearsLineage(t *testing.T) {
+	t.Parallel()
+	backend, sourceState, lineage, reference := retirementFixture(t, "local:backup/data")
+	runtime := &Runtime{backend: backend, installation: "11111111-1111-4111-8111-111111111111", config: config.Defaults()}
+	effective := policy.Effective{Local: []string{"backup/data"}, Discard: policy.DiscardOff}
+	if err := runtime.retireReference(t.Context(), "tank/data", effective, sourceState, lineage, reference); err != nil {
+		t.Fatal(err)
+	}
+	checkRetired(t, backend, reference)
+}
+
+// rpcRemote reaches its target through the real remote replication service,
+// so a remote job exercises exactly the operations the protocol carries.
+type rpcRemote struct {
+	canonical string
+	client    *replicationrpc.Client
+}
+
+func (r *rpcRemote) CanonicalTarget() string { return r.canonical }
+func (*rpcRemote) Transport() string         { return "ssh" }
+func (r *rpcRemote) Open(context.Context) (openedRemote, error) {
+	return openedRemote{mode: "rpc", executor: r.client.Executor(), close: func() error { return nil }}, nil
+}
+
+func newRPCRemote(t *testing.T, canonical string, backend zfs.Executor, root string) *rpcRemote {
+	t.Helper()
+	service, err := replicationrpc.NewServerWithReceiver(backend, root, func(ctx context.Context, _ []string) *exec.Cmd {
+		return exec.CommandContext(ctx, "false")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := bufconn.Listen(1 << 20)
+	server := grpc.NewServer()
+	replicationrpc.RegisterRemoteServiceServer(server, service)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	connection, err := grpc.NewClient("passthrough:///bufconn",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	client, err := replicationrpc.NewClient(replicationrpc.NewRemoteServiceClient(connection), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &rpcRemote{canonical: canonical, client: client}
+}
+
+func TestRetireReferenceDestroysProvenReplicaOnARemoteTarget(t *testing.T) {
+	t.Parallel()
+	const canonical = "ssh://offsite.example/backup/data"
+	backend, sourceState, lineage, reference := retirementFixture(t, canonical)
+	cfg := config.Defaults()
+	cfg.Remotes = map[string]config.RemoteConfig{"offsite": {Transport: "ssh", Root: "backup/data"}}
+	runtime := &Runtime{backend: &targetBackend{}, installation: "11111111-1111-4111-8111-111111111111", config: cfg, remotes: map[string]remoteClient{"offsite": newRPCRemote(t, canonical, backend, "backup/data")}}
+	effective := policy.Effective{Remote: []string{"offsite"}, Discard: policy.DiscardOff}
+	if err := runtime.retireReference(t.Context(), "tank/data", effective, sourceState, lineage, reference); err != nil {
+		t.Fatal(err)
+	}
+	checkRetired(t, backend, reference)
 }

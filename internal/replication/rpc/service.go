@@ -24,26 +24,26 @@ const ProtocolVersion = 4
 // MaxStreamChunk bounds each in-memory ZFS data message.
 const MaxStreamChunk = 256 * 1024
 
-var operations = []string{"abort-receive", "capabilities", "destroy-dataset", "permissions", "prepare-receive", "probe", "receive", "reconcile", "rename-dataset", "resume", "verify"}
+var operations = []string{"abort-receive", "capabilities", "destroy-dataset", "destroy-snapshot", "permissions", "prepare-receive", "probe", "receive", "reconcile", "rename-dataset", "resume", "verify"}
 
 // Server implements the transport-neutral remote endpoint over a typed ZFS
 // executor. AllowedRoot limits every mutation and receive to one configured
 // destination subtree.
 type Server struct {
 	UnimplementedRemoteServiceServer
-	backend      zfs.Executor
+	backend      zfs.Destination
 	allowedRoots []string
 	receive      zfs.CommandFactory
 }
 
 // NewServer constructs a scoped remote endpoint using an explicit ZFS binary.
-func NewServer(backend zfs.Executor, allowedRoot, zfsPath string) (*Server, error) {
+func NewServer(backend zfs.Destination, allowedRoot, zfsPath string) (*Server, error) {
 	return NewServerForRoots(backend, []string{allowedRoot}, zfsPath)
 }
 
 // NewServerForRoots constructs one endpoint bounded to the configured
 // destination subtrees.
-func NewServerForRoots(backend zfs.Executor, allowedRoots []string, zfsPath string) (*Server, error) {
+func NewServerForRoots(backend zfs.Destination, allowedRoots []string, zfsPath string) (*Server, error) {
 	if zfsPath == "" {
 		return nil, fmt.Errorf("remote ZFS executor and executable are required")
 	}
@@ -54,13 +54,13 @@ func NewServerForRoots(backend zfs.Executor, allowedRoots []string, zfsPath stri
 
 // NewServerWithReceiver injects the receive process boundary for tests and
 // privileged implementations while preserving validated receive arguments.
-func NewServerWithReceiver(backend zfs.Executor, allowedRoot string, receive zfs.CommandFactory) (*Server, error) {
+func NewServerWithReceiver(backend zfs.Destination, allowedRoot string, receive zfs.CommandFactory) (*Server, error) {
 	return NewServerForRootsWithReceiver(backend, []string{allowedRoot}, receive)
 }
 
 // NewServerForRootsWithReceiver injects the receive process boundary while
 // allowing one authenticated listener to serve several explicit roots.
-func NewServerForRootsWithReceiver(backend zfs.Executor, allowedRoots []string, receive zfs.CommandFactory) (*Server, error) {
+func NewServerForRootsWithReceiver(backend zfs.Destination, allowedRoots []string, receive zfs.CommandFactory) (*Server, error) {
 	if backend == nil || receive == nil {
 		return nil, fmt.Errorf("remote ZFS executor and receive command are required")
 	}
@@ -231,6 +231,22 @@ func (s *Server) InheritProperty(ctx context.Context, request *InheritPropertyRe
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return &InheritPropertyResponse{}, nil
+}
+
+// DestroySnapshot removes one snapshot within scope, as pruning and retiring
+// replicas require. Only a single snapshot name is accepted: `zfs destroy`
+// would read a dataset, list, or range as something larger.
+func (s *Server) DestroySnapshot(ctx context.Context, request *DestroySnapshotRequest) (*DestroySnapshotResponse, error) {
+	if err := zfs.ValidateSnapshot(request.GetSnapshot()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if !s.inside(request.GetSnapshot()) {
+		return nil, status.Error(codes.PermissionDenied, "snapshot is outside the configured destination scope")
+	}
+	if err := s.backend.DestroySnapshot(ctx, request.GetSnapshot()); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &DestroySnapshotResponse{}, nil
 }
 
 type diagnosticBuffer struct {
