@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/pdf/boomerangz/internal/ownership"
 )
 
 const managedLeafRenewBefore = 30 * 24 * time.Hour
@@ -137,6 +139,9 @@ func atomicPrivateFile(path string, data []byte, mode os.FileMode) error {
 	if err := file.Chmod(mode); err != nil {
 		return err
 	}
+	if err := ownership.Inherit(file); err != nil {
+		return err
+	}
 	if _, err := file.Write(data); err != nil {
 		return err
 	}
@@ -188,7 +193,7 @@ func encodePrivateKey(key ed25519.PrivateKey) ([]byte, error) {
 
 func managedLock(identityDir string) (*os.File, error) {
 	dir := filepath.Join(identityDir, "pki")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ownership.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(dir, ".lock")
@@ -197,6 +202,9 @@ func managedLock(identityDir string) (*os.File, error) {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), path)
+	if err := ownership.Inherit(file); err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
 	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
 		return nil, errors.Join(err, file.Close())
 	}
@@ -294,7 +302,7 @@ func ensureManagedServerIdentity(identityDir, listener, advertised string) (mana
 	}
 	defer func() { _ = lock.Close() }()
 	dir := filepath.Join(identityDir, "pki", "listeners", listener)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ownership.MkdirAll(dir, 0o700); err != nil {
 		return managedIdentity{}, err
 	}
 	ca, caKey, caPath, err := ensureCA(dir, "Boomerangz server CA for "+listener)
@@ -331,7 +339,7 @@ func ensureManagedClientCA(identityDir string) (certPath string, err error) {
 	}
 	defer func() { _ = lock.Close() }()
 	dir := filepath.Join(identityDir, "pki", "clients")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ownership.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	_, _, path, err := ensureCA(dir, "Boomerangz managed client CA")
@@ -345,7 +353,7 @@ func issueManagedClientIdentity(identityDir, name string) (certificate, key []by
 	}
 	defer func() { _ = lock.Close() }()
 	dir := filepath.Join(identityDir, "pki", "clients")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ownership.MkdirAll(dir, 0o700); err != nil {
 		return nil, nil, err
 	}
 	ca, caKey, _, err := ensureCA(dir, "Boomerangz managed client CA")

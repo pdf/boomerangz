@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/pdf/boomerangz/internal/testutil/ownershiptest"
 )
 
 func TestConcurrentCreation(t *testing.T) {
@@ -94,4 +96,25 @@ func TestExplicitRecoveryUsesExpectedIdentity(t *testing.T) {
 	if actual, _ := Read(dir); actual != recovered {
 		t.Fatalf("recovered identity=%s", actual)
 	}
+}
+
+// A lifecycle command run through sudo before the daemon's first start
+// creates the identity; it must still belong to the account owning the state
+// directory, or the daemon cannot read it.
+func TestIdentityWritesInheritServiceOwnership(t *testing.T) {
+	recorder := ownershiptest.Record(t)
+	dir := filepath.Join(t.TempDir(), "identity")
+	current, err := LoadOrCreate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder.Inherited(t, dir)
+	recovered, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Recover(dir, current, recovered); err != nil {
+		t.Fatal(err)
+	}
+	recorder.Inherited(t, dir)
 }

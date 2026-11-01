@@ -205,10 +205,13 @@ Primary configuration file.
 Lexically ordered configuration drop-ins.
 .TP
 .I /etc/boomerangz/credentials.d/
-Imported client credentials and SSH key material.
+Imported client credentials and SSH key material. Run as root,
+.B pairing import
+gives a bundle the directory's group and makes it readable by that group.
 .TP
 .I /var/lib/boomerangz/identity/
-Installation identity, server identity, and token verifiers.
+Installation identity, server identity, and token verifiers. Run as root,
+commands give what they create here the owner of its directory.
 .TP
 .I /run/boomerangz/boomerangz.sock
 Local daemon control socket.

@@ -22,17 +22,32 @@ boomerangz dataset inspect tank/data
 ## The service does not start
 
 **Look for:** an invalid configuration, an unreadable key, a missing runtime
-directory, or another process holding the installation lifecycle lock.
+directory, another process holding the installation lifecycle lock, or
+`permission denied` on a file under `/var/lib/boomerangz/identity` or
+`/etc/boomerangz/credentials.d`.
 
 **Check:**
 
 ```sh
 boomerangz config check
 sudo -u boomerangz test -r /etc/boomerangz/config.toml
+sudo find /var/lib/boomerangz/identity ! -user boomerangz
+sudo find /etc/boomerangz/credentials.d -name '*.json' \( ! -group boomerangz -o ! -perm -g=r \)
 ```
 
 Correct the reported configuration or permissions. Run only one daemon for an
 installation.
+
+Earlier releases left files that `boomerangz pairing` and the lifecycle
+commands wrote through `sudo` owned by root and readable only by root. Either
+`find` above lists them; hand them back to the service and start it again:
+
+```sh
+sudo chown -R boomerangz:boomerangz /var/lib/boomerangz/identity
+sudo chown root:boomerangz /etc/boomerangz/credentials.d/*.json
+sudo chmod 0640 /etc/boomerangz/credentials.d/*.json
+sudo systemctl restart boomerangz.service
+```
 
 ## A dataset is not managed
 

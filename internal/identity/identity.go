@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+
+	"github.com/pdf/boomerangz/internal/ownership"
 )
 
 // Filename is the fixed installation identity basename inside the configured directory.
@@ -72,7 +74,7 @@ func LoadOrCreate(dir string) (string, error) {
 	if err == nil || !errors.Is(err, os.ErrNotExist) {
 		return value, err
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := ownership.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
 	value, err = New()
@@ -84,6 +86,9 @@ func LoadOrCreate(dir string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = os.Remove(temp.Name()) }()
+	if err := ownership.Inherit(temp); err != nil {
+		return "", errors.Join(err, temp.Close())
+	}
 	_, writeErr := io.WriteString(temp, value+"\n")
 	err = errors.Join(writeErr, temp.Sync(), temp.Close())
 	if err != nil {
@@ -121,6 +126,9 @@ func Recover(dir, expected, recovered string) error {
 		return err
 	}
 	defer func() { _ = os.Remove(temp.Name()) }()
+	if err := ownership.Inherit(temp); err != nil {
+		return errors.Join(err, temp.Close())
+	}
 	_, writeErr := io.WriteString(temp, recovered+"\n")
 	err = errors.Join(writeErr, temp.Sync(), temp.Close())
 	if err != nil {

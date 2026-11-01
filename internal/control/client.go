@@ -22,6 +22,7 @@ import (
 
 	"github.com/pdf/boomerangz/internal/config"
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
+	"github.com/pdf/boomerangz/internal/ownership"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -271,7 +272,7 @@ func ImportPairingBundle(credentialsDir, name string, data []byte) (string, erro
 			return "", err
 		}
 	}
-	if err := os.MkdirAll(credentialsDir, 0o700); err != nil {
+	if err := ownership.MkdirAllShared(credentialsDir); err != nil {
 		return "", err
 	}
 	path := filepath.Join(credentialsDir, name+".json")
@@ -281,6 +282,11 @@ func ImportPairingBundle(credentialsDir, name string, data []byte) (string, erro
 	}
 	defer func() { _ = os.Remove(file.Name()) }()
 	if err := file.Chmod(0o600); err != nil {
+		return "", err
+	}
+	// The daemon reads imported bundles through the directory's group: the
+	// packaged credentials_dir is root:boomerangz, mode 0750.
+	if err := ownership.Shared(file); err != nil {
 		return "", err
 	}
 	encoder := json.NewEncoder(file)
