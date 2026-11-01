@@ -846,7 +846,8 @@ ControlService.Reconcile
 ```
 
 The native transport exposes the same protobuf probe, receive,
-resume-token, verification, reconciliation, and prune services as SSH shell.
+resume-token, verification, reconciliation, and replica-pruning services as
+SSH shell, all under the `replicate` scope.
 
 Native clients name an imported pairing credential and destination root. The
 pairing bundle remains the sole source of the network endpoint, server trust,
@@ -921,7 +922,7 @@ explicit trust update or re-pairing.
 
 Issue one token per client by default so clients can have separate scopes and be
 revoked independently. A shared token remains possible. Suggested scopes are
-`status`, `trigger`, `replicate`, `prune`, and `admin`.
+`status`, `trigger`, `replicate`, and `admin`.
 
 The CLI represents this as one `pairing` create, import, list, and revoke
 workflow rather than requiring users to repeat listener endpoint and trust

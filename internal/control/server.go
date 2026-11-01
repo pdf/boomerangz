@@ -250,9 +250,6 @@ func tlsServerConfig(name string, listener config.ListenerConfig, identityDir st
 
 func methodScope(method string) string {
 	if strings.Contains(method, ".replication.v1.RemoteService/") {
-		if strings.HasSuffix(method, "/Prune") {
-			return "prune"
-		}
 		return "replicate"
 	}
 	if strings.HasSuffix(method, "/GetStatus") || strings.HasSuffix(method, "/WatchStatus") || strings.HasSuffix(method, "/ListDatasets") {

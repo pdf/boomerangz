@@ -128,7 +128,7 @@ _boomerangz() {
         --scope=*)
             local scope_prefix=${current%%=*}=
             local scope_value=${current#*=}
-            _boomerangz_complete_words 'status trigger replicate prune admin' "$scope_value"
+            _boomerangz_complete_words 'status trigger replicate admin' "$scope_value"
             for i in "${!COMPREPLY[@]}"; do
                 COMPREPLY[i]=${scope_prefix}${COMPREPLY[i]}
             done
@@ -151,7 +151,7 @@ _boomerangz() {
                 _boomerangz_complete_files "$current"
                 ;;
             --scope)
-                _boomerangz_complete_words 'status trigger replicate prune admin' "$current"
+                _boomerangz_complete_words 'status trigger replicate admin' "$current"
                 ;;
             --status)
                 _boomerangz_complete_words 'all active member excluded target inactive invalid' "$current"
