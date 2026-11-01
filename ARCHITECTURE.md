@@ -55,6 +55,13 @@ Roughly bottom-up, in dependency order:
 - **config** - TOML config struct, `Defaults()`, `Load` (primary file +
   `config.d/*.toml` drop-ins merged by kind), `Validate()`, and
   `MarshalRedacted` for `config show`.
+- **ownership** - keeps what the CLI writes through `sudo` usable by the
+  service account. Run as root, each file and directory created through it
+  takes the owner of the directory holding it (`Inherit`, `MkdirAll`), and an
+  imported credential the daemon only reads is also made readable by the
+  directory's group (`Shared`, `MkdirAllShared`). Every write under
+  `paths.identity_dir`, into `paths.credentials_dir`, and of the lifecycle
+  lock goes through it; run as anyone else it changes nothing.
 - **identity** - the non-secret installation UUID persisted under
   `paths.identity_dir` (`LoadOrCreate`, `Recover`). Independent of TLS/token
   material.
@@ -133,6 +140,9 @@ Roughly bottom-up, in dependency order:
 - **testutil/zfstest** - guards used by `test/integration` to ensure
   destructive ZFS commands only ever touch disposable QEMU-guest disks/pools
   (`VerifyGuestGuard`, `VerifyGuestPool`), never a real host pool.
+- **testutil/ownershiptest** - `Record` makes `ownership` behave as root
+  and records each change instead of making it; `Inherited` then checks that
+  everything a test wrote under a directory was given its directory's owner.
 
 ## Property to send/receive mapping (`internal/policy`, `internal/zfs/stream.go`, `internal/transfer/plan.go`)
 
@@ -541,7 +551,8 @@ treat the plan as historical intent, not a current map:
 - `internal/daemonstate` and `internal/statusui` exist but are not named in
   the plan's package list.
 - `internal/testutil/commandtest` (named in the plan) does not exist; only
-  `internal/testutil/zfstest` is present.
+  `internal/testutil/zfstest` and `internal/testutil/ownershiptest` are
+  present.
 - Section 5's per-snapshot metadata lists `state:created`. It is no longer
   stored: the snapshot name already encodes the creation time, and ownership
   requires the name to match the metadata anyway.

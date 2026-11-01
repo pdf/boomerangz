@@ -12,6 +12,7 @@ import (
 	"github.com/pdf/boomerangz/internal/config"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	"github.com/pdf/boomerangz/internal/policy"
+	"github.com/pdf/boomerangz/internal/testutil/ownershiptest"
 	"github.com/pdf/boomerangz/internal/zfs"
 )
 
@@ -144,6 +145,23 @@ func TestAdoptionReviewsLocalTargetWithoutSecondFlag(t *testing.T) {
 	if err := runAdopt(t.Context(), &applied, cfg, executor, "tank", true, true); err != nil {
 		t.Fatalf("owned dataset could not be revalidated through adoption: %v", err)
 	}
+}
+
+// The daemon takes the lifecycle lock too, so one a command run through sudo
+// leaves root-owned would stop the daemon starting.
+func TestLifecycleLockInheritsServiceOwnership(t *testing.T) {
+	recorder := ownershiptest.Record(t)
+	runtimeDir := filepath.Join(t.TempDir(), "run")
+	cfg := config.Defaults()
+	cfg.Paths.SocketPath = filepath.Join(runtimeDir, "control.sock")
+	lock, err := lifecycleLock(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recorder.Inherited(t, runtimeDir)
 }
 
 func TestStandaloneLifecycleRefusesDaemonAndConcurrentApply(t *testing.T) {

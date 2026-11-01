@@ -124,6 +124,7 @@ failure attributable to the transport instead of to the test.
 | Daemon control socket lifecycle | `TestGuestDaemonControl` |
 | Recovery after an abrupt restart: the restarted snapshot job ends `scheduled` on the adopted snapshot rather than duplicating it | `TestGuestDaemonAbruptRestart` |
 | Packaged systemd unit start/reload/stop, not enabled by default, on every target | `guest/installed-system.sh` |
+| `pairing create` and `pairing import` run through `sudo` as the remotes guide says, before the first start, leaving the packaged service able to start, serve the listener, and read the imported bundle | `guest/installed-system.sh` |
 | AUR recipes built, installed, upgraded with the configuration kept, and removed (`make integration-package-test`) | `targets/cachyos/package.sh` |
 | The `.deb` installed from a signed apt repository built by the publishing script; an upgrade across `action_versions` keeping the configuration and naming its notes; remove, purge and reinstall keeping the identity (`make integration-package-test`) | `targets/ubuntu/package.sh` |
 | `pairing create` / `import` / `list` / `revoke` against a real listener | `TestGuestPairingLifecycle` |

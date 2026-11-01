@@ -291,6 +291,13 @@ credential = "home-backup"
 root = "tank/backups"
 ```
 
+Both commands run as root here because `pairing import` writes to
+`/etc/boomerangz/credentials.d`, which only root may change. What they write
+still belongs to the service: the token verifiers and certificates that
+`pairing create` keeps under `/var/lib/boomerangz/identity` are owned by
+`boomerangz`, and an imported bundle is `root:boomerangz`, mode `0640`, so the
+daemon can read it.
+
 Treat pairing bundles as secrets. See [Secure your deployment](./security) for
 authentication choices and certificate trust.
 

@@ -58,6 +58,10 @@
 
 The configuration file is owned by `root` and readable by the `boomerangz`
 group. Credential and identity material must not be world-accessible.
+Commands run as root keep the service able to read what they write: anything
+created under the identity directory takes the directory's owner, and an
+imported pairing bundle takes the credentials directory's group and is
+readable by it, `root:boomerangz` mode `0640` on a packaged host.
 Membership in the `boomerangz` group also grants full access to the local
 control API.
 

@@ -17,6 +17,7 @@ import (
 	"github.com/pdf/boomerangz/internal/discovery"
 	"github.com/pdf/boomerangz/internal/identity"
 	"github.com/pdf/boomerangz/internal/lifecycle"
+	"github.com/pdf/boomerangz/internal/ownership"
 	"github.com/pdf/boomerangz/internal/policy"
 	replicationssh "github.com/pdf/boomerangz/internal/replication/ssh"
 	"github.com/pdf/boomerangz/internal/transfer"
@@ -52,7 +53,7 @@ func (s standaloneSafety) CheckTarget(ctx context.Context, source, target string
 
 func lifecycleLock(cfg config.Config) (*os.File, error) {
 	path := cfg.Paths.SocketPath + ".lifecycle.lock"
-	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+	if err := ownership.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return nil, err
 	}
 	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0600)
@@ -60,6 +61,11 @@ func lifecycleLock(cfg config.Config) (*os.File, error) {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), path)
+	// The daemon takes the same lock, so one left root-owned by a command run
+	// through sudo would stop it starting.
+	if err := ownership.Inherit(file); err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
 	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return nil, errors.Join(fmt.Errorf("another lifecycle operation is running: %w", err), file.Close())
 	}

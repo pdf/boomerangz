@@ -28,6 +28,7 @@ import (
 	"github.com/pdf/boomerangz/internal/daemonstate"
 	"github.com/pdf/boomerangz/internal/lifecycle"
 	remoterpc "github.com/pdf/boomerangz/internal/replication/rpc"
+	"github.com/pdf/boomerangz/internal/testutil/ownershiptest"
 	"github.com/pdf/boomerangz/internal/zfs"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -579,6 +580,51 @@ func TestImportDropsRetiredScopes(t *testing.T) {
 	// A token whose only scope was retired never authorized anything.
 	if _, err := ImportPairingBundle(dir, "only-prune", encode(t, "prune")); err == nil || !strings.Contains(err.Error(), "retired") {
 		t.Fatalf("prune-only bundle imported: %v", err)
+	}
+}
+
+// Pairing commands run through sudo on a packaged host, and the daemon runs
+// as the service account. Everything they write must belong to the account
+// owning the directory it lands in, or the daemon cannot read its own token
+// verifiers, listener identity, or imported bundles and fails to start.
+func TestPairingWritesInheritServiceOwnership(t *testing.T) {
+	recorder := ownershiptest.Record(t)
+	root := t.TempDir()
+	identityDir := filepath.Join(root, "identity")
+	listener := config.ListenerConfig{Network: "tcp", Address: "0.0.0.0:7443", AdvertisedAddress: "localhost:7443", AuthMode: "mtls+token"}
+	store, err := NewTokenStore(identityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CreateListenerPairing(store, identityDir, "replication", listener, "", "", []string{"replicate"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RevokePairing(identityDir, store, bundle.PairingID); err != nil {
+		t.Fatal(err)
+	}
+	recorder.Inherited(t, identityDir)
+
+	credentialsDir := filepath.Join(root, "credentials.d")
+	encoded, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported, err := ImportPairingBundle(credentialsDir, "home-backup", encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder.Inherited(t, credentialsDir)
+	// The packaged credentials_dir is root:boomerangz 0750, so the daemon
+	// reads an imported bundle through its group.
+	for path, want := range map[string]os.FileMode{credentialsDir: 0o750, imported: 0o640} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode=%o, want %o", path, got, want)
+		}
 	}
 }
 

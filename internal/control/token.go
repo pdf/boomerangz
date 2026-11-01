@@ -15,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/pdf/boomerangz/internal/ownership"
 )
 
 const tokenFilename = "token-verifiers.json"
@@ -54,7 +56,7 @@ func NewTokenStore(identityDir string) (*TokenStore, error) {
 }
 
 func (s *TokenStore) lock(exclusive bool) (*os.File, error) {
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+	if err := ownership.MkdirAll(s.dir, 0o700); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(s.dir, tokenLockFilename)
@@ -63,6 +65,9 @@ func (s *TokenStore) lock(exclusive bool) (*os.File, error) {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), path)
+	if err := ownership.Inherit(file); err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
 	operation := syscall.LOCK_SH
 	if exclusive {
 		operation = syscall.LOCK_EX
@@ -120,7 +125,7 @@ func (s *TokenStore) load() (tokenFile, error) {
 }
 
 func (s *TokenStore) save(stored tokenFile) error {
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+	if err := ownership.MkdirAll(s.dir, 0o700); err != nil {
 		return err
 	}
 	temp, err := os.CreateTemp(s.dir, ".token-verifiers-*")
@@ -129,6 +134,9 @@ func (s *TokenStore) save(stored tokenFile) error {
 	}
 	defer func() { _ = os.Remove(temp.Name()) }()
 	if err := temp.Chmod(0o600); err != nil {
+		return err
+	}
+	if err := ownership.Inherit(temp); err != nil {
 		return err
 	}
 	encoder := json.NewEncoder(temp)
