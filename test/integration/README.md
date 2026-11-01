@@ -205,7 +205,9 @@ names whole stages, takes neither filter, and each shard boots its own guest.
 `TestCIShardsCoverEveryStage`, a host-safe test in this directory, requires
 the shards in `quality.yml` to run every stage exactly once, so the jobs
 together are an unfiltered run. CI gives each guest the runner's 4 vCPUs with
-`BOOMERANGZ_GUEST_VCPUS`.
+`BOOMERANGZ_GUEST_VCPUS`. A change made only of documentation skips the guest
+jobs, as decided by `.github/scripts/guest-suite-needed.sh` and pinned by
+`TestGuestSuiteNeeded`; the quality gate accepts that skip and no other.
 
 The harness provisions a guest once and reuses it. After provisioning it
 flattens the system image into the image cache, keyed by `host/image-key.sh`:

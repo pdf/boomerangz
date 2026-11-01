@@ -38,7 +38,11 @@ is not verified against it - only an unfiltered `make integration-test` is.
 CI sets neither variable. It splits the suite across parallel jobs with
 `BOOMERANGZ_INTEGRATION_SHARD`, each running whole stages unfiltered;
 `TestCIShardsCoverEveryStage` keeps the shards equal to every stage, so the
-jobs together are the verifying run. A shard alone is not.
+jobs together are the verifying run. A shard alone is not. A change made only
+of documentation - Markdown anywhere, or anything under `docs/` - skips the
+guest jobs; host validation and the documentation build still run.
+`.github/scripts/guest-suite-needed.sh` decides, and `TestGuestSuiteNeeded`
+pins what counts. Anything else, workflows included, runs the whole suite.
 
 Clean up after every run, including interrupted ones. The harness destroys the
 pools inside the guest but never removes its own run root, so each run leaves
