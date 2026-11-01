@@ -192,7 +192,7 @@ func TestSSHStream(t *testing.T) {
 	if err != nil || !result.Completed || result.Bytes != 256*1024 {
 		t.Fatalf("result=%v err=%v", result, err)
 	}
-	if len(remoteArgs) == 0 || !strings.HasSuffix(remoteArgs[len(remoteArgs)-1], "'zfs' 'receive' '-u' '-s' 'tank/backups'") {
+	if len(remoteArgs) == 0 || !strings.HasSuffix(remoteArgs[len(remoteArgs)-1], "'zfs' 'receive' '-u' '-s' '-o' 'org.boomerangz:state:placeholder=off' 'tank/backups'") {
 		t.Fatalf("remote receive args = %#v", remoteArgs)
 	}
 }

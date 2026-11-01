@@ -46,6 +46,12 @@
 : A credential bundle that identifies a listener, establishes server trust,
   and carries the authentication material and scopes granted to a client.
 
+**Placeholder**
+: An empty dataset Boomerangz creates at a destination for a hole, so a deeper
+  member's replica can be received beneath it. It is marked with
+  `org.boomerangz:state:placeholder=on`, and every replica sets the marker
+  `off`.
+
 **Policy grid**
 : The count-and-duration expression that sets snapshot cadence and retention,
   such as `24x1h,14x1d`.

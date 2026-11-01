@@ -180,6 +180,10 @@ func receiveArgs(options ReceiveOptions) ([]string, error) {
 		}
 		args = append(args, "-o", key+"="+options.Set[key])
 	}
+	// Every receive creates or updates a replica, never a placeholder. Setting
+	// the marker off locally stops the replica, and a recursive stream's
+	// descendants, from inheriting a placeholder ancestor's marker.
+	args = append(args, "-o", PlaceholderProperty+"=off")
 	excluded := slices.Clone(options.Exclude)
 	slices.Sort(excluded)
 	excluded = slices.Compact(excluded)
@@ -187,7 +191,7 @@ func receiveArgs(options ReceiveOptions) ([]string, error) {
 		if !streamProperty(key) {
 			return nil, fmt.Errorf("invalid receive exclusion %q", key)
 		}
-		if _, set := options.Set[key]; set {
+		if _, set := options.Set[key]; set || key == PlaceholderProperty {
 			continue
 		}
 		args = append(args, "-x", key)

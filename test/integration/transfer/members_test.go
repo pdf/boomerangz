@@ -52,6 +52,17 @@ func TestGuestRootActorScope(t *testing.T) {
 		t.Helper()
 		return exec.CommandContext(t.Context(), "zfs", "list", "-H", name).Run() == nil
 	}
+	// marker is the placeholder marker's value and source on dataset, so a
+	// replica's own local "off" is told apart from one inherited from a
+	// placeholder above it.
+	marker := func(t *testing.T, dataset string) string {
+		t.Helper()
+		out, err := exec.CommandContext(t.Context(), "zfs", "get", "-H", "-o", "value,source", zfs.PlaceholderProperty, dataset).CombinedOutput()
+		if err != nil {
+			t.Fatalf("zfs get %s %s: %v: %s", zfs.PlaceholderProperty, dataset, err, out)
+		}
+		return strings.Join(strings.Fields(string(out)), " ")
+	}
 	direct, err := zfs.NewDirect("zfs")
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +187,16 @@ func TestGuestRootActorScope(t *testing.T) {
 		if snapshots := lifecycle.Snapshots(hole, mapped+"/hole"); len(snapshots) != 0 {
 			t.Errorf("the hole received snapshots: %v", snapshots)
 		}
+		// Only the placeholder carries the marker; every replica, including
+		// the member received beneath it, sets it off rather than inheriting.
+		if got := marker(t, mapped+"/hole"); got != "on local" {
+			t.Errorf("placeholder marker on the hole = %q, want on local", got)
+		}
+		for _, member := range members {
+			if got := marker(t, mapped+strings.TrimPrefix(member, root)); got != "off local" {
+				t.Errorf("placeholder marker on the replica of %s = %q, want off local", member, got)
+			}
+		}
 		// Members carry no state; the root holds one proof per stream.
 		for _, member := range members[1:] {
 			state, memberErr := direct.InspectState(t.Context(), member, false)
@@ -249,8 +270,10 @@ func TestGuestRootActorScope(t *testing.T) {
 		if exists(t, mapped+"/hole.boomerangz-placeholder") {
 			t.Fatal("the set-aside placeholder was left behind")
 		}
-		if out, err := exec.CommandContext(t.Context(), "zfs", "get", "-H", "-o", "source", zfs.PlaceholderProperty, mapped+"/hole").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) == "local" {
-			t.Fatalf("the replica still carries the placeholder marker: %s %v", out, err)
+		for _, replica := range []string{mapped + "/hole", mapped + "/hole/deep"} {
+			if got := marker(t, replica); got != "off local" {
+				t.Fatalf("placeholder marker on replica %s = %q, want off local", replica, got)
+			}
 		}
 	})
 

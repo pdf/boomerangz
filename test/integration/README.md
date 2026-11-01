@@ -76,9 +76,9 @@ resolves policy from `ListDatasets` output rather than a literal.
 | Bookmark-based incremental after the source snapshot is pruned | `TestGuestLocalTransfer/bookmark-incremental` |
 | Unrelated destination history refused before sending | `TestGuestLocalTransfer/unrelated-destination-refused` |
 | Reseed recovery of an otherwise-blocked target | `TestGuestLocalTransfer/reseed-recovery` |
-| Members streamed into the root's replica at their root-relative paths under `discard=all`, holes created as placeholders, excluded datasets not sent, one proof per stream and no state on members | `TestGuestRootActorScope/members-nest-under-the-root` |
+| Members streamed into the root's replica at their root-relative paths under `discard=all`, holes created as placeholders marked `state:placeholder=on` locally while every replica beneath sets it `off`, excluded datasets not sent, one proof per stream and no state on members | `TestGuestRootActorScope/members-nest-under-the-root` |
 | One member advancing without disturbing another member's proof | `TestGuestRootActorScope/a-member-advances-alone` |
-| A hole included again: its replica replaces the placeholder with real renames, the member beneath moved intact with its history, no placeholder left behind | `TestGuestRootActorScope/a-hole-becomes-a-member` |
+| A hole included again: its replica replaces the placeholder with real renames, the member beneath moved intact with its history, no placeholder left behind, the replica and the member beneath both carrying a local `state:placeholder=off` | `TestGuestRootActorScope/a-hole-becomes-a-member` |
 | Reseed of a root resetting every member's proof and binding, and the next transfer re-bootstrapping every member - the incident root actor scope was designed against | `TestGuestRootActorScope/reseed-resets-every-member` |
 | Recursive `replicate` with `discard=first` and `discard=all` mapping | `TestGuestLocalTransfer/recursive-mapping` |
 | `replicate=on` turned on for a root that replicated member by member: refused before anything changes with a reseed instruction, and the reseed bootstrapping one recursive stream | `TestGuestReplicateModeSwitch/per-member-to-replicate-needs-a-reseed` |

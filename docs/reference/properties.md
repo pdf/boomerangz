@@ -78,3 +78,8 @@ Properties beginning with `org.boomerangz:state:` are managed recovery and
 ownership records. Do not create, copy, or edit them manually. Use
 `dataset adopt`, `dataset clean`, or `identity recover` when an administrative
 transition is required.
+
+`org.boomerangz:state:placeholder` is written on destinations rather than
+sources. It is set to `on` on a [placeholder](/guide/datasets#roots-and-members)
+when it is created, and to `off` on every replica as it is received. Only a
+locally set `on` marks a placeholder; an inherited value never does.
