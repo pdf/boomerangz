@@ -1,19 +1,19 @@
 Package: boomerangz
 Architecture: amd64
-Version: 0.3.1
+Architecture-Variant: amd64v1
+Version: 0.3.2
 Priority: optional
 Section: admin
 Maintainer: Peter Fern <apt@boomerangz.org>
 Installed-Size: 15077
 Depends: zfsutils-linux
 Recommends: openssh-client
-Filename: pool/main/b/boomerangz/boomerangz_0.3.1_amd64.deb
+Filename: pool/main/b/boomerangz/boomerangz_0.3.2_amd64.deb
 Size: 6017338
-MD5sum: 8fb609540e7e844b594cc06be88167f2
-SHA1: e8aebd3bf2733899ec9748ff2912f0be1169c221
-SHA256: 150e6a13bde786b3f2a45f1798463bb01a39022ce01d90949b1200e57f9bf294
-SHA512: c1be8715a6f6054e0963576636b1a9dedbb04a62b3f99f2b3612a937b5cb8ea970dfb7598b1d5d26d1bbf706f20c1db9fbaa16b27bd63162aa1e9829ba76c6f8
+MD5sum: 30d2ebc9dfd340b2047c35ddf558aef4
+SHA1: 8315eb50ebe3d641ad6b8f840c06804121759738
+SHA256: 4f31726f7a92652eefdc9b2a0c5c34cac11ab1deef0f75706830435595a820ee
+SHA512: dbbcd6556a5f1191704bec58c133766431796d7ab31e33a89568e69b204aba3b88b27c26ac648559e2b7611aae7a2b30467edbb72e3d7f62a420a04cd34b0fbf
 Homepage: https://boomerangz.org
 Description: Property-driven ZFS snapshot and replication manager
-Architecture-Variant: amd64v1
 
