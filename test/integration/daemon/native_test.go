@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -291,6 +292,111 @@ func TestGuestDaemonPruneJob(t *testing.T) {
 	}
 	requireSnapshotAgreesWithEvents(t, direct, waiter, source, kept)
 	t.Logf("prune job destroyed %d expired snapshots on %s", len(expired), source)
+}
+
+// rewriteVolumeBlock overwrites one 64K block of a volume with fresh random
+// data and flushes it, so the next snapshot differs from the one before.
+func rewriteVolumeBlock(t *testing.T, volume string, block int) {
+	t.Helper()
+	write := exec.CommandContext(t.Context(), "dd", "if=/dev/urandom", "of=/dev/zvol/"+volume, "bs=64K", "count=1",
+		"seek="+strconv.Itoa(block), "conv=notrunc,fsync", "status=none")
+	if output, err := write.CombinedOutput(); err != nil {
+		t.Fatalf("rewrite %s block %d: %v: %s", volume, block, err, output)
+	}
+}
+
+// TestGuestDaemonDestinationPruneKeepsReplicaBase asserts that the destination
+// prune following a transfer keeps the snapshot it just received, and that the
+// next incremental is received onto it. Retention counts back from the newest
+// snapshot and keeps the oldest in each window, so when the replica's previous
+// snapshot is less than a window older - as after a policy moves to a coarser
+// first tier - the newest used to lose its window and be destroyed. The
+// replica's head then held data newer than its newest remaining snapshot, and
+// every later receive was refused with "destination ... has been modified
+// since most recent snapshot".
+func TestGuestDaemonDestinationPruneKeepsReplicaBase(t *testing.T) {
+	sourcePool, destinationPool := guestPools(t)
+	direct, err := zfs.NewDirect("zfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := zfstest.PayloadVolume(t, zfstest.FixtureName(sourcePool, "daemon-replica-base"), 64, 4)
+	target := zfstest.FixtureName(destinationPool, "daemon-replica-base")
+	zfsCommand(t, "create", "-u", target)
+	zfstest.RegisterCleanup(t, target)
+	zfsCommand(t, "set", policy.Namespace+"enabled=on", policy.Namespace+"policy=24x1h", policy.Namespace+"local="+target, policy.Namespace+"discard=first", source)
+
+	rows, err := direct.GetStoredProperties(t.Context(), []string{source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := policy.Resolve(zfs.Dataset{Name: source, Type: zfs.Volume, EncryptionRoot: "-"}, nil, rows, nil)
+	service, err := lifecycle.NewService(direct, guestInstallation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The replica's first snapshot is well inside the hour the first window
+	// spans, and not yet due a successor, so the scheduler takes nothing of its
+	// own while the test runs.
+	first, err := service.CreateSnapshot(t.Context(), source, []string{source}, time.Now().UTC().Add(-45*time.Minute), effective)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := source + "@" + first.Name()
+
+	cfg := config.Defaults()
+	cfg.Daemon.ReconcileInterval.Duration = 200 * time.Millisecond
+	cfg.Daemon.ManagementWorkers = 2
+	runtime, waiter := runDaemon(t, cfg, &scopedDaemonBackend{Direct: direct, root: source})
+	job := "local:" + source + ":" + target
+	prune := "destination-prune:" + source + ":" + lifecycle.TargetID("local:"+target)
+
+	// Activating a root that already has an owned snapshot sends it.
+	bootstrap, _ := waiter.Outcome(t, 90*time.Second, 0, job, "succeeded")
+	if bootstrap.Snapshot != base {
+		t.Fatalf("the activation transfer carried %q, want %s", bootstrap.Snapshot, base)
+	}
+	replica := bootstrap.Destination
+
+	// transfer changes the volume, forces a snapshot, and waits for the
+	// transfer carrying it and the destination prune that follows.
+	transfer := func(t *testing.T, block int) string {
+		t.Helper()
+		rewriteVolumeBlock(t, source, block)
+		from := waiter.Settle(t, 30*time.Second)
+		if accepted, triggerErr := runtime.Trigger([]string{source}); triggerErr != nil || len(accepted) != 1 {
+			t.Fatalf("trigger %s: accepted=%v err=%v", source, accepted, triggerErr)
+		}
+		snapshot, after := createdSnapshot(t, waiter, 45*time.Second, from, source, "scheduled")
+		waitForTransferred(t, waiter, job, source, after-1)
+		_, landed := waiter.Next(t, job+" to report landing "+snapshot, 5*time.Second, after-1, func(event daemon.Event) bool {
+			return event.Job == job && event.State == "succeeded" && event.Snapshot == snapshot
+		})
+		waiter.Outcome(t, 60*time.Second, landed, prune, "succeeded")
+		return snapshot
+	}
+
+	newest := transfer(t, 1)
+	_, component, _ := strings.Cut(newest, "@")
+	state, err := direct.InspectState(t.Context(), replica, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, snapshot := range lifecycle.Snapshots(state, replica) {
+		kept = append(kept, snapshot.Name)
+	}
+	if !slices.Contains(kept, replica+"@"+component) {
+		t.Fatalf("destination prune destroyed the snapshot the replica just received, %s; the replica keeps %v", replica+"@"+component, kept)
+	}
+	written, err := exec.CommandContext(t.Context(), "zfs", "get", "-H", "-p", "-o", "value", "written", replica).CombinedOutput()
+	if err != nil || strings.TrimSpace(string(written)) != "0" {
+		t.Fatalf("replica %s has data written since its newest snapshot: %q err=%v", replica, written, err)
+	}
+
+	// The next incremental is received onto the snapshot destination prune kept.
+	next := transfer(t, 2)
+	t.Logf("destination prune kept %s, and %s was received onto it", newest, next)
 }
 
 // TestGuestDaemonRemoteBackoff asserts the retry sequence between an outage

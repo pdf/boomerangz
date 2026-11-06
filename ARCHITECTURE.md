@@ -77,7 +77,12 @@ Roughly bottom-up, in dependency order:
     conflicting work classes don't run concurrently on the same dataset.
   - `reference.go` - hold/bookmark bookkeeping protecting in-flight
     replication targets from pruning.
-  - `prune.go` - grid-driven retention decisions.
+  - `prune.go` - grid-driven retention decisions. Windows are measured back
+    from the newest owned snapshot and keep their oldest one; the newest is
+    always kept too, since on a replica it is the next incremental's base and
+    destroying it leaves the head modified since the newest remaining
+    snapshot. Source prune and destination prune (`daemon/retirement.go`)
+    both decide through `PlanPrune`.
   - `inactive.go` - deactivation and delayed automatic retirement.
   - `clean.go` - explicit, preview-first `dataset clean` planning/execution;
     `forget.go` narrows it to one target (`--forget-target`).

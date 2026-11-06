@@ -87,6 +87,13 @@ Supported duration units are:
 These are elapsed durations rather than calendar boundaries. For example,
 `12mo` is 360 days and is not the same duration as `1y`.
 
+Retention counts back from the newest snapshot. Each tier divides its span
+into `count` windows of `duration`, and keeps the oldest snapshot in each.
+The newest snapshot is always kept as well, on the source and on every
+replica, because the next incremental transfer is sent from it. Moving to a
+coarser policy, such as from `12x5m,24x1h` to `24x1h`, therefore keeps the
+latest snapshot and the oldest of each hour, and prunes the rest.
+
 ## Roots and members
 
 ZFS properties normally pass from a parent dataset to its children, and
