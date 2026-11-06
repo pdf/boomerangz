@@ -325,8 +325,13 @@ func (s *Server) Receive(stream RemoteService_ReceiveServer) error {
 		n, writeErr := input.Write(chunk.GetData())
 		received += uint64(n)
 		if writeErr != nil || n != len(chunk.GetData()) {
+			// A write fails because zfs receive has stopped reading, so its
+			// exit status and stderr are the cause; the broken pipe is only
+			// how the stream learned of it.
 			_ = input.Close()
-			_ = command.Wait()
+			if waitErr := command.Wait(); waitErr != nil {
+				return status.Errorf(codes.Internal, "zfs receive: %v: %s", waitErr, diagnostics.String())
+			}
 			return status.Error(codes.Internal, "write receive stream: "+errorText(writeErr))
 		}
 	}

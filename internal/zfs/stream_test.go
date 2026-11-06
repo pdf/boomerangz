@@ -119,6 +119,16 @@ func TestStreamHelperProcess(_ *testing.T) {
 		os.Exit(5)
 	case "blocked":
 		time.Sleep(time.Minute)
+	case "endless":
+		chunk := bytes.Repeat([]byte{7}, 64*1024)
+		for {
+			if _, err := os.Stdout.Write(chunk); err != nil {
+				os.Exit(2)
+			}
+		}
+	case "reject":
+		fmt.Fprintln(os.Stderr, "cannot receive incremental stream: destination backup/data has been modified")
+		os.Exit(1)
 	default:
 		os.Exit(6)
 	}
@@ -173,5 +183,37 @@ func TestLocalStreamCancellation(t *testing.T) {
 	result, err := stream.Run(ctx, SendOptions{Snapshot: "tank/data@end"}, ReceiveOptions{Root: "backup/data", Discard: ReceiveExact}, Estimate{}, func(Progress) { cancel() })
 	if err == nil || result.Completed {
 		t.Fatal("cancelled stream succeeded")
+	}
+}
+
+// TestLocalStreamReportsReceiverCause pins that a receiver rejecting a stream
+// is reported by its own exit and stderr. The broken pipe the copy then hits
+// and the sender this side kills are consequences, and once read as the cause
+// they hid the receiver's reason behind "signal: killed".
+func TestLocalStreamReportsReceiverCause(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	stream := &LocalStream{command: func(ctx context.Context, args ...string) *exec.Cmd {
+		mode := "reject"
+		if args[0] == "send" {
+			mode = "endless"
+		}
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStreamHelperProcess$")
+		cmd.Env = append(os.Environ(), "BOOMERANGZ_STREAM_HELPER="+mode)
+		return cmd
+	}}
+	_, err := stream.Run(ctx, SendOptions{Snapshot: "tank/data@end"}, ReceiveOptions{Root: "backup/data", Discard: ReceiveExact}, Estimate{}, nil)
+	if err == nil {
+		t.Fatal("rejected stream succeeded")
+	}
+	message := err.Error()
+	if !strings.HasPrefix(message, "stream pipeline: exit status 1; receiver: cannot receive incremental stream") {
+		t.Fatalf("receiver cause is not reported first: %q", message)
+	}
+	for _, consequence := range []string{"broken pipe", "signal: killed", "sender:"} {
+		if strings.Contains(message, consequence) {
+			t.Fatalf("error reports consequence %q: %q", consequence, message)
+		}
 	}
 }

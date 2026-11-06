@@ -21,6 +21,15 @@ type Decision struct {
 
 // PlanPrune applies a grid to one dataset's proven owned snapshots. It does not
 // expand large grids into individual windows or mutate input data.
+//
+// The grid keeps the oldest snapshot in each window, measured back from the
+// newest owned snapshot, and the newest owned snapshot is always kept as well.
+// It is the dataset's most recent state and, on a replica, the base the next
+// incremental receive needs: destroying it leaves the replica's head modified
+// since its newest remaining snapshot, which no incremental can be received
+// onto. Snapshots denser than the first window - after a policy moves to a
+// coarser grid, or after manual snapshots - would otherwise put it in a window
+// whose older snapshot wins.
 func PlanPrune(dataset, lineage string, grid policy.Grid, snapshots []Snapshot) ([]Decision, error) {
 	if err := zfs.ValidateDataset(dataset); err != nil {
 		return nil, err
@@ -59,9 +68,15 @@ func PlanPrune(dataset, lineage string, grid policy.Grid, snapshots []Snapshot) 
 		index int64
 	}
 	winners := make(map[window]bool)
+	newest := -1
+	for i, item := range items {
+		if item.owned {
+			newest = i
+		}
+	}
 	buckets := grid.Buckets()
 	var decisions []Decision
-	for _, item := range items {
+	for i, item := range items {
 		d := Decision{Snapshot: item.snapshot.Name, GUID: item.snapshot.GUID, Reason: "foreign or unproven ownership"}
 		if item.owned {
 			age := anchor.Sub(item.created)
@@ -80,6 +95,9 @@ func PlanPrune(dataset, lineage string, grid policy.Grid, snapshots []Snapshot) 
 					break
 				}
 				offset = end
+			}
+			if i == newest {
+				d.Destroy, d.Reason = false, "newest owned snapshot"
 			}
 			if len(item.snapshot.Holds) > 0 {
 				d.Destroy, d.Reason = false, "snapshot has holds"

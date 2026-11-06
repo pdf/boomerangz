@@ -115,6 +115,7 @@ failure attributable to the transport instead of to the test.
 | A remote's delegation checked through the endpoint that opens after an outage, over the real transport | `TestGuestRemoteOutageReconnection` |
 | Daemon-driven native replication through an imported pairing credential | `TestGuestDaemonNativeReplication` |
 | `prune:<dataset>` jobs reaching `succeeded`, and destroying what falls outside the grid | `TestGuestDaemonPruneJob` |
+| The destination prune after a transfer keeping the snapshot just received when an older replica snapshot shares its window, leaving nothing written since it, and the next incremental received onto it | `TestGuestDaemonDestinationPruneKeepsReplicaBase` |
 | Retry and backoff state sequence, rather than its endpoints | `TestGuestDaemonRemoteBackoff` |
 
 ### Control plane and packaging

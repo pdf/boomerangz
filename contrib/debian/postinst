@@ -6,7 +6,7 @@ shell_path=/usr/lib/boomerangz/boomerangz-shell
 
 # Versions whose upgrade needs operator action. An upgrade from before one of
 # them prints where its notes are.
-action_versions="0.2.0 0.3.0"
+action_versions="0.2.0 0.3.0 0.3.2"
 
 case "$1" in
 configure)

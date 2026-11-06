@@ -10,6 +10,52 @@ upgrade crosses it.
 Upgrade through the same package channel you installed, as described in
 [Installation](/getting-started/installation#upgrade-or-remove).
 
+## v0.3.2
+
+Earlier releases could prune a replica's newest snapshot. That happened when
+snapshots were closer together than the policy's shortest tier, most often
+right after a policy moved to a coarser grid, such as from `12x5m,24x1h` to
+`24x1h`. The newest snapshot is the base the next incremental is sent from.
+Without it the replica holds data newer than its newest remaining snapshot,
+and every transfer to it fails, for a local target with
+`cannot receive incremental stream: destination ... has been modified since
+most recent snapshot`, or for a remote one with a broken pipe and no reason
+from the receiver. Each failed run then lost the next-newest replica
+snapshot the same way. This release always keeps the newest snapshot, and a
+remote transfer now reports the remote `zfs receive` error.
+
+The release does not repair a replica that is already in this state.
+
+### Find affected replicas
+
+On each destination, look for replicas under the target's root that have
+data written since their newest snapshot:
+
+```sh
+zfs get -r -H -o name,value written backup/flechette | awk '$2 != "0"'
+```
+
+A replica listed there whose target shows `blocked` in `boomerangz status`
+with one of the errors above is affected. A completed receive leaves
+`written` at `0`, so unless something else mounts the replica and writes to
+it, a non-zero value on a replica whose transfers fail means this.
+
+### Roll each one back
+
+Roll each affected replica back to its newest snapshot. This discards only
+data the pruned snapshots carried, which the source still holds under its
+recovery references:
+
+```sh
+zfs list -H -t snapshot -o name -s createtxg backup/flechette/data/.local | tail -1
+sudo zfs rollback backup/flechette/data/.local@boomerangz-...
+```
+
+Run the rollback on the destination host, as a user allowed to roll the
+replica back. The next transfer sends from that snapshot and catches the
+replica up. Check it with `boomerangz status`: the target's last transfer
+reads `succeeded`, and `written` on the replica reads `0` again.
+
 ## v0.3.0
 
 This release changes how boomerangz stores recovery proofs and target

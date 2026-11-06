@@ -104,7 +104,9 @@ func TestPruneBoundariesAndExemptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDestroy := map[string]bool{snapshots[0].Name: true, snapshots[2].Name: true, snapshots[4].Name: true, snapshots[6].Name: true}
+	// The age-0 snapshot shares the first window with an older one, which the
+	// window keeps; the newest owned snapshot is kept regardless.
+	wantDestroy := map[string]bool{snapshots[2].Name: true, snapshots[4].Name: true, snapshots[6].Name: true}
 	for _, d := range plan {
 		if d.Destroy != wantDestroy[d.Snapshot] {
 			t.Errorf("unexpected decision: %#v", d)
@@ -125,6 +127,57 @@ func TestPruneBoundariesAndExemptions(t *testing.T) {
 	again, err = PlanPrune("tank/data", testLineage, reordered, snapshots)
 	if err != nil || !reflect.DeepEqual(plan, again) {
 		t.Fatal("written tier order changed pruning decisions")
+	}
+}
+
+// TestPruneKeepsNewestAfterCoarserGrid replays a policy moving from a
+// five-minute to an hourly first tier. The last hour then holds twelve
+// snapshots in the first window, whose oldest the grid keeps. The newest is
+// the replica's incremental base and must survive too, and pruning again with
+// nothing new must destroy nothing more: each pass destroying the newest is
+// how a replica walked its base back until no incremental could be received.
+func TestPruneKeepsNewestAfterCoarserGrid(t *testing.T) {
+	t.Parallel()
+	grid, err := policy.ParseGrid("24x1h,14x1d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 4, 16, 18, 58, 0, time.UTC)
+	var snapshots []Snapshot
+	for minutes := 0; minutes <= 90; minutes += 5 {
+		snapshots = append(snapshots, owned(t, now.Add(-time.Duration(minutes)*time.Minute)))
+	}
+	newest, oldestInFirstHour := snapshots[0].Name, snapshots[11].Name
+	for pass := 0; pass < 3; pass++ {
+		decisions, err := PlanPrune("tank/data", testLineage, grid, snapshots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		destroyed := map[string]bool{}
+		for _, decision := range decisions {
+			if decision.Destroy {
+				destroyed[decision.Snapshot] = true
+			}
+		}
+		if destroyed[newest] {
+			t.Fatalf("pass %d destroyed the newest owned snapshot", pass)
+		}
+		if destroyed[oldestInFirstHour] {
+			t.Fatalf("pass %d destroyed the first window's oldest snapshot", pass)
+		}
+		if pass > 0 && len(destroyed) > 0 {
+			t.Fatalf("pass %d destroyed %d more snapshots with nothing new", pass, len(destroyed))
+		}
+		var kept []Snapshot
+		for _, snapshot := range snapshots {
+			if !destroyed[snapshot.Name] {
+				kept = append(kept, snapshot)
+			}
+		}
+		snapshots = kept
+	}
+	if len(snapshots) != 3 {
+		t.Fatalf("kept %d snapshots, want the newest, the first hour's oldest, and the second hour's oldest", len(snapshots))
 	}
 }
 
@@ -160,7 +213,9 @@ func TestPruneFixedMonthYearBoundaries(t *testing.T) {
 	want := map[string]bool{}
 	for i, days := range ages {
 		snapshots[i] = owned(t, now.Add(-time.Duration(days)*24*time.Hour))
-		want[snapshots[i].Name] = days == 0 || days == 30 || days == 395
+		// The 29-day snapshot is the month window's oldest; the age-0 one
+		// shares that window but is kept as the newest owned snapshot.
+		want[snapshots[i].Name] = days == 30 || days == 395
 	}
 	decisions, err := PlanPrune("tank/data", testLineage, grid, snapshots)
 	if err != nil {
