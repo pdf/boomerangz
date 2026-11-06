@@ -167,17 +167,16 @@ jobs:
           commit_message: Release ${{ github.ref_name }}
 
   # The apt repository lives beside the documentation on the gh-pages branch,
-  # served at https://boomerangz.org/apt, so it shares the documentation
-  # workflow's concurrency group: both push to that branch.
+  # served at https://boomerangz.org/apt. It takes no shared concurrency group
+  # with the documentation workflow: a waiting run in a shared group is
+  # cancelled by the next one to queue, which once dropped a release's docs.
+  # publish-gh-pages.sh instead rebuilds and retries a push that loses the race.
   publish-apt:
     if: ${{ vars.PUBLISH_APT == 'true' }}
     needs: publish
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    concurrency:
-      group: documentation-publication
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
         with:
@@ -227,14 +226,6 @@ jobs:
         run: |
           set -euo pipefail
           site=$RUNNER_TEMP/boomerangz-site
-          git fetch origin gh-pages:refs/remotes/origin/gh-pages
-          git worktree add -B gh-pages "$site" origin/gh-pages
-          bash .github/scripts/apt-repository.sh "$site/apt" "$KEY" dist/*.deb
-          git -C "$site" config user.name github-actions
-          git -C "$site" config user.email github-actions@github.com
-          git -C "$site" add --all apt
-          if git -C "$site" diff --cached --quiet; then
-            exit 0
-          fi
-          git -C "$site" commit -m "apt: publish $GITHUB_REF_NAME"
-          git -C "$site" push origin HEAD:gh-pages
+          bash .github/scripts/publish-gh-pages.sh "$site" \
+            "apt: publish $GITHUB_REF_NAME" apt \
+            bash .github/scripts/apt-repository.sh "$site/apt" "$KEY" dist/*.deb

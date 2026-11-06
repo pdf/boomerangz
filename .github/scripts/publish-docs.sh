@@ -21,6 +21,12 @@ if [[ $docs_event == tag && ! $docs_ref_name =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; th
 	exit 1
 fi
 
+# The version list must include every release whose tree is already on
+# gh-pages, or this run's versions.json would hide it. publish-gh-pages.sh
+# fetches gh-pages before running this, so fetching tags now, rather than
+# trusting the checkout's, sees every tag whose publication could have landed.
+git -C "$source_repository" fetch --force --tags --quiet origin
+
 versions=$(git -C "$source_repository" tag --list --sort=-version:refname |
 	jq -R -s -c 'split("\n") | map(select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))')
 readonly versions
@@ -33,6 +39,9 @@ build_docs() {
 	safe_ref=${ref//[^A-Za-z0-9._-]/-}
 	worktree=$runner_temp/boomerangz-docs-source-$safe_ref
 
+	# A retried attempt reuses the same paths, and VitePress does not empty an
+	# output directory outside its project, so start each build from nothing.
+	rm -rf -- "${output:?}"
 	git -C "$source_repository" worktree add --detach "$worktree" "$ref"
 	(
 		cd "$worktree/docs"
@@ -85,5 +94,6 @@ elif [[ ! -f $published_directory/index.html || $docs_ref_name == "$latest_versi
 	replace_root_docs "$latest_version" "$latest_version" "/$latest_version/"
 fi
 
+touch "$published_directory/.nojekyll"
 jq -n --argjson versions "$versions" --arg latest "$latest_version" \
 	'{latest: $latest, versions: $versions}' >"$published_directory/versions.json"
