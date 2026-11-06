@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -363,10 +365,15 @@ func RunPipeline(ctx context.Context, send SendOptions, receive ReceiveOptions, 
 		cancel()
 		return Progress{}, errors.Join(err, output.Close(), input.Close(), receiver.Wait())
 	}
+	// receiverFirst records that zfs receive failed before anything here
+	// cancelled the pipeline. Its exit and stderr are then the cause, and the
+	// broken pipe and killed sender that follow are only consequences.
+	var receiverFirst atomic.Bool
 	received := make(chan error, 1)
 	go func() {
 		err := receiver.Wait()
 		if err != nil {
+			receiverFirst.Store(runCtx.Err() == nil)
 			cancel()
 		}
 		received <- err
@@ -383,10 +390,29 @@ func RunPipeline(ctx context.Context, send SendOptions, receive ReceiveOptions, 
 		cancel()
 	}
 	receiveErr := <-received
-	err = errors.Join(copyErr, closeErr, sendErr, receiveErr, ctx.Err())
+	// A write failing with EPIPE also means the receiver stopped reading
+	// first, even when its exit had not been observed yet.
+	if receiveErr != nil && (receiverFirst.Load() || errors.Is(copyErr, syscall.EPIPE) || errors.Is(closeErr, syscall.EPIPE)) {
+		err = errors.Join(receiveErr, ctx.Err())
+	} else {
+		err = errors.Join(copyErr, closeErr, sendErr, receiveErr, ctx.Err())
+	}
 	result := meter.Finish(err == nil)
 	if err != nil {
-		return result, fmt.Errorf("stream pipeline: %w; sender: %s; receiver: %s", err, sendLog.String(), receiveLog.String())
+		return result, pipelineError(err, sendLog.String(), receiveLog.String())
 	}
 	return result, nil
+}
+
+// pipelineError formats a failed stream with whichever side's diagnostics
+// are present, so an empty sender log does not read as a sender fault.
+func pipelineError(err error, sender, receiver string) error {
+	var logs string
+	if sender != "" {
+		logs += "; sender: " + sender
+	}
+	if receiver != "" {
+		logs += "; receiver: " + receiver
+	}
+	return fmt.Errorf("stream pipeline: %w%s", err, logs)
 }

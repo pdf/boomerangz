@@ -1,12 +1,16 @@
 package rpc
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pdf/boomerangz/internal/zfs"
 	"google.golang.org/grpc"
@@ -111,5 +115,65 @@ func TestDestroySnapshotOnAnOlderRemoteAsksForAnUpgrade(t *testing.T) {
 	err := connect(t, olderRemote{}).Executor().DestroySnapshot(t.Context(), "backup/data@a")
 	if status.Code(err) != codes.Unimplemented || !strings.Contains(err.Error(), "upgrade boomerangz on the remote host") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// Helper subprocesses stand in for zfs send and receive.
+func TestRPCStreamHelperProcess(_ *testing.T) {
+	switch os.Getenv("BOOMERANGZ_RPC_HELPER") {
+	case "endless":
+		chunk := bytes.Repeat([]byte{7}, 64*1024)
+		for {
+			if _, err := os.Stdout.Write(chunk); err != nil {
+				os.Exit(2)
+			}
+		}
+	case "reject":
+		fmt.Fprintln(os.Stderr, "cannot receive incremental stream: destination tank/backups has been modified")
+		os.Exit(1)
+	default:
+		return
+	}
+}
+
+func rpcHelper(ctx context.Context, mode string) *exec.Cmd {
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRPCStreamHelperProcess$")
+	command.Env = append(os.Environ(), "BOOMERANGZ_RPC_HELPER="+mode)
+	return command
+}
+
+// TestStreamReportsRemoteReceiveCause pins that a remote zfs receive
+// rejecting a stream reaches the sender as that receive's exit and stderr.
+// The server used to answer the broken pipe its next write hit without
+// them, and the client put the gRPC Send EOF and the sender it killed first,
+// so the reason was lost behind "native stream: EOF | signal: killed".
+func TestStreamReportsRemoteReceiveCause(t *testing.T) {
+	t.Parallel()
+	service, err := NewServerWithReceiver(&snapshotBackend{}, "tank/backups", func(ctx context.Context, _ []string) *exec.Cmd {
+		return rpcHelper(ctx, "reject")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := NewStreamWithSender(connect(t, service), func(ctx context.Context, _ []string) *exec.Cmd {
+		return rpcHelper(ctx, "endless")
+	}, "native")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	_, err = stream.Run(ctx, zfs.SendOptions{Source: "tank/data", Snapshot: "tank/data@end"}, zfs.ReceiveOptions{Root: "tank/backups", Discard: zfs.ReceiveExact}, zfs.Estimate{}, nil)
+	if err == nil {
+		t.Fatal("rejected stream succeeded")
+	}
+	message := err.Error()
+	if !strings.HasPrefix(message, "native stream: ") || !strings.Contains(message, "zfs receive: exit status 1: cannot receive incremental stream") {
+		t.Fatalf("remote receive cause is not reported: %q", message)
+	}
+	for _, consequence := range []string{"EOF", "signal: killed", "broken pipe", "sender:"} {
+		if strings.Contains(message, consequence) {
+			t.Fatalf("error reports consequence %q: %q", consequence, message)
+		}
 	}
 }

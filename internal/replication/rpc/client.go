@@ -220,11 +220,20 @@ func (s *Stream) Run(ctx context.Context, send zfs.SendOptions, receive zfs.Rece
 	progress := zfs.StartProgress(estimate, report)
 	buffer := make([]byte, 128*1024)
 	var copyErr error
+	// receiverEnded records that the remote side ended the stream before the
+	// sender finished. The remote receive's status is then the cause, and the
+	// sender's exit is only this side killing it.
+	receiverEnded := false
 	for {
 		n, readErr := output.Read(buffer)
 		if n > 0 {
 			if sendErr := stream.Send(&ReceiveRequest{Data: buffer[:n]}); sendErr != nil {
-				copyErr = s.client.mapError(sendErr)
+				// Send reports io.EOF when the server has ended the stream;
+				// the status saying why comes from CloseAndRecv.
+				receiverEnded = runCtx.Err() == nil
+				if !errors.Is(sendErr, io.EOF) {
+					copyErr = s.client.mapError(sendErr)
+				}
 				cancel()
 				break
 			}
@@ -245,10 +254,17 @@ func (s *Stream) Run(ctx context.Context, send zfs.SendOptions, receive zfs.Rece
 	if response != nil && response.GetBytes() != progress.Bytes() {
 		receiveErr = errors.Join(receiveErr, fmt.Errorf("remote receive byte count differs from sent stream"))
 	}
-	err = errors.Join(copyErr, senderErr, receiveErr, ctx.Err())
+	if receiverEnded && receiveErr != nil {
+		err = errors.Join(receiveErr, copyErr, ctx.Err())
+	} else {
+		err = errors.Join(copyErr, senderErr, receiveErr, ctx.Err())
+	}
 	result := progress.Finish(err == nil)
 	if err != nil {
-		return result, fmt.Errorf("%s stream: %w; sender: %s", s.label, err, diagnostics.String())
+		if sent := diagnostics.String(); sent != "" {
+			return result, fmt.Errorf("%s stream: %w; sender: %s", s.label, err, sent)
+		}
+		return result, fmt.Errorf("%s stream: %w", s.label, err)
 	}
 	return result, nil
 }
