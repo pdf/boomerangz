@@ -12,20 +12,13 @@ import (
 	"github.com/pdf/boomerangz/internal/policy"
 )
 
-// filterDatasets keeps the entries whose status is among statuses, "all"
-// keeping every one. With no statuses it keeps all but inactive datasets and
-// reports how many it hid.
+// filterDatasets keeps the entries discovery.StatusFilter keeps for
+// statuses, and reports how many the default filter hid.
 func filterDatasets(entries []discovery.Entry, statuses []string) ([]discovery.Entry, int) {
-	if slices.Contains(statuses, "all") {
-		return entries, 0
-	}
-	keep := func(status string) bool { return slices.Contains(statuses, status) }
-	if len(statuses) == 0 {
-		keep = func(status string) bool { return status != "inactive" }
-	}
+	keep, defaulted := discovery.StatusFilter(statuses)
 	total := len(entries)
-	filtered := slices.DeleteFunc(entries, func(entry discovery.Entry) bool { return !keep(datasetStatus(entry)) })
-	if len(statuses) != 0 {
+	filtered := slices.DeleteFunc(entries, func(entry discovery.Entry) bool { return !keep(entry.Status()) })
+	if !defaulted {
 		return filtered, 0
 	}
 	return filtered, total - len(filtered)
@@ -52,7 +45,7 @@ func writeDatasetList(writer io.Writer, entries []discovery.Entry, hidden int) e
 	}
 	invalid := false
 	for _, entry := range entries {
-		status := datasetStatus(entry)
+		status := entry.Status()
 		invalid = invalid || status == "invalid"
 		if len(entry.Blocked) > 0 {
 			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\n", status, entry.Dataset.Name, strings.Join(blockedNames(entry), ", "))
@@ -93,25 +86,6 @@ func blockedNames(entry discovery.Entry) []string {
 		}
 	}
 	return names
-}
-
-func datasetStatus(entry discovery.Entry) string {
-	if len(entry.Policy.Errors) > 0 {
-		return "invalid"
-	}
-	if entry.CoveredBy != "" && entry.Member {
-		return "member"
-	}
-	if entry.CoveredBy != "" {
-		return "excluded"
-	}
-	if entry.Inspected && entry.Policy.Enabled {
-		return "active"
-	}
-	if entry.Replica != (discovery.Replica{}) {
-		return "target"
-	}
-	return "inactive"
 }
 
 func writeDatasetInspection(writer io.Writer, entry discovery.Entry) error {

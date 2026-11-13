@@ -336,6 +336,7 @@ func (p *Pool) emitOutcome(job Job, outcome Outcome) {
 	if p.report != nil {
 		event := p.event(job, outcome.State, outcome.Reason)
 		event.Identity = outcome.Identity
+		event.RetryAt, event.Attempts = outcome.RetryAt, outcome.Attempts
 		p.report(event)
 	}
 }

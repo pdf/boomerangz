@@ -1,0 +1,37 @@
+boomerangz  15:02:11 CET  3 active datasets  3 running  1 queued  5 problems
+
+[1mPROBLEMS[0m
+[31mremote offsite                 permissions not checked: list destination datasets: dial tcp 10.0.0.9:22: connect:[0m
+[31m                               connection refused[0m
+[31mtank/broken                    invalid policy; inspect with: boomerangz dataset inspect tank/broken[0m
+[31mtank/db -> backup/boomerangz   blocked: its replica would overlap the replica of tank/vm[0m
+[31mtank/db -> archive/boomerangz  failed, 3h ago: cannot receive incremental stream: destination archive/boomerangz/tank/db[0m
+[31m                               has been modified since most recent snapshot[0m
+[33mtank/home -> remote offsite    waiting-retry, 30s ago, 3 failed attempts, retry in 4m: ssh: connect to host[0m
+[33m                               offsite.example port 22: Connection refused[0m
+
+[1mIN PROGRESS[0m
+tank/home prune on backup/boomerangz  pruning
+tank/vm/images -> backup/boomerangz   sending, 34%, 41.0 GiB of 120.0 GiB, 410.0 MiB/s, ETA 3m17s
+                                      [=============                           ]
+tank/vm/images snapshot               snapshotting
+tank/vm/images -> remote offsite      queued, position 1 of 1
+
+STATUS    DATASET                      NEXT SNAPSHOT  STATE         SINCE
+target    backup/boomerangz/tank/home  -              -             -
+invalid   tank/broken                  -              -             -
+active    tank/db                      due            -             -
+            -> archive/boomerangz                     failed        3h ago
+            -> backup/boomerangz                      blocked       -
+active    tank/home (recursive)        in 13m         ok            47m ago
+            -> backup/boomerangz                      ok            12m ago
+            -> remote offsite                         retrying      30s ago
+excluded  tank/home/cache              -              -             -
+member    tank/home/pdf                in 13m         -             -
+active    tank/vm/images               in 58m         snapshotting  2s ago
+            -> backup/boomerangz                      sending 34%   1m ago
+            -> remote offsite                         queued        -
+
+2 inactive datasets hidden; show them with: boomerangz status --status all
+
+queues  local 7/8 (nearly full), management 1/64, remote 0/64

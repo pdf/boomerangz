@@ -1,0 +1,71 @@
+boomerangz  15:02:11 CET
+3 active datasets  3 running  1 queued
+5 problems
+
+PROBLEMS
+remote offsite
+    permissions not checked: list
+    destination datasets: dial tcp
+    10.0.0.9:22: connect: connection
+    refused
+tank/broken
+    invalid policy; inspect with:
+    boomerangz dataset inspect
+    tank/broken
+tank/db -> backup/boomerangz
+    blocked: its replica would overlap
+    the replica of tank/vm
+tank/db -> archive/boomerangz
+    failed, 3h ago: cannot receive
+    incremental stream: destination
+    archive/boomerangz/tank/db has been
+    modified since most recent snapshot
+tank/home -> remote offsite
+    waiting-retry, 30s ago, 3 failed
+    attempts, retry in 4m: ssh: connect
+    to host offsite.example port 22:
+    Connection refused
+
+IN PROGRESS
+tank/home prune on backup/boomerangz
+    pruning
+tank/vm/images -> backup/boomerangz
+    sending, 34%, 41.0 GiB of 120.0 GiB,
+    410.0 MiB/s, ETA 3m17s
+    [===========                       ]
+tank/vm/images snapshot
+    snapshotting
+tank/vm/images -> remote offsite
+    queued, position 1 of 1
+
+target  backup/boomerangz/tank/home
+invalid  tank/broken
+active  tank/db
+    next snapshot due
+  -> archive/boomerangz
+      state failed, since 3h ago
+  -> backup/boomerangz
+      state blocked
+active  tank/home (recursive)
+    next snapshot in 13m, state ok,
+    since 47m ago
+  -> backup/boomerangz
+      state ok, since 12m ago
+  -> remote offsite
+      state retrying, since 30s ago
+excluded  tank/home/cache
+member  tank/home/pdf
+    next snapshot in 13m
+active  tank/vm/images
+    next snapshot in 58m, state
+    snapshotting, since 2s ago
+  -> backup/boomerangz
+      state sending 34%, since 1m ago
+  -> remote offsite
+      state queued
+
+2 inactive datasets hidden; show them
+    with: boomerangz status --status all
+
+queues  local 7/8 (nearly full),
+        management 1/64, remote 0/64

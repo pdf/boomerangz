@@ -171,9 +171,10 @@ func (c *daemonCommand) Run(env *commandEnvironment) error {
 
 type statusCommand struct {
 	configOptions `embed:""`
-	Credential    string `help:"Imported pairing name or absolute bundle path."`
-	Watch         bool   `short:"w" help:"Continuously watch status."`
-	JSON          bool   `help:"Emit JSON."`
+	Credential    string   `help:"Imported pairing name or absolute bundle path."`
+	Watch         bool     `short:"w" help:"Continuously watch status."`
+	Statuses      []string `name:"status" enum:"all,active,member,excluded,target,inactive,invalid" help:"List only datasets with this status; repeat as needed. Allowed: ${enum}. Default: every status but inactive."`
+	JSON          bool     `help:"Emit JSON."`
 }
 
 func (c *statusCommand) Run(env *commandEnvironment) error {
@@ -181,7 +182,7 @@ func (c *statusCommand) Run(env *commandEnvironment) error {
 	if err != nil {
 		return err
 	}
-	return runStatus(env.Context, env.Stdout, loaded.Config, c.Credential, c.Watch, c.JSON)
+	return runStatus(env.Context, env.Stdout, loaded.Config, c.Credential, c.Statuses, c.Watch, c.JSON)
 }
 
 type triggerCommand struct {

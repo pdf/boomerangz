@@ -1,0 +1,9 @@
+boomerangz  15:02:11 CET  1 active dataset
+
+STATUS  DATASET                 NEXT SNAPSHOT  STATE  SINCE
+active  tank/home               in 13m         ok     47m ago
+          -> backup/boomerangz                 ok     46m ago
+
+1 inactive dataset hidden; show it with: boomerangz status --status all
+
+queues  local 0/64

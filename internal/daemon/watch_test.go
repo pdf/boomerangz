@@ -246,13 +246,13 @@ func TestWatchStatusReflectsViewChangesWithoutATransition(t *testing.T) {
 	nextWatchMessage(t, stream, func(snapshot *controlrpc.StatusSnapshot) bool {
 		return strings.Join(queuedJobs(snapshot, "management"), ",") == "reconcile:tank/b"
 	})
-	runtime := &Runtime{status: status, known: map[string]bool{"tank/new": true}, active: map[string]bool{"tank/new": true}, recursive: map[string]bool{}}
+	runtime := &Runtime{status: status, generation: sendingGeneration(t, nil, nil), known: map[string]bool{"tank/data": true}, active: map[string]bool{"tank/data": true}, recursive: map[string]bool{}}
 	runtime.mu.Lock()
 	runtime.publishRuntimeLocked()
 	runtime.mu.Unlock()
 	nextWatchMessage(t, stream, func(snapshot *controlrpc.StatusSnapshot) bool {
 		datasets := snapshot.GetDatasets()
-		return len(datasets) == 1 && datasets[0].GetName() == "tank/new" && datasets[0].GetActive()
+		return len(datasets) == 2 && datasets[1].GetName() == "tank/data" && datasets[1].GetActive()
 	})
 }
 

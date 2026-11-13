@@ -85,3 +85,65 @@ func TestBlockedTargetIsRefusedWithoutHoldingSnapshots(t *testing.T) {
 		t.Fatal("a pending snapshot was recorded for the blocked target")
 	}
 }
+
+// TestStatusClassifiesEveryDatasetAsDatasetListDoes publishes a generation
+// holding an actor root, a blocked root, and datasets boomerangz does not
+// manage, and requires the status view to list every one of them with the
+// status `dataset list` gives it, and the blocked root with its blocked
+// target.
+func TestStatusClassifiesEveryDatasetAsDatasetListDoes(t *testing.T) {
+	t.Parallel()
+	_, properties := newReportPool(t)
+	reader := collisionReader{
+		datasets: []string{"tank", reportSource, "tank/other", "backup"},
+		properties: append(slices.Clone(properties),
+			zfs.Property{Dataset: "tank/other", Name: policy.Namespace + "enabled", Value: "on", Source: zfs.SourceLocal},
+			zfs.Property{Dataset: "tank/other", Name: policy.Namespace + "local", Value: reportDestination, Source: zfs.SourceLocal},
+		),
+	}
+	scanner, err := discovery.New(reader, discovery.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := scanner.Scan(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := NewStatus(nil)
+	runtime := &Runtime{status: status, generation: generation, known: map[string]bool{reportSource: true}, active: map[string]bool{reportSource: true}, recursive: map[string]bool{}}
+	runtime.mu.Lock()
+	runtime.publishRuntimeLocked()
+	runtime.mu.Unlock()
+
+	listed := map[string]DatasetStatus{}
+	for _, dataset := range status.Snapshot().Datasets {
+		listed[dataset.Name] = dataset
+	}
+	entries := generation.Entries()
+	if len(listed) != len(entries) {
+		t.Fatalf("status lists %d datasets, want every one of the generation's %d", len(listed), len(entries))
+	}
+	for _, entry := range entries {
+		dataset, found := listed[entry.Dataset.Name]
+		if !found || dataset.Status != entry.Status() {
+			t.Errorf("%s: status %q (listed %t), want %q", entry.Dataset.Name, dataset.Status, found, entry.Status())
+		}
+		var blocked []string
+		for _, target := range dataset.Blocked {
+			blocked = append(blocked, target.Target)
+		}
+		var want []string
+		for _, target := range entry.Blocked {
+			want = append(want, target.Target)
+		}
+		if !slices.Equal(blocked, want) {
+			t.Errorf("%s: blocked %q, want %q", entry.Dataset.Name, blocked, want)
+		}
+	}
+	if !listed[reportSource].Active || listed["tank/other"].Active {
+		t.Errorf("only the scheduled root is active: %+v", listed)
+	}
+	if listed["tank/other"].Status != discovery.StatusActive || len(listed["tank/other"].Blocked) == 0 || listed["tank"].Status != discovery.StatusInactive {
+		t.Errorf("fixture did not produce an active blocked root and an inactive dataset: %+v", listed)
+	}
+}

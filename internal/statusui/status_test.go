@@ -3,6 +3,9 @@ package statusui
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -11,38 +14,288 @@ import (
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
 )
 
-func TestTerminalNarrowAndJSON(t *testing.T) {
-	t.Parallel()
-	snapshot := &controlrpc.StatusSnapshot{Generation: 2, ConfigGeneration: 3, Datasets: []*controlrpc.DatasetStatus{{Name: "tank/data", Active: true}}, Queues: []*controlrpc.QueueStatus{{Name: "management", Capacity: 10, Pending: 2}}}
-	var terminal bytes.Buffer
-	if err := Terminal(&terminal, snapshot, 24); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(terminal.String(), "tank/data") || strings.Contains(terminal.String(), "[") {
-		t.Fatalf("narrow output=%q", terminal.String())
-	}
-	var structured bytes.Buffer
-	if err := JSON(&structured, snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(structured.String(), `"generation":2`) || !strings.Contains(structured.String(), `"config_generation":3`) {
-		t.Fatalf("JSON=%s", structured.String())
+var update = flag.Bool("update", false, "rewrite the golden frames under testdata/ from the current output")
+
+// observed is when every fixture snapshot was taken; times in the frames are
+// relative to it.
+var observed = time.Date(2026, 11, 13, 14, 2, 11, 0, time.UTC)
+
+var zone = time.FixedZone("CET", 60*60)
+
+func at(offset time.Duration) int64 { return observed.Add(offset).UnixNano() }
+
+// busy is a host with something in every section: a destination whose
+// permission check failed, an invalid dataset, a blocked target, a failed and
+// a retrying transfer, one running and one queued, finished work, member and
+// inactive datasets, and a nearly full queue.
+func busy() *controlrpc.StatusSnapshot {
+	return &controlrpc.StatusSnapshot{
+		Revision: 7, Generation: 41, ConfigGeneration: 3, ObservedUnixNano: observed.UnixNano(),
+		Destinations: []*controlrpc.DestinationPermissions{
+			{Destination: "offsite", Remote: true, Error: "list destination datasets: dial tcp 10.0.0.9:22: connect: connection refused"},
+			{Destination: "backup/boomerangz", Dataset: "backup/boomerangz", Account: "boomerangz"},
+		},
+		Datasets: []*controlrpc.DatasetStatus{
+			{Name: "tank/home", Status: "active", Active: true, Recursive: true, NextSnapshotUnixNano: at(13 * time.Minute)},
+			{Name: "tank/home/pdf", Status: "member", CoveredBy: "tank/home", NextSnapshotUnixNano: at(13 * time.Minute)},
+			{Name: "tank/home/cache", Status: "excluded", CoveredBy: "tank/home"},
+			{Name: "tank/vm/images", Status: "active", Active: true, NextSnapshotUnixNano: at(58 * time.Minute)},
+			{Name: "tank/db", Status: "active", Active: true, NextSnapshotUnixNano: at(-5 * time.Second), Blocked: []*controlrpc.BlockedTarget{{Target: "backup/boomerangz", Reason: "its replica would overlap the replica of tank/vm"}}},
+			{Name: "tank/broken", Status: "invalid"},
+			{Name: "tank/scratch", Status: "inactive"},
+			{Name: "tank/tmp", Status: "inactive"},
+			{Name: "backup/boomerangz/tank/home", Status: "target"},
+		},
+		Queues: []*controlrpc.QueueStatus{{Name: "management", Capacity: 64, Pending: 1}, {Name: "local", Capacity: 8, Pending: 7}, {Name: "remote", Capacity: 64}},
+		Jobs: []*controlrpc.JobStatus{
+			{Job: "snapshot:tank/home", Dataset: "tank/home", Target: "tank/home", State: "succeeded", ChangedUnixNano: at(-47 * time.Minute)},
+			{Job: "snapshot:tank/vm/images", Dataset: "tank/vm/images", Target: "tank/vm/images", State: "snapshotting", ChangedUnixNano: at(-2 * time.Second)},
+			{Job: "prune:tank/home", Dataset: "tank/home", Target: "tank/home", State: "succeeded", ChangedUnixNano: at(-46 * time.Minute)},
+			{Job: "local:tank/home:backup/boomerangz", Dataset: "tank/home", Target: "local:backup/boomerangz", State: "succeeded", ChangedUnixNano: at(-12 * time.Minute)},
+			{Job: "local:tank/vm/images:backup/boomerangz", Dataset: "tank/vm/images", Target: "local:backup/boomerangz", State: "sending", ChangedUnixNano: at(-90 * time.Second), Bytes: 41 << 30, TotalBytes: 120 << 30, TotalKnown: true, BytesPerSecond: 410 << 20, EtaNanoseconds: int64(197 * time.Second)},
+			{Job: "remote:tank/home:offsite", Dataset: "tank/home", Target: "ssh:offsite.example:22", State: "waiting-retry", ChangedUnixNano: at(-30 * time.Second), RetryUnixNano: at(4 * time.Minute), Attempts: 3, Reason: "ssh: connect to host offsite.example port 22: Connection refused"},
+			{Job: "remote:tank/vm/images:offsite", Dataset: "tank/vm/images", Target: "ssh:offsite.example:22", State: "pending-remote", QueuePosition: 1, Pending: 1},
+			{Job: "local:tank/db:archive/boomerangz", Dataset: "tank/db", Target: "local:archive/boomerangz", State: "failed", ChangedUnixNano: at(-3 * time.Hour), Reason: "cannot receive incremental stream: destination archive/boomerangz/tank/db has been modified since most recent snapshot"},
+			{Job: "destination-prune:tank/home:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", Dataset: "tank/home", Target: "local:backup/boomerangz", State: "pruning", ChangedUnixNano: at(-1 * time.Second)},
+			{Job: "inactive:tank/scratch:false", Dataset: "tank/scratch", Target: "tank/scratch", State: "succeeded", ChangedUnixNano: at(-2 * time.Hour)},
+			{Job: "retire:tank/old", Dataset: "tank/old", Target: "tank/old", State: "cancelled", Reason: "context canceled"},
+		},
 	}
 }
 
-func TestTerminalShowsKnownTransferProgress(t *testing.T) {
+// idle is a healthy host with nothing running.
+func idle() *controlrpc.StatusSnapshot {
+	return &controlrpc.StatusSnapshot{
+		ObservedUnixNano: observed.UnixNano(),
+		Datasets: []*controlrpc.DatasetStatus{
+			{Name: "tank/home", Status: "active", Active: true, NextSnapshotUnixNano: at(13 * time.Minute)},
+			{Name: "tank/scratch", Status: "inactive"},
+		},
+		Queues: []*controlrpc.QueueStatus{{Name: "local", Capacity: 64}},
+		Jobs: []*controlrpc.JobStatus{
+			{Job: "snapshot:tank/home", Dataset: "tank/home", Target: "tank/home", State: "succeeded", ChangedUnixNano: at(-47 * time.Minute)},
+			{Job: "local:tank/home:backup/boomerangz", Dataset: "tank/home", Target: "local:backup/boomerangz", State: "succeeded", ChangedUnixNano: at(-46 * time.Minute)},
+		},
+	}
+}
+
+// onlyInactive is a host where nothing is managed yet.
+func onlyInactive() *controlrpc.StatusSnapshot {
+	return &controlrpc.StatusSnapshot{ObservedUnixNano: observed.UnixNano(), Datasets: []*controlrpc.DatasetStatus{{Name: "tank", Status: "inactive"}, {Name: "tank/data", Status: "inactive"}}}
+}
+
+// checkGolden compares got with testdata/name, or rewrites the file under
+// -update. A frame is compared whole, so a layout change shows as a diff of
+// the screen rather than as a missing substring.
+func checkGolden(t *testing.T, name, got string) {
+	t.Helper()
+	path := filepath.Join("testdata", name)
+	if *update {
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("%v (run go test ./internal/statusui -update to create it)", err)
+	}
+	if got != string(want) {
+		t.Errorf("frame differs from %s (run go test ./internal/statusui -update and review the diff):\n--- got\n%s--- want\n%s", path, got, want)
+	}
+}
+
+func TestTerminalFrames(t *testing.T) {
 	t.Parallel()
-	snapshot := &controlrpc.StatusSnapshot{Jobs: []*controlrpc.JobStatus{
-		{Job: "local:tank/data:backup/data", State: "sending", Bytes: 512, TotalBytes: 1024, TotalKnown: true, BytesPerSecond: 256, EtaNanoseconds: int64(2 * time.Second)},
-		{Job: "inactive:tank/data/child:false", State: "succeeded"},
-		{Job: "destination-prune:tank/old:target", State: "cancelled", Reason: "context canceled"},
-	}}
-	var output bytes.Buffer
-	if err := Terminal(&output, snapshot, 140); err != nil {
+	for _, test := range []struct {
+		golden   string
+		snapshot *controlrpc.StatusSnapshot
+		opts     Options
+	}{
+		{golden: "busy-120.txt", snapshot: busy(), opts: Options{Width: 120}},
+		{golden: "busy-80.txt", snapshot: busy(), opts: Options{Width: 80}},
+		{golden: "busy-40.txt", snapshot: busy(), opts: Options{Width: 40}},
+		{golden: "busy-color.txt", snapshot: busy(), opts: Options{Width: 120, Color: true}},
+		{golden: "busy-all.txt", snapshot: busy(), opts: Options{Width: 120, Statuses: []string{"all"}}},
+		{golden: "busy-member-target.txt", snapshot: busy(), opts: Options{Width: 120, Statuses: []string{"member", "target"}}},
+		{golden: "idle.txt", snapshot: idle(), opts: Options{Width: 80}},
+		{golden: "only-inactive.txt", snapshot: onlyInactive(), opts: Options{Width: 80}},
+		{golden: "empty.txt", snapshot: &controlrpc.StatusSnapshot{ObservedUnixNano: observed.UnixNano()}, opts: Options{Width: 80}},
+	} {
+		t.Run(test.golden, func(t *testing.T) {
+			t.Parallel()
+			test.opts.Zone = zone
+			var frame bytes.Buffer
+			if err := Terminal(&frame, test.snapshot, test.opts); err != nil {
+				t.Fatal(err)
+			}
+			checkGolden(t, test.golden, frame.String())
+		})
+	}
+}
+
+func TestTailFrame(t *testing.T) {
+	t.Parallel()
+	tail := NewTail(5)
+	tail.Add([]*controlrpc.JobStatus{
+		{Job: "retire:tank/old", Dataset: "tank/old", State: "succeeded", ChangedUnixNano: observed.Add(-30 * time.Hour).UnixNano()},
+		{Job: "snapshot:tank/home", Dataset: "tank/home", State: "succeeded", ChangedUnixNano: observed.Add(-20 * time.Hour).UnixNano(), Snapshot: "tank/home@boomerangz_2026-11-12T18:00:00Z"},
+		{Job: "local:tank/vm/images:backup/boomerangz", Dataset: "tank/vm/images", State: "sending", ChangedUnixNano: at(-90 * time.Second), Snapshot: "tank/vm/images@boomerangz_2026-11-13T13:00:00Z", Base: "tank/vm/images@boomerangz_2026-11-13T12:00:00Z", Mode: "incremental-latest"},
+	})
+	tail.Add(nil)
+	tail.Add([]*controlrpc.JobStatus{
+		{Job: "prune:tank/home", Dataset: "tank/home", State: "succeeded", ChangedUnixNano: at(-60 * time.Second), Destroyed: []string{"tank/home@old"}, DestroyedCount: 1},
+		{Job: "remote:tank/home:offsite", Dataset: "tank/home", State: "waiting-retry", ChangedUnixNano: at(-30 * time.Second), Snapshot: "tank/home@boomerangz_2026-11-13T13:15:00Z", Reason: "ssh: connect to host offsite.example port 22: Connection refused"},
+		{Job: "config:reload", State: "succeeded", ChangedUnixNano: at(-10 * time.Second), ConfigGeneration: 3},
+	})
+	var frame bytes.Buffer
+	if err := tail.Terminal(&frame, observed, Options{Width: 80, Zone: zone}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "512 B/1.0 KiB") || !strings.Contains(output.String(), "@ 256 B/s") || !strings.Contains(output.String(), "ETA 2s") || !strings.Contains(output.String(), "[") || !strings.Contains(output.String(), "deactivate:tank/data/child") || strings.Contains(output.String(), "tank/old") {
-		t.Fatalf("progress output=%q", output.String())
+	checkGolden(t, "tail-80.txt", frame.String())
+
+	var empty bytes.Buffer
+	if err := NewTail(4).Terminal(&empty, observed, Options{}); err != nil || empty.Len() != 0 {
+		t.Fatalf("an empty tail wrote %q err=%v", empty.String(), err)
+	}
+}
+
+// busyTail holds transitions with long identities and reasons.
+func busyTail() *Tail {
+	tail := NewTail(10)
+	tail.Add([]*controlrpc.JobStatus{
+		{Job: "local:tank/vm/images:backup/boomerangz", Dataset: "tank/vm/images", State: "sending", ChangedUnixNano: at(-90 * time.Second), Snapshot: "tank/vm/images@boomerangz_2026-11-13T13:00:00Z", Base: "tank/vm/images@boomerangz_2026-11-13T12:00:00Z", Mode: "incremental-latest"},
+		{Job: "remote:tank/home:offsite", Dataset: "tank/home", State: "waiting-retry", ChangedUnixNano: at(-30 * time.Second), Snapshot: "tank/home@boomerangz_2026-11-13T13:15:00Z", Reason: "ssh: connect to host offsite.example port 22: Connection refused"},
+	})
+	return tail
+}
+
+// TestFramesFitTheWidthWithoutLosingText renders the busy host and a watch
+// tail at every width from very narrow to wide, and checks two things: no
+// line is wider than the terminal, which would wrap again on screen and
+// throw a redrawn frame out of place, and every word of every reason and
+// detail is still on screen, since long text wraps rather than being cut.
+func TestFramesFitTheWidthWithoutLosingText(t *testing.T) {
+	t.Parallel()
+	snapshot := busy()
+	var words []string
+	for _, job := range snapshot.GetJobs() {
+		if job.GetState() != "cancelled" {
+			words = append(words, strings.Fields(job.GetReason())...)
+		}
+	}
+	for _, destination := range snapshot.GetDestinations() {
+		words = append(words, strings.Fields(destination.GetError())...)
+	}
+	for _, dataset := range snapshot.GetDatasets() {
+		for _, blocked := range dataset.GetBlocked() {
+			words = append(words, strings.Fields(blocked.GetReason())...)
+		}
+	}
+	for width := 20; width <= 160; width++ {
+		var frame bytes.Buffer
+		if err := Terminal(&frame, snapshot, Options{Width: width, Zone: zone}); err != nil {
+			t.Fatal(err)
+		}
+		if err := busyTail().Terminal(&frame, observed, Options{Width: width, Zone: zone}); err != nil {
+			t.Fatal(err)
+		}
+		for line := range strings.Lines(frame.String()) {
+			if len(strings.TrimSuffix(line, "\n")) > width {
+				t.Fatalf("width %d: line %q is %d wide:\n%s", width, line, len(line)-1, frame.String())
+			}
+		}
+		// A word broken across lines is whole again once the frame's
+		// line breaks and indentation are taken out.
+		joined := strings.Join(strings.Fields(frame.String()), "")
+		for _, word := range words {
+			if !strings.Contains(joined, word) {
+				t.Fatalf("width %d lost %q:\n%s", width, word, frame.String())
+			}
+		}
+	}
+}
+
+func TestFitKeepsAFrameWithinTheTerminalHeight(t *testing.T) {
+	t.Parallel()
+	frame := []byte("one\ntwo\nthree\nfour\n")
+	for _, test := range []struct {
+		height int
+		want   string
+	}{
+		{height: 0, want: "one\ntwo\nthree\nfour\n"},
+		{height: 1, want: "one\ntwo\nthree\nfour\n"},
+		{height: 4, want: "one\ntwo\nthree\nfour\n"},
+		{height: 3, want: "one\ntwo\n... 2 more lines\n"},
+		{height: 2, want: "one\n... 3 more lines\n"},
+	} {
+		if got := string(Fit(frame, test.height)); got != test.want {
+			t.Errorf("Fit(height %d) = %q, want %q", test.height, got, test.want)
+		}
+	}
+}
+
+func TestJSONFiltersDatasetsAsDatasetListDoes(t *testing.T) {
+	t.Parallel()
+	names := func(t *testing.T, statuses []string) []string {
+		t.Helper()
+		var structured bytes.Buffer
+		if err := JSON(&structured, busy(), statuses); err != nil {
+			t.Fatal(err)
+		}
+		var decoded struct {
+			Datasets []struct {
+				Name string `json:"name"`
+			} `json:"datasets"`
+		}
+		if err := json.Unmarshal(structured.Bytes(), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		var result []string
+		for _, dataset := range decoded.Datasets {
+			result = append(result, dataset.Name)
+		}
+		return result
+	}
+	if got, want := names(t, nil), []string{"backup/boomerangz/tank/home", "tank/broken", "tank/db", "tank/home", "tank/home/cache", "tank/home/pdf", "tank/vm/images"}; !slices.Equal(got, want) {
+		t.Errorf("default datasets = %q, want every status but inactive %q", got, want)
+	}
+	if got := names(t, []string{"all"}); len(got) != len(busy().GetDatasets()) {
+		t.Errorf("--status all kept %q, want every dataset", got)
+	}
+	if got, want := names(t, []string{"inactive"}), []string{"tank/scratch", "tank/tmp"}; !slices.Equal(got, want) {
+		t.Errorf("--status inactive kept %q, want %q", got, want)
+	}
+
+	var empty bytes.Buffer
+	if err := JSON(&empty, &controlrpc.StatusSnapshot{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(empty.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"datasets", "destinations"} {
+		if string(decoded[field]) != "[]" {
+			t.Errorf("%s of an empty snapshot = %s, want an empty array", field, decoded[field])
+		}
+	}
+}
+
+func TestJSONTimesAreUTC(t *testing.T) {
+	t.Parallel()
+	var structured bytes.Buffer
+	if err := JSON(&structured, idle(), nil); err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Observed time.Time `json:"observed"`
+	}
+	if err := json.Unmarshal(structured.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Observed.Equal(observed) || decoded.Observed.Location() != time.UTC {
+		t.Fatalf("observed = %v, want %v in UTC", decoded.Observed, observed)
 	}
 }
 
@@ -58,7 +311,7 @@ func TestWatchJSONKeepsTransitionsInRecordedOrder(t *testing.T) {
 		},
 	}
 	var structured bytes.Buffer
-	if err := WatchJSON(&structured, response); err != nil {
+	if err := WatchJSON(&structured, response, nil); err != nil {
 		t.Fatal(err)
 	}
 	var decoded struct {
@@ -82,121 +335,15 @@ func TestWatchJSONKeepsTransitionsInRecordedOrder(t *testing.T) {
 	}
 
 	var empty bytes.Buffer
-	if err := WatchJSON(&empty, &controlrpc.WatchStatusResponse{Status: &controlrpc.StatusSnapshot{}}); err != nil {
+	if err := WatchJSON(&empty, &controlrpc.WatchStatusResponse{Status: &controlrpc.StatusSnapshot{}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(empty.String(), `"transitions":[]`) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(empty.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["transitions"]) != "[]" {
 		t.Fatalf("a message without transitions must carry an empty array: %s", empty.String())
-	}
-}
-
-func TestTailKeepsTheNewestTransitionsOldestFirst(t *testing.T) {
-	t.Parallel()
-	tail := NewTail(3)
-	var output bytes.Buffer
-	if err := tail.Terminal(&output, 80); err != nil || output.Len() != 0 {
-		t.Fatalf("an empty tail wrote %q err=%v", output.String(), err)
-	}
-	at := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
-	tail.Add([]*controlrpc.JobStatus{{Job: "snapshot:tank/a", State: "snapshotting", ChangedUnixNano: at.UnixNano()}, {Job: "snapshot:tank/a", State: "succeeded", ChangedUnixNano: at.UnixNano()}})
-	tail.Add(nil)
-	tail.Add([]*controlrpc.JobStatus{{Job: "inactive:tank/b:false", State: "retiring"}, {Job: "remote:tank/c:offsite", State: "waiting-retry", Reason: "connection refused by the remote peer"}})
-	if err := tail.terminal(&output, 80, time.UTC); err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 4 || lines[0] != "RECENT TRANSITIONS" {
-		t.Fatalf("tail=%q", output.String())
-	}
-	for index, want := range [][]string{{"2026-09-13T12:00:00Z", "snapshot:tank/a", "succeeded"}, {"-", "deactivate:tank/b", "retiring"}, {"-", "remote:tank/c:offsite", "waiting-retry", "connection"}} {
-		if fields := strings.Fields(lines[index+1]); len(fields) < len(want) || !slices.Equal(fields[:len(want)], want) {
-			t.Fatalf("line %d=%q, want it to begin with %q; tail=%q", index+1, lines[index+1], want, output.String())
-		}
-	}
-	output.Reset()
-	if err := tail.Terminal(&output, 30); err != nil {
-		t.Fatal(err)
-	}
-	for line := range strings.Lines(output.String()) {
-		if len(strings.TrimSuffix(line, "\n")) > 30 {
-			t.Fatalf("line %q exceeds the width", line)
-		}
-	}
-}
-
-func TestTailNamesWhatEachTransitionActedOn(t *testing.T) {
-	t.Parallel()
-	tail := NewTail(4)
-	tail.Add([]*controlrpc.JobStatus{
-		{Job: "local:tank/a:backup/a", State: "sending", Snapshot: "tank/a@two", Base: "tank/a@one", Mode: "incremental-latest"},
-		{Job: "prune:tank/a", State: "succeeded", Destroyed: []string{"tank/a@old"}, DestroyedCount: 1},
-		{Job: "remote:tank/a:offsite", State: "waiting-retry", Snapshot: "tank/a@two", Reason: "connection refused"},
-		{Job: "config:reload", State: "succeeded", ConfigGeneration: 3},
-	})
-	var output bytes.Buffer
-	if err := tail.Terminal(&output, 200); err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	for index, want := range []string{
-		"snapshot=tank/a@two base=tank/a@one mode=incremental-latest",
-		"destroyed=1",
-		"snapshot=tank/a@two connection refused",
-		"config_generation=3",
-	} {
-		if !strings.HasSuffix(strings.TrimSpace(lines[index+1]), want) {
-			t.Fatalf("line %d = %q, want it to end %q", index+1, lines[index+1], want)
-		}
-	}
-}
-
-func TestTerminalAndJSONReportDestinationPermissionWarnings(t *testing.T) {
-	t.Parallel()
-	snapshot := &controlrpc.StatusSnapshot{Destinations: []*controlrpc.DestinationPermissions{
-		{Destination: "offsite", Remote: true, Error: "list destination datasets: connection refused"},
-		{Destination: "backup/boomerangz", Dataset: "backup/boomerangz", Account: "boomerangz", Missing: []string{"canmount", "rename"}},
-		{Destination: "backup/complete", Dataset: "backup/complete"},
-	}}
-	var terminal bytes.Buffer
-	// Warnings are never cut to width: the operator needs every name.
-	if err := Terminal(&terminal, snapshot, 24); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{
-		"WARNINGS\nlocal destination backup/boomerangz: boomerangz lacks delegated ZFS permissions on backup/boomerangz: canmount,rename\n",
-		"remote destination offsite: permissions not checked: list destination datasets: connection refused\n",
-	} {
-		if !strings.Contains(terminal.String(), want) {
-			t.Fatalf("terminal output = %q, want %q", terminal.String(), want)
-		}
-	}
-	if strings.Contains(terminal.String(), "backup/complete") {
-		t.Fatalf("a destination with nothing missing was warned about: %q", terminal.String())
-	}
-	var structured bytes.Buffer
-	if err := JSON(&structured, snapshot); err != nil {
-		t.Fatal(err)
-	}
-	var decoded struct {
-		Destinations []struct {
-			Destination string   `json:"destination"`
-			Remote      bool     `json:"remote"`
-			Missing     []string `json:"missing"`
-			Error       string   `json:"error"`
-		} `json:"destinations"`
-	}
-	if err := json.Unmarshal(structured.Bytes(), &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if len(decoded.Destinations) != 3 || decoded.Destinations[0].Destination != "backup/boomerangz" || !slices.Equal(decoded.Destinations[0].Missing, []string{"canmount", "rename"}) || decoded.Destinations[2].Destination != "offsite" || !decoded.Destinations[2].Remote || decoded.Destinations[2].Error == "" {
-		t.Fatalf("JSON destinations = %+v", decoded.Destinations)
-	}
-	structured.Reset()
-	if err := JSON(&structured, &controlrpc.StatusSnapshot{}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(structured.String(), `"destinations":[]`) {
-		t.Fatalf("JSON before any check = %s", structured.String())
 	}
 }
 
@@ -209,11 +356,7 @@ func TestRedrawOverwritesTheFrameInOneWrite(t *testing.T) {
 	if writes.count != 1 {
 		t.Fatalf("writes=%d, want one write per frame", writes.count)
 	}
-	got := writes.String()
-	if strings.Contains(got, "\x1b[2J") {
-		t.Fatalf("frame clears the screen before drawing: %q", got)
-	}
-	if want := "\x1b[H\x1b[2Kfirst\n\x1b[2Ksecond\n\x1b[J"; got != want {
+	if got, want := writes.String(), "\x1b[H\x1b[2Kfirst\n\x1b[2Ksecond\n\x1b[J"; got != want {
 		t.Fatalf("frame=%q, want %q", got, want)
 	}
 }
@@ -226,40 +369,4 @@ type countingWriter struct {
 func (w *countingWriter) Write(p []byte) (int, error) {
 	w.count++
 	return w.Buffer.Write(p)
-}
-
-func TestTerminalTimesAreInTheDisplayZone(t *testing.T) {
-	t.Parallel()
-	zone := time.FixedZone("AEST", 10*60*60)
-	observed := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
-	next := observed.Add(time.Hour)
-	snapshot := &controlrpc.StatusSnapshot{ObservedUnixNano: observed.UnixNano(), Datasets: []*controlrpc.DatasetStatus{{Name: "tank/data", Active: true, NextSnapshotUnixNano: next.UnixNano()}}}
-	var status bytes.Buffer
-	if err := terminal(&status, snapshot, 140, zone); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"2026-09-13T22:00:00+10:00", "2026-09-13T23:00:00+10:00"} {
-		if !strings.Contains(status.String(), want) {
-			t.Fatalf("status lacks %q: %q", want, status.String())
-		}
-	}
-	if strings.Contains(status.String(), "Z\n") || strings.Contains(status.String(), "T12:00:00") {
-		t.Fatalf("status shows UTC times: %q", status.String())
-	}
-	tail := NewTail(1)
-	tail.Add([]*controlrpc.JobStatus{{Job: "snapshot:tank/data", State: "succeeded", ChangedUnixNano: observed.UnixNano()}})
-	var transitions bytes.Buffer
-	if err := tail.terminal(&transitions, 140, zone); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(transitions.String(), "2026-09-13T22:00:00+10:00") {
-		t.Fatalf("transitions=%q, want the local time", transitions.String())
-	}
-	var structured bytes.Buffer
-	if err := JSON(&structured, snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(structured.String(), `"observed":"2026-09-13T12:00:00Z"`) {
-		t.Fatalf("JSON=%s, want UTC", structured.String())
-	}
 }

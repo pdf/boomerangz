@@ -8,10 +8,11 @@ import (
 	"io"
 	"slices"
 	"strings"
-	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	controlrpc "github.com/pdf/boomerangz/internal/control/rpc"
+	"github.com/pdf/boomerangz/internal/discovery"
 )
 
 type output struct {
@@ -28,8 +29,20 @@ type output struct {
 	Destinations []*controlrpc.DestinationPermissions `json:"destinations"`
 }
 
-func normalized(snapshot *controlrpc.StatusSnapshot) output {
-	result := output{Revision: snapshot.GetRevision(), Generation: snapshot.GetGeneration(), ConfigGeneration: snapshot.GetConfigGeneration(), Datasets: slices.Clone(snapshot.GetDatasets()), Queues: slices.Clone(snapshot.GetQueues()), Jobs: slices.Clone(snapshot.GetJobs()), Destinations: slices.Clone(snapshot.GetDestinations())}
+// normalized sorts the snapshot's lists and keeps the datasets statuses asks
+// for, as discovery.StatusFilter decides; hidden counts the datasets the
+// default filter left out.
+func normalized(snapshot *controlrpc.StatusSnapshot, statuses []string) (result output, hidden int) {
+	result = output{Revision: snapshot.GetRevision(), Generation: snapshot.GetGeneration(), ConfigGeneration: snapshot.GetConfigGeneration(), Queues: slices.Clone(snapshot.GetQueues()), Jobs: slices.Clone(snapshot.GetJobs()), Destinations: slices.Clone(snapshot.GetDestinations())}
+	keep, defaulted := discovery.StatusFilter(statuses)
+	result.Datasets = []*controlrpc.DatasetStatus{}
+	for _, dataset := range snapshot.GetDatasets() {
+		if keep(dataset.GetStatus()) {
+			result.Datasets = append(result.Datasets, dataset)
+		} else if defaulted {
+			hidden++
+		}
+	}
 	if result.Destinations == nil {
 		result.Destinations = []*controlrpc.DestinationPermissions{}
 	}
@@ -48,12 +61,14 @@ func normalized(snapshot *controlrpc.StatusSnapshot) output {
 		}
 		return strings.Compare(a.GetDestination(), b.GetDestination())
 	})
-	return result
+	return result, hidden
 }
 
-// JSON writes one stable JSON object followed by a newline.
-func JSON(writer io.Writer, snapshot *controlrpc.StatusSnapshot) error {
-	return json.NewEncoder(writer).Encode(normalized(snapshot))
+// JSON writes one stable JSON object followed by a newline, with the datasets
+// statuses asks for.
+func JSON(writer io.Writer, snapshot *controlrpc.StatusSnapshot, statuses []string) error {
+	view, _ := normalized(snapshot, statuses)
+	return json.NewEncoder(writer).Encode(view)
 }
 
 type watchOutput struct {
@@ -66,12 +81,778 @@ type watchOutput struct {
 // previous message in the order the daemon recorded them. Transitions are never
 // sorted, and the field is an empty array rather than absent when there are
 // none.
-func WatchJSON(writer io.Writer, response *controlrpc.WatchStatusResponse) error {
+func WatchJSON(writer io.Writer, response *controlrpc.WatchStatusResponse, statuses []string) error {
 	transitions := slices.Clone(response.GetTransitions())
 	if transitions == nil {
 		transitions = []*controlrpc.JobStatus{}
 	}
-	return json.NewEncoder(writer).Encode(watchOutput{output: normalized(response.GetStatus()), Transitions: transitions})
+	view, _ := normalized(response.GetStatus(), statuses)
+	return json.NewEncoder(writer).Encode(watchOutput{output: view, Transitions: transitions})
+}
+
+// Options shapes a terminal display.
+type Options struct {
+	// Width is the terminal width; 80 when unset.
+	Width int
+	// Statuses selects the datasets listed, as `dataset list --status` does.
+	Statuses []string
+	// Zone is where times are shown; the local zone when unset.
+	Zone *time.Location
+	// Color marks headings and problems with ANSI attributes.
+	Color bool
+}
+
+// ANSI attributes the display uses.
+const (
+	styleBold   = "1"
+	styleRed    = "31"
+	styleYellow = "33"
+)
+
+// paint wraps text in an ANSI attribute when color is on.
+func paint(text, style string, color bool) string {
+	if !color || style == "" || text == "" {
+		return text
+	}
+	return "\x1b[" + style + "m" + text + "\x1b[0m"
+}
+
+func heading(out *strings.Builder, title string, color bool) {
+	out.WriteString("\n" + paint(title, styleBold, color) + "\n")
+}
+
+func (o Options) normalized() Options {
+	if o.Width <= 0 {
+		o.Width = 80
+	}
+	if o.Zone == nil {
+		o.Zone = time.Local
+	}
+	return o
+}
+
+// jobClass groups job states by what an operator does about them.
+type jobClass int
+
+const (
+	classDone jobClass = iota
+	classQueued
+	classRunning
+	classProblem
+)
+
+func classify(job *controlrpc.JobStatus) jobClass {
+	switch state := job.GetState(); {
+	case state == "failed" || state == "blocked" || state == "waiting-retry":
+		return classProblem
+	case state == "succeeded" || state == "cancelled" || state == "scheduled":
+		return classDone
+	case strings.HasPrefix(state, "pending-") || job.GetQueuePosition() > 0:
+		return classQueued
+	default:
+		return classRunning
+	}
+}
+
+// problemRank orders problems most severe first.
+func problemRank(state string) int {
+	switch state {
+	case "failed":
+		return 0
+	case "blocked":
+		return 1
+	default:
+		return 2
+	}
+}
+
+// jobKind is the kind prefix of a job ID.
+func jobKind(job *controlrpc.JobStatus) string {
+	kind, _, _ := strings.Cut(job.GetJob(), ":")
+	return kind
+}
+
+// jobRest is what follows "<kind>:<dataset>:" in a job ID. Dataset names may
+// contain colons, so the dataset is cut by the job's own dataset field rather
+// than by splitting on colons.
+func jobRest(job *controlrpc.JobStatus) (string, bool) {
+	return strings.CutPrefix(job.GetJob(), jobKind(job)+":"+job.GetDataset()+":")
+}
+
+// targetName shows a canonical target the way configuration names it: a
+// local destination root bare, anything else as given.
+func targetName(canonical string) string {
+	if root, ok := strings.CutPrefix(canonical, "local:"); ok {
+		return root
+	}
+	return canonical
+}
+
+// destination names what a transfer job sends to, and whether it is one.
+func destination(job *controlrpc.JobStatus) (string, bool) {
+	rest, ok := jobRest(job)
+	if !ok {
+		return "", false
+	}
+	switch jobKind(job) {
+	case "local":
+		return rest, true
+	case "remote":
+		return "remote " + rest, true
+	}
+	return "", false
+}
+
+// jobLabel names a job in words: the dataset it acts on and what it does.
+func jobLabel(job *controlrpc.JobStatus) string {
+	dataset := job.GetDataset()
+	if target, ok := destination(job); ok {
+		return dataset + " -> " + target
+	}
+	switch kind := jobKind(job); kind {
+	case "snapshot", "prune", "retire":
+		if dataset != "" {
+			return dataset + " " + kind
+		}
+	case "destination-prune":
+		if dataset != "" {
+			return dataset + " prune on " + targetName(job.GetTarget())
+		}
+	case "inactive":
+		switch rest, _ := jobRest(job); rest {
+		case "true":
+			return dataset + " activate"
+		case "false":
+			return dataset + " deactivate"
+		}
+	case "config":
+		if job.GetJob() == "config:reload" {
+			return "configuration reload"
+		}
+	}
+	return job.GetJob()
+}
+
+// ago says how long before now at was, coarsely: "now", "47s ago", "12m
+// ago", "3h ago", "2d ago".
+func ago(at, now time.Time) string {
+	if at.IsZero() {
+		return ""
+	}
+	elapsed := now.Sub(at)
+	if elapsed < time.Second {
+		return "now"
+	}
+	return coarse(elapsed) + " ago"
+}
+
+// until says how long after now at is, coarsely: "in 13m", or "due" once it
+// has passed.
+func until(at, now time.Time) string {
+	if at.IsZero() {
+		return ""
+	}
+	remaining := at.Sub(now)
+	if remaining < time.Second {
+		return "due"
+	}
+	return "in " + coarse(remaining)
+}
+
+// coarse rounds a duration to its largest whole unit.
+func coarse(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	default:
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	}
+}
+
+func unixTime(nanos int64) time.Time {
+	if nanos == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
+}
+
+func byteSize(bytes uint64) string {
+	const unit = uint64(1024)
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	value := float64(bytes)
+	for _, suffix := range []string{"KiB", "MiB", "GiB", "TiB"} {
+		value /= float64(unit)
+		if value < float64(unit) {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%.1f PiB", value/float64(unit))
+}
+
+// percent is how much of a known total a transfer has sent, whole and capped
+// at 100.
+func percent(job *controlrpc.JobStatus) (int, bool) {
+	if !job.GetTotalKnown() || job.GetTotalBytes() == 0 {
+		return 0, false
+	}
+	return int(min(job.GetBytes(), job.GetTotalBytes()) * 100 / job.GetTotalBytes()), true
+}
+
+// progress describes a sending transfer: how far, how fast, how long left,
+// as parts that are never split across lines.
+func progress(job *controlrpc.JobStatus) []string {
+	var parts []string
+	if share, known := percent(job); known {
+		parts = append(parts, fmt.Sprintf("%d%%", share), byteSize(job.GetBytes())+" of "+byteSize(job.GetTotalBytes()))
+	} else if job.GetBytes() != 0 {
+		parts = append(parts, byteSize(job.GetBytes()))
+	}
+	if rate := job.GetBytesPerSecond(); rate > 0 {
+		parts = append(parts, byteSize(uint64(rate))+"/s")
+	}
+	if eta := job.GetEtaNanoseconds(); eta > 0 {
+		parts = append(parts, "ETA "+time.Duration(eta).Round(time.Second).String())
+	}
+	return parts
+}
+
+// pack joins parts with sep into lines at most width wide, never splitting a
+// part; a part wider than width stands on a line of its own. A line that
+// ends early keeps sep's comma, if it has one.
+func pack(parts []string, sep string, width int) string {
+	var lines []string
+	line := ""
+	for _, part := range parts {
+		switch {
+		case line == "":
+			line = part
+		case len(line)+len(sep)+len(part) <= width:
+			line += sep + part
+		default:
+			lines = append(lines, line+strings.TrimRight(sep, " "))
+			line = part
+		}
+	}
+	return strings.Join(append(lines, line), "\n")
+}
+
+func progressBar(share, width int) string {
+	filled := share * width / 100
+	return "[" + strings.Repeat("=", filled) + strings.Repeat(" ", width-filled) + "]"
+}
+
+// problemDetail says what went wrong with a job, how long ago, and when it
+// is tried again.
+func problemDetail(job *controlrpc.JobStatus, now time.Time) string {
+	parts := []string{job.GetState()}
+	if since := ago(unixTime(job.GetChangedUnixNano()), now); since != "" {
+		parts = append(parts, since)
+	}
+	if attempts := job.GetAttempts(); attempts > 1 {
+		parts = append(parts, fmt.Sprintf("%d failed attempts", attempts))
+	}
+	if next := until(unixTime(job.GetRetryUnixNano()), now); next != "" {
+		if next == "due" {
+			parts = append(parts, "retry due")
+		} else {
+			parts = append(parts, "retry "+next)
+		}
+	}
+	detail := strings.Join(parts, ", ")
+	if reason := job.GetReason(); reason != "" {
+		detail += ": " + reason
+	}
+	return detail
+}
+
+// stateText is a job's state in a dataset row: "ok" for success, "queued"
+// for work waiting in a queue, "retrying" for a transfer waiting to try again,
+// and a sending transfer's share sent when it knows its total.
+func stateText(job *controlrpc.JobStatus) string {
+	switch classify(job) {
+	case classQueued:
+		return "queued"
+	case classRunning:
+		if share, known := percent(job); known && job.GetState() == "sending" {
+			return fmt.Sprintf("sending %d%%", share)
+		}
+	case classProblem:
+		if job.GetState() == "waiting-retry" {
+			return "retrying"
+		}
+	case classDone:
+		if job.GetState() == "succeeded" {
+			return "ok"
+		}
+	}
+	return job.GetState()
+}
+
+// Terminal writes the status display: a summary line, then what needs
+// attention, what is running, every listed dataset with its schedule and
+// destinations, and the queues. Long text wraps rather than being cut, and
+// times are shown relative to the snapshot, in opts.Zone. Structured output
+// stays in UTC.
+func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, opts Options) error {
+	opts = opts.normalized()
+	view, hidden := normalized(snapshot, opts.Statuses)
+	now := view.Observed
+	if now.IsZero() {
+		now = time.Now()
+	}
+	jobs := slices.DeleteFunc(slices.Clone(view.Jobs), func(job *controlrpc.JobStatus) bool { return job.GetState() == "cancelled" })
+
+	var out strings.Builder
+	problems, severities := problemRows(view, snapshot.GetDatasets(), jobs, now)
+	var running, queued []*controlrpc.JobStatus
+	for _, job := range jobs {
+		switch classify(job) {
+		case classRunning:
+			running = append(running, job)
+		case classQueued:
+			queued = append(queued, job)
+		case classDone, classProblem:
+			// Finished work shows in the dataset rows, problems above.
+		}
+	}
+	writeSummary(&out, snapshot.GetDatasets(), len(running), len(queued), len(problems), now, opts)
+	if len(problems) != 0 {
+		heading(&out, "PROBLEMS", opts.Color)
+		writeTable(&out, nil, problems, opts.Width, func(row int) string {
+			if opts.Color {
+				return severities[row]
+			}
+			return ""
+		})
+	}
+	if len(running)+len(queued) != 0 {
+		heading(&out, "IN PROGRESS", opts.Color)
+		writeTable(&out, nil, progressRows(running, queued, opts.Width), opts.Width, nil)
+	}
+	writeDatasets(&out, view.Datasets, jobs, hidden, now, opts)
+	writeQueues(&out, view.Queues, opts.Width)
+	_, err := io.WriteString(writer, out.String())
+	return err
+}
+
+func writeSummary(out *strings.Builder, all []*controlrpc.DatasetStatus, running, queued, problems int, now time.Time, opts Options) {
+	active := 0
+	for _, dataset := range all {
+		if dataset.GetStatus() == discovery.StatusActive {
+			active++
+		}
+	}
+	parts := []string{"boomerangz", now.In(opts.Zone).Format("15:04:05 MST"), plural(active, "active dataset", "active datasets")}
+	if running != 0 {
+		parts = append(parts, fmt.Sprintf("%d running", running))
+	}
+	if queued != 0 {
+		parts = append(parts, fmt.Sprintf("%d queued", queued))
+	}
+	if problems != 0 {
+		parts = append(parts, plural(problems, "problem", "problems"))
+	}
+	// pack keeps each part whole, so "3 active datasets" never splits.
+	out.WriteString(pack(parts, "  ", opts.Width) + "\n")
+}
+
+// writeText writes a line of prose wrapped to width, continuation lines
+// indented.
+func writeText(out *strings.Builder, text string, width int) {
+	lines := wrap(text, width)
+	out.WriteString(lines[0] + "\n")
+	if len(lines) > 1 {
+		for _, line := range wrap(strings.Join(lines[1:], " "), width-continuation) {
+			out.WriteString(strings.Repeat(" ", continuation) + line + "\n")
+		}
+	}
+}
+
+func plural(count int, one, many string) string {
+	if count == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", count, many)
+}
+
+// problemRows lists everything that needs the operator: destinations whose
+// permission check found something missing or could not run, datasets with
+// invalid policy or blocked targets, and jobs that failed, are blocked, or
+// are waiting to retry, most severe first. A problem is listed whatever the
+// dataset filter, since hiding one would hide the reason something is not
+// happening. severities holds each row's color: yellow for a retry that may
+// yet succeed on its own, red for the rest.
+func problemRows(view output, datasets []*controlrpc.DatasetStatus, jobs []*controlrpc.JobStatus, now time.Time) (rows [][]string, severities []string) {
+	add := func(severity string, cells ...string) {
+		rows = append(rows, cells)
+		severities = append(severities, severity)
+	}
+	for _, destination := range view.Destinations {
+		name := destination.GetDestination()
+		if destination.GetRemote() {
+			name = "remote " + name
+		}
+		switch {
+		case len(destination.GetMissing()) != 0:
+			add(styleRed, name, fmt.Sprintf("%s lacks delegated ZFS permissions on %s: %s", destination.GetAccount(), destination.GetDataset(), strings.Join(destination.GetMissing(), ",")))
+		case destination.GetError() != "":
+			add(styleRed, name, "permissions not checked: "+destination.GetError())
+		}
+	}
+	sorted := slices.SortedFunc(slices.Values(datasets), func(a, b *controlrpc.DatasetStatus) int { return strings.Compare(a.GetName(), b.GetName()) })
+	for _, dataset := range sorted {
+		if dataset.GetStatus() == discovery.StatusInvalid {
+			add(styleRed, dataset.GetName(), "invalid policy; inspect with: boomerangz dataset inspect "+dataset.GetName())
+		}
+		for _, blocked := range dataset.GetBlocked() {
+			add(styleRed, dataset.GetName()+" -> "+blockedName(blocked), "blocked: "+blocked.GetReason())
+		}
+	}
+	var failing []*controlrpc.JobStatus
+	for _, job := range jobs {
+		if classify(job) == classProblem {
+			failing = append(failing, job)
+		}
+	}
+	slices.SortStableFunc(failing, func(a, b *controlrpc.JobStatus) int {
+		if rank := problemRank(a.GetState()) - problemRank(b.GetState()); rank != 0 {
+			return rank
+		}
+		return strings.Compare(jobLabel(a), jobLabel(b))
+	})
+	for _, job := range failing {
+		severity := styleRed
+		if job.GetState() == "waiting-retry" {
+			severity = styleYellow
+		}
+		add(severity, jobLabel(job), problemDetail(job, now))
+	}
+	return rows, severities
+}
+
+// blockedName names a blocked target: a local destination root as
+// configured, a remote as "remote <name>".
+func blockedName(blocked *controlrpc.BlockedTarget) string {
+	if blocked.GetRemote() {
+		return "remote " + blocked.GetTarget()
+	}
+	return blocked.GetTarget()
+}
+
+// progressRows lists running jobs, then queued ones in queue order, each with
+// its state and what there is to say about it. A sending transfer shows its
+// figures, and under them a progress bar when it knows its total.
+func progressRows(running, queued []*controlrpc.JobStatus, width int) [][]string {
+	labelWidth := 0
+	for _, job := range append(slices.Clone(running), queued...) {
+		labelWidth = max(labelWidth, len(jobLabel(job)))
+	}
+	// The detail sits beside the label when it has minWrap or more, and
+	// otherwise on its own lines under it; see writeTable.
+	room := width - labelWidth - columnGap
+	if room < minWrap {
+		room = width - continuation
+	}
+	var rows [][]string
+	for _, job := range running {
+		detail := job.GetState()
+		switch {
+		case job.GetState() == "sending":
+			detail = pack(append([]string{detail}, progress(job)...), ", ", room)
+			if share, known := percent(job); known {
+				detail += "\n" + progressBar(share, min(room-2, maxBar))
+			}
+		case job.GetReason() != "":
+			detail += ": " + job.GetReason()
+		}
+		rows = append(rows, []string{jobLabel(job), detail})
+	}
+	slices.SortStableFunc(queued, func(a, b *controlrpc.JobStatus) int { return int(a.GetQueuePosition()) - int(b.GetQueuePosition()) })
+	for _, job := range queued {
+		detail := "queued"
+		if position := job.GetQueuePosition(); position > 0 {
+			detail += fmt.Sprintf(", position %d of %d", position, job.GetPending())
+		}
+		rows = append(rows, []string{jobLabel(job), detail})
+	}
+	return rows
+}
+
+const (
+	columnGap = 2
+	maxBar    = 40
+)
+
+// writeDatasets lists the datasets the filter keeps, as `dataset list` does,
+// in one grid: each dataset's row carries its next snapshot and the state of
+// its latest snapshot job, and under it a row per destination carries the
+// state of its latest transfer, so every state lines up in one column.
+func writeDatasets(out *strings.Builder, datasets []*controlrpc.DatasetStatus, jobs []*controlrpc.JobStatus, hidden int, now time.Time, opts Options) {
+	out.WriteString("\n")
+	if len(datasets) == 0 {
+		if hidden > 0 {
+			writeText(out, fmt.Sprintf("No datasets found other than %d inactive; show them with: boomerangz status --status all", hidden), opts.Width)
+		} else {
+			writeText(out, "No datasets found.", opts.Width)
+		}
+		return
+	}
+	snapshots := map[string]*controlrpc.JobStatus{}
+	transfers := map[string][]*controlrpc.JobStatus{}
+	for _, job := range jobs {
+		switch jobKind(job) {
+		case "snapshot":
+			snapshots[job.GetDataset()] = job
+		case "local", "remote":
+			if _, ok := destination(job); ok {
+				transfers[job.GetDataset()] = append(transfers[job.GetDataset()], job)
+			}
+		}
+	}
+	rows := make([][]string, 0, len(datasets))
+	for _, dataset := range datasets {
+		name := dataset.GetName()
+		if dataset.GetRecursive() {
+			name += " (recursive)"
+		}
+		state, since := "-", "-"
+		if job, found := snapshots[dataset.GetName()]; found {
+			state, since = stateText(job), dash(ago(unixTime(job.GetChangedUnixNano()), now))
+		}
+		rows = append(rows, []string{dataset.GetStatus(), name, dash(until(unixTime(dataset.GetNextSnapshotUnixNano()), now)), state, since})
+		var targets [][]string
+		for _, job := range transfers[dataset.GetName()] {
+			target, _ := destination(job)
+			targets = append(targets, []string{"", "  -> " + target, "", stateText(job), dash(ago(unixTime(job.GetChangedUnixNano()), now))})
+		}
+		for _, blocked := range dataset.GetBlocked() {
+			targets = append(targets, []string{"", "  -> " + blockedName(blocked), "", "blocked", "-"})
+		}
+		slices.SortFunc(targets, func(a, b []string) int { return strings.Compare(a[1], b[1]) })
+		rows = append(rows, targets...)
+	}
+	writeTable(out, []string{"STATUS", "DATASET", "NEXT SNAPSHOT", "STATE", "SINCE"}, rows, opts.Width, nil)
+	switch {
+	case hidden == 1:
+		out.WriteString("\n")
+		writeText(out, "1 inactive dataset hidden; show it with: boomerangz status --status all", opts.Width)
+	case hidden > 1:
+		out.WriteString("\n")
+		writeText(out, fmt.Sprintf("%d inactive datasets hidden; show them with: boomerangz status --status all", hidden), opts.Width)
+	}
+}
+
+func dash(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+// writeQueues summarizes every queue on one line, marking one that is nearly
+// full: queues are usually close to empty, so a bar per queue says little.
+func writeQueues(out *strings.Builder, queues []*controlrpc.QueueStatus, width int) {
+	if len(queues) == 0 {
+		return
+	}
+	parts := make([]string, 0, len(queues))
+	for _, queue := range queues {
+		part := fmt.Sprintf("%s %d/%d", queue.GetName(), queue.GetPending(), queue.GetCapacity())
+		if capacity := queue.GetCapacity(); capacity != 0 && queue.GetPending()*4 >= capacity*3 {
+			part += " (nearly full)"
+		}
+		parts = append(parts, part)
+	}
+	out.WriteString("\n")
+	writeTable(out, nil, [][]string{{"queues", strings.Join(parts, ", ")}}, width, nil)
+}
+
+// writeTable lays rows out in columns, each line of a row painted with what
+// style returns for it, when style is set. Every cell but a row's last is
+// padded to the widest such cell of its column; the row's last cell takes the
+// rest of the line and wraps, continuation lines aligned under it, so a short
+// row's last cell spans the columns it leaves empty. A cell may hold several
+// lines.
+//
+// No line is ever wider than width, since a terminal would wrap it again and
+// throw a redrawn frame out of place. When a row leaves its last cell less
+// than minWrap, that cell moves onto its own lines under the row, indented.
+// When the padded leading columns alone are wider than width, the table
+// stacks: each row's cells run together on one line, wrapped. Nothing is cut:
+// a word wider than a line is broken across lines.
+func writeTable(out *strings.Builder, header []string, rows [][]string, width int, style func(row int) string) {
+	offset := 0
+	if header != nil {
+		rows = append([][]string{header}, rows...)
+		offset = 1
+	}
+	var widths []int
+	for _, row := range rows {
+		for index, cell := range row[:len(row)-1] {
+			if index == len(widths) {
+				widths = append(widths, 0)
+			}
+			for line := range strings.Lines(cell) {
+				widths[index] = max(widths[index], len(strings.TrimSuffix(line, "\n")))
+			}
+		}
+	}
+	leading := 0
+	for _, column := range widths {
+		leading += column + columnGap
+	}
+	stacked := leading-columnGap > width
+	for number, row := range rows {
+		painted := ""
+		if style != nil && number >= offset {
+			painted = style(number - offset)
+		}
+		var lines []string
+		switch {
+		case stacked && number < offset:
+			// A stacked row labels its own cells from the header.
+		case stacked:
+			lines = stackRow(row, header, width)
+		default:
+			lines = alignRow(row, widths, width)
+		}
+		for _, line := range lines {
+			out.WriteString(paint(strings.TrimRight(line, " "), painted, true) + "\n")
+		}
+	}
+}
+
+// continuation is how far a wrapped cell's own lines are indented when they
+// cannot sit beside the row.
+const continuation = 4
+
+// alignRow lays one row out in the table's columns.
+func alignRow(row []string, widths []int, width int) []string {
+	indent := 0
+	for _, column := range widths[:len(row)-1] {
+		indent += column + columnGap
+	}
+	last := row[len(row)-1]
+	beside := width-indent >= minWrap
+	cells := make([][]string, len(row))
+	height := 0
+	for index, cell := range row {
+		switch {
+		case index < len(row)-1:
+			cells[index] = strings.Split(cell, "\n")
+		case beside:
+			cells[index] = wrap(cell, width-indent)
+		}
+		height = max(height, len(cells[index]))
+	}
+	var lines []string
+	for line := range height {
+		var text strings.Builder
+		for index, cell := range cells {
+			value := ""
+			if line < len(cell) {
+				value = cell[line]
+			}
+			if index < len(cells)-1 {
+				text.WriteString(value + strings.Repeat(" ", widths[index]-len(value)+columnGap))
+			} else {
+				text.WriteString(value)
+			}
+		}
+		lines = append(lines, text.String())
+	}
+	if !beside && last != "" {
+		for _, line := range wrap(last, width-continuation) {
+			lines = append(lines, strings.Repeat(" ", continuation)+line)
+		}
+	}
+	return lines
+}
+
+// stackRow lays out one row of a table too wide for the terminal: the cells
+// that name what the row is about (the first, or the first two of a wider
+// row) on one line, and the rest under them, indented and run together, each labelled from header when there
+// is one and a cell that says nothing ("-") left out.
+func stackRow(row, header []string, width int) []string {
+	first, start := row[0], 1
+	if len(row) > 2 {
+		start = 2
+		switch {
+		case strings.TrimSpace(first) == "":
+			first = row[1]
+		case strings.TrimSpace(row[1]) != "":
+			first += "  " + row[1]
+		}
+	}
+	indent := len(first) - len(strings.TrimLeft(first, " ")) + continuation
+	var rest []string
+	for index := start; index < len(row); index++ {
+		value := strings.Join(strings.Fields(row[index]), " ")
+		if value == "" || (header != nil && value == "-") {
+			continue
+		}
+		if header != nil && index < len(header) {
+			value = strings.ToLower(header[index]) + " " + value
+		}
+		rest = append(rest, value)
+	}
+	lines := wrap(first, width)
+	if len(rest) != 0 {
+		for _, line := range wrap(strings.Join(rest, ", "), width-indent) {
+			lines = append(lines, strings.Repeat(" ", indent)+line)
+		}
+	}
+	return lines
+}
+
+// minWrap is the narrowest the last column of a table wraps to, however
+// little room the line leaves it.
+const minWrap = 20
+
+// wrap breaks text into lines at most width wide, at spaces, keeping any
+// line breaks it already has. A line that already fits is kept as it is,
+// spacing and all; a word wider than width is broken across lines.
+func wrap(text string, width int) []string {
+	var lines []string
+	for paragraph := range strings.SplitSeq(text, "\n") {
+		if len(paragraph) <= width {
+			lines = append(lines, paragraph)
+			continue
+		}
+		line := ""
+		for _, word := range strings.Fields(paragraph) {
+			for len(word) > width {
+				if line != "" {
+					lines = append(lines, line)
+					line = ""
+				}
+				// Break on a character boundary, never inside one.
+				at := width
+				for at > 1 && !utf8.RuneStart(word[at]) {
+					at--
+				}
+				lines = append(lines, word[:at])
+				word = word[at:]
+			}
+			switch {
+			case line == "":
+				line = word
+			case len(line)+1+len(word) <= width:
+				line += " " + word
+			default:
+				lines = append(lines, line)
+				line = word
+			}
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // Tail holds the most recent transitions a watch has received, oldest first.
@@ -94,51 +875,52 @@ func (t *Tail) Add(transitions []*controlrpc.JobStatus) {
 	}
 }
 
-// Terminal writes the held transitions under a heading, oldest first, each
-// line cut to width, with times in the local zone. It writes nothing when
-// none are held.
-func (t *Tail) Terminal(writer io.Writer, width int) error {
-	return t.terminal(writer, width, time.Local)
-}
-
-func (t *Tail) terminal(writer io.Writer, width int, zone *time.Location) error {
+// Terminal writes the held transitions under a heading, oldest first, with
+// times of day in opts.Zone, dated when not on now's day. Details wrap rather
+// than being cut. It writes nothing when none are held.
+func (t *Tail) Terminal(writer io.Writer, now time.Time, opts Options) error {
 	if len(t.events) == 0 {
 		return nil
 	}
-	if width <= 0 {
-		width = 80
-	}
-	if _, err := fmt.Fprintln(writer, "\nRECENT TRANSITIONS"); err != nil {
-		return err
-	}
-	var rows strings.Builder
-	table := newTable(&rows)
+	opts = opts.normalized()
+	today := now.In(opts.Zone).Format(time.DateOnly)
+	rows := make([][]string, 0, len(t.events))
 	for _, event := range t.events {
 		at := "-"
-		if event.GetChangedUnixNano() != 0 {
-			at = time.Unix(0, event.GetChangedUnixNano()).In(zone).Format(time.RFC3339)
+		if changed := unixTime(event.GetChangedUnixNano()); !changed.IsZero() {
+			local := changed.In(opts.Zone)
+			at = local.Format(time.TimeOnly)
+			if local.Format(time.DateOnly) != today {
+				at = local.Format("Jan 02 15:04:05")
+			}
 		}
 		detail := identitySummary(event)
 		if reason := event.GetReason(); reason != "" {
 			detail = strings.TrimSpace(detail + " " + reason)
 		}
-		if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", at, displayJobName(event.GetJob()), event.GetState(), detail); err != nil {
-			return err
-		}
+		rows = append(rows, []string{at, jobLabel(event), event.GetState(), detail})
 	}
-	if err := table.Flush(); err != nil {
-		return err
-	}
-	return writeCut(writer, rows.String(), width)
+	var out strings.Builder
+	heading(&out, "RECENT TRANSITIONS", opts.Color)
+	writeTable(&out, nil, rows, opts.Width, nil)
+	_, err := io.WriteString(writer, out.String())
+	return err
 }
 
 // identitySummary names what a transition acted on, as the key=value pairs
-// it sets, in a fixed order.
+// it sets, in a fixed order. A snapshot of the job's own dataset is shown
+// from its "@", since the dataset is already in the label.
 func identitySummary(event *controlrpc.JobStatus) string {
+	short := func(name string) string {
+		if suffix, ok := strings.CutPrefix(name, event.GetDataset()+"@"); ok && event.GetDataset() != "" {
+			return "@" + suffix
+		}
+		return name
+	}
 	var parts []string
 	for _, field := range []struct{ key, value string }{
-		{"snapshot", event.GetSnapshot()},
-		{"base", event.GetBase()},
+		{"snapshot", short(event.GetSnapshot())},
+		{"base", short(event.GetBase())},
 		{"mode", event.GetMode()},
 		{"destination", event.GetDestination()},
 		{"marker", event.GetMarker()},
@@ -156,221 +938,21 @@ func identitySummary(event *controlrpc.JobStatus) string {
 	return strings.Join(parts, " ")
 }
 
-// writeCut writes each line of rows, trailing space removed and cut to width.
-func writeCut(writer io.Writer, rows string, width int) error {
-	for line := range strings.Lines(rows) {
-		line = strings.TrimRight(line, " \n")
-		if len(line) > width {
-			line = line[:width]
-		}
-		if _, err := fmt.Fprintln(writer, line); err != nil {
-			return err
-		}
+// Fit keeps a frame within height terminal lines, so redrawing it never
+// scrolls the screen: a taller frame keeps its top lines and ends with one
+// saying how many more there are. A height under two leaves the frame as it
+// is, since there is no room to say anything.
+func Fit(frame []byte, height int) []byte {
+	lines := bytes.SplitAfter(frame, []byte("\n"))
+	if len(lines) > 0 && len(lines[len(lines)-1]) == 0 {
+		lines = lines[:len(lines)-1]
 	}
-	return nil
-}
-
-func bar(pending, capacity uint32, width int) string {
-	if width < 4 {
-		return ""
+	if height < 2 || len(lines) <= height {
+		return frame
 	}
-	filled := 0
-	if capacity != 0 {
-		filled = int(uint64(pending) * uint64(width) / uint64(capacity))
-	}
-	if filled > width {
-		filled = width
-	}
-	return "[" + strings.Repeat("=", filled) + strings.Repeat(" ", width-filled) + "]"
-}
-
-func progressBar(completed, total uint64, width int) string {
-	if width < 4 || total == 0 {
-		return ""
-	}
-	filled := int(float64(min(completed, total)) / float64(total) * float64(width))
-	return "[" + strings.Repeat("=", filled) + strings.Repeat(" ", width-filled) + "]"
-}
-
-func byteSize(bytes uint64) string {
-	const unit = uint64(1024)
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
-	}
-	value := float64(bytes)
-	for _, suffix := range []string{"KiB", "MiB", "GiB", "TiB"} {
-		value /= float64(unit)
-		if value < float64(unit) {
-			return fmt.Sprintf("%.1f %s", value, suffix)
-		}
-	}
-	return fmt.Sprintf("%.1f PiB", value/float64(unit))
-}
-
-// writePermissionWarnings lists each destination whose permission check found
-// something missing or could not run, in full: the operator needs every
-// permission name to act on it, so the lines are never cut to width.
-func writePermissionWarnings(writer io.Writer, destinations []*controlrpc.DestinationPermissions) error {
-	header := false
-	for _, destination := range destinations {
-		if len(destination.GetMissing()) == 0 && destination.GetError() == "" {
-			continue
-		}
-		if !header {
-			if _, err := fmt.Fprintln(writer, "\nWARNINGS"); err != nil {
-				return err
-			}
-			header = true
-		}
-		kind := "local"
-		if destination.GetRemote() {
-			kind = "remote"
-		}
-		var err error
-		if len(destination.GetMissing()) != 0 {
-			_, err = fmt.Fprintf(writer, "%s destination %s: %s lacks delegated ZFS permissions on %s: %s\n", kind, destination.GetDestination(), destination.GetAccount(), destination.GetDataset(), strings.Join(destination.GetMissing(), ","))
-		} else {
-			_, err = fmt.Fprintf(writer, "%s destination %s: permissions not checked: %s\n", kind, destination.GetDestination(), destination.GetError())
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func newTable(writer io.Writer) *tabwriter.Writer {
-	return tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)
-}
-
-func displayJobName(name string) string {
-	remainder, ok := strings.CutPrefix(name, "inactive:")
-	if !ok {
-		return name
-	}
-	if dataset, found := strings.CutSuffix(remainder, ":true"); found {
-		return "activate:" + dataset
-	}
-	if dataset, found := strings.CutSuffix(remainder, ":false"); found {
-		return "deactivate:" + dataset
-	}
-	return name
-}
-
-// Terminal writes a compact status display that degrades at narrow widths,
-// with times in the local zone. Structured output stays in UTC.
-func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int) error {
-	return terminal(writer, snapshot, width, time.Local)
-}
-
-func terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int, zone *time.Location) error {
-	view := normalized(snapshot)
-	if width <= 0 {
-		width = 80
-	}
-	if _, err := fmt.Fprintf(writer, "boomerangz  dataset generation %d  config generation %d  %s\n", view.Generation, view.ConfigGeneration, view.Observed.In(zone).Format(time.RFC3339)); err != nil {
-		return err
-	}
-	if err := writePermissionWarnings(writer, view.Destinations); err != nil {
-		return err
-	}
-	if len(view.Datasets) == 0 {
-		if _, err := fmt.Fprintln(writer, "No managed datasets."); err != nil {
-			return err
-		}
-	} else {
-		if _, err := fmt.Fprintln(writer); err != nil {
-			return err
-		}
-		table := newTable(writer)
-		if _, err := fmt.Fprintln(table, "DATASET\tSTATE\tNEXT SNAPSHOT"); err != nil {
-			return err
-		}
-		for _, dataset := range view.Datasets {
-			state, next := "inactive", "-"
-			if dataset.GetActive() {
-				state = "active"
-			}
-			if dataset.GetNextSnapshotUnixNano() != 0 {
-				next = time.Unix(0, dataset.GetNextSnapshotUnixNano()).In(zone).Format(time.RFC3339)
-			}
-			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\n", dataset.GetName(), state, next); err != nil {
-				return err
-			}
-		}
-		if err := table.Flush(); err != nil {
-			return err
-		}
-	}
-	if len(view.Queues) != 0 {
-		if _, err := fmt.Fprintln(writer, "\nQUEUES"); err != nil {
-			return err
-		}
-		barWidth := width - 34
-		table := newTable(writer)
-		for _, queue := range view.Queues {
-			if barWidth >= 8 {
-				if _, err := fmt.Fprintf(table, "%s\t%d/%d\t%s\n", queue.GetName(), queue.GetPending(), queue.GetCapacity(), bar(queue.GetPending(), queue.GetCapacity(), barWidth)); err != nil {
-					return err
-				}
-			} else if _, err := fmt.Fprintf(table, "%s\t%d/%d\n", queue.GetName(), queue.GetPending(), queue.GetCapacity()); err != nil {
-				return err
-			}
-		}
-		if err := table.Flush(); err != nil {
-			return err
-		}
-	}
-	jobs := slices.DeleteFunc(slices.Clone(view.Jobs), func(job *controlrpc.JobStatus) bool {
-		return job.GetState() == "cancelled"
-	})
-	if len(jobs) != 0 {
-		if _, err := fmt.Fprintln(writer, "\nLATEST WORK"); err != nil {
-			return err
-		}
-		jobWidth, stateWidth := 0, 0
-		for _, job := range jobs {
-			jobWidth = max(jobWidth, len(displayJobName(job.GetJob())))
-			stateWidth = max(stateWidth, len(job.GetState()))
-		}
-		var rows strings.Builder
-		table := newTable(&rows)
-		for _, job := range jobs {
-			var detail strings.Builder
-			if job.GetState() == "sending" && job.GetTotalKnown() && job.GetTotalBytes() != 0 {
-				progressWidth := width - jobWidth - stateWidth - 48
-				if progressWidth >= 8 {
-					detail.WriteString(progressBar(job.GetBytes(), job.GetTotalBytes(), progressWidth))
-					detail.WriteByte(' ')
-				}
-				_, _ = fmt.Fprintf(&detail, "%s/%s", byteSize(job.GetBytes()), byteSize(job.GetTotalBytes()))
-			} else if job.GetState() == "sending" && job.GetBytes() != 0 {
-				detail.WriteString(byteSize(job.GetBytes()))
-			}
-			if job.GetState() == "sending" && job.GetBytesPerSecond() > 0 {
-				_, _ = fmt.Fprintf(&detail, " @ %s/s", byteSize(uint64(job.GetBytesPerSecond())))
-			}
-			if job.GetState() == "sending" && job.GetEtaNanoseconds() > 0 {
-				detail.WriteString(" ETA " + time.Duration(job.GetEtaNanoseconds()).Round(time.Second).String())
-			}
-			if job.GetReason() != "" {
-				if detail.Len() != 0 {
-					detail.WriteByte(' ')
-				}
-				detail.WriteString(job.GetReason())
-			}
-			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\n", displayJobName(job.GetJob()), job.GetState(), detail.String()); err != nil {
-				return err
-			}
-		}
-		if err := table.Flush(); err != nil {
-			return err
-		}
-		if err := writeCut(writer, rows.String(), width); err != nil {
-			return err
-		}
-	}
-	return nil
+	kept := height - 1
+	fitted := bytes.Join(lines[:kept], nil)
+	return fmt.Appendf(fitted, "... %d more lines\n", len(lines)-kept)
 }
 
 // Redraw replaces the previous frame on a terminal with frame in a single
@@ -379,9 +961,9 @@ func terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, width int, 
 // on every update. Instead the cursor returns home and each line is erased
 // as it is overwritten, then whatever the previous frame left below this one
 // is erased. Each line is erased before it is written rather than after,
-// because a line cut to exactly the terminal width leaves the cursor on its
-// last column, where erasing to the end of the line would remove that
-// column's character.
+// because a line exactly the terminal width leaves the cursor on its last
+// column, where erasing to the end of the line would remove that column's
+// character.
 func Redraw(writer io.Writer, frame []byte) error {
 	var screen bytes.Buffer
 	screen.Grow(len(frame) + 64)
