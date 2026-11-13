@@ -138,7 +138,10 @@ Roughly bottom-up, in dependency order:
   `control/rpc/` holds the generated stubs for
   `proto/boomerangz/control/v1/control.proto`.
 - **statusui** - renders a `StatusSnapshot` for `boomerangz status`, both as
-  a terminal table (`Terminal`) and as JSON (`JSON`).
+  a terminal view (`Terminal`, with `Tail` for a watch's recent transitions,
+  `Fit` to keep a frame within the terminal's height) and as JSON (`JSON`,
+  `WatchJSON`). Datasets are filtered with `discovery.StatusFilter`, the rule
+  `dataset list` uses; frames are pinned by golden files under `testdata/`.
 - **cli** - see Entrypoints above; also formats human-readable dataset
   output (`dataset_output.go`) and provides a CLI-only "standalone safety"
   path (`lifecycle.go`) for commands run without a live daemon.

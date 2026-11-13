@@ -26,11 +26,12 @@ Commands that read configuration accept:
 | Command | Options and arguments |
 | --- | --- |
 | `boomerangz daemon` | Run management in the foreground. |
-| `boomerangz status` | `--credential NAME_OR_PATH`, `--watch`/`-w`, and `--json`. |
+| `boomerangz status` | `--credential NAME_OR_PATH`, `--watch`/`-w`, `--status STATUS`, and `--json`. `--status` lists only datasets with that status, as `dataset list --status` does: it takes `all`, `active`, `member`, `excluded`, `target`, `inactive` or `invalid`, can be repeated or given a comma-separated list, and by default lists every status but `inactive`. |
 | `boomerangz trigger [DATASET...]` | Snapshot each named actor root's members now. Empty selects every active root; a member is refused with the root to use instead. `--credential NAME_OR_PATH` addresses a paired listener. |
 
-Interactive status uses a readable terminal view; an interactive watch adds the
-most recent job state changes beneath it. Redirected one-shot output is one JSON
+Interactive status uses a readable terminal view: what needs attention, what
+is running, each dataset with its destinations, and the queues. An
+interactive watch adds the most recent job state changes beneath it. Redirected one-shot output is one JSON
 object; redirected watch output is newline-delimited JSON. Add `--json` to emit
 that structured output even when standard output is a terminal. A watch
 sends an update whenever the daemon's status changes, and only then. Each watch
@@ -38,11 +39,12 @@ object also carries `transitions`, every job state change since the previous
 object in the order the daemon recorded it. Each job entry names its run and
 what that run acted on, such as the snapshot a transfer sent, in the job
 identity fields. Status also reports each destination whose delegated ZFS
-permissions lack something Boomerangz may need, under `WARNINGS` in a terminal
+permissions lack something Boomerangz may need, under `PROBLEMS` in a terminal
 and in `destinations` in JSON. A watch that falls too far behind
 the daemon ends with an `Aborted` error and exits with status one rather than
 continuing with changes missing. See
-[View status](/operations/#view-status) for the fields and the job states, and
+[View status](/operations/#view-status) for the terminal view, the fields and
+the job states, and
 [Job identity](/operations/#job-identity) for the identity fields, and
 [Destination permissions](/operations/#destination-permissions) for the
 permission check.

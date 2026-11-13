@@ -16,7 +16,7 @@ _boomerangz_options() {
     'config check'|'config show') reply=(-h --help --config --config-dir) ;;
     'config reload') reply=(-h --help --socket) ;;
     'daemon ') reply=(-h --help --config --config-dir) ;;
-    'status ') reply=(-h --help --config --config-dir --credential -w --watch --json) ;;
+    'status ') reply=(-h --help --config --config-dir --credential -w --watch --status --json) ;;
     'trigger ') reply=(-h --help --config --config-dir --credential) ;;
     'migrate ') reply=(-h --help --config --config-dir --all --apply --json) ;;
     'version ') reply=(-h --help --json) ;;
