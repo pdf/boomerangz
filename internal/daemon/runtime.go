@@ -161,7 +161,7 @@ func NewWithLocalStream(cfg config.Config, source backend, installation string, 
 		remoteNames = append(remoteNames, name)
 	}
 	slices.Sort(remoteNames)
-	scanner, err := discovery.New(source, discovery.Options{Remotes: remoteNames, Destinations: remoteDestinations(clients, nil)})
+	scanner, err := discovery.New(source, discovery.Options{Remotes: remoteNames, Destinations: remoteDestinations(clients, nil), ReplicationRoots: cfg.ReplicationRoots()})
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +308,7 @@ func (r *Runtime) commitConfig(prepared *preparedConfig) daemonstate.ReloadResul
 	}
 	hostLocal := maps.Clone(r.hostLocal)
 	r.mu.Unlock()
+	r.scanner.SetReplicationRoots(effective.ReplicationRoots())
 	_ = r.scanner.Reconfigure(effective.Daemon.ReconcileInterval.Duration, prepared.remotes, remoteDestinations(prepared.clients, hostLocal))
 	// Queued remote work, and each remote's recovery coordinator with its
 	// retry state, is bound to the client it was built with. A reload that

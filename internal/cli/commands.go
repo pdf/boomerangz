@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"slices"
 	"sync"
 	"time"
 
@@ -335,11 +334,7 @@ func scanDatasets(env *commandEnvironment, options configOptions, inspect []stri
 	for name := range loaded.Config.Remotes {
 		remotes = append(remotes, name)
 	}
-	replicationRoots := slices.Clone(loaded.Config.SSHShell.ReplicationRoots)
-	for _, listener := range loaded.Config.Listeners {
-		replicationRoots = append(replicationRoots, listener.ReplicationRoots...)
-	}
-	scanner, err := discovery.New(reader, discovery.Options{Remotes: remotes, Destinations: daemon.RemoteDestinations(loaded.Config.Remotes, loaded.Config.Paths.CredentialsDir), ReplicationRoots: replicationRoots})
+	scanner, err := discovery.New(reader, discovery.Options{Remotes: remotes, Destinations: daemon.RemoteDestinations(loaded.Config.Remotes, loaded.Config.Paths.CredentialsDir), ReplicationRoots: loaded.Config.ReplicationRoots()})
 	if err != nil {
 		return nil, err
 	}
