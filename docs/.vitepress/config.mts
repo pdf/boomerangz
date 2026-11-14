@@ -1,10 +1,12 @@
 import { defineConfig } from 'vitepress'
 
 const docsVersion = process.env.DOCS_VERSION || 'Development'
-const docsRef = process.env.DOCS_REF || 'main'
 const docsBase = process.env.DOCS_BASE || '/'
 const canonicalBase = process.env.DOCS_CANONICAL_BASE || docsBase
 const siteOrigin = 'https://boomerangz.org'
+// Only builds that track current docs (the root site and /development/) link
+// to the editor; an archived version's page may no longer match main.
+const docsEditLink = process.env.DOCS_EDIT_LINK === '1'
 
 export default defineConfig({
   base: docsBase,
@@ -88,10 +90,14 @@ export default defineConfig({
       }
     ],
     search: { provider: 'local' },
-    editLink: {
-      pattern: `https://github.com/pdf/boomerangz/edit/${docsRef}/docs/:path`,
-      text: 'Edit this page on GitHub'
-    },
+    // GitHub's web editor only accepts branches, and a release build's ref is a
+    // tag, so edits are always proposed against main.
+    editLink: docsEditLink
+      ? {
+          pattern: 'https://github.com/pdf/boomerangz/edit/main/docs/:path',
+          text: 'Edit this page on GitHub'
+        }
+      : undefined,
     socialLinks: [
       { icon: 'github', link: 'https://github.com/pdf/boomerangz' }
     ],
