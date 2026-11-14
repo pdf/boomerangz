@@ -35,8 +35,13 @@ readonly latest_version
 
 build_docs() {
 	local ref=$1 version=$2 base=$3 output=$4 canonical_base=${5:-}
-	local worktree safe_ref
+	local worktree safe_ref edit_link=0
 	safe_ref=${ref//[^A-Za-z0-9._-]/-}
+	# Archived versions are frozen, and their pages may no longer match main,
+	# so only the root site and /development/ link to the editor.
+	if [[ $base == / || $base == /development/ ]]; then
+		edit_link=1
+	fi
 	worktree=$runner_temp/boomerangz-docs-source-$safe_ref
 
 	# A retried attempt reuses the same paths, and VitePress does not empty an
@@ -47,7 +52,7 @@ build_docs() {
 		cd "$worktree/docs"
 		npm ci
 		DOCS_VERSION=$version \
-			DOCS_REF=$ref \
+			DOCS_EDIT_LINK=$edit_link \
 			DOCS_BASE=$base \
 			DOCS_CANONICAL_BASE=${canonical_base:-$base} \
 			npm run build -- --outDir "$output"
