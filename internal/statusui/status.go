@@ -32,17 +32,31 @@ type output struct {
 	Receives []*controlrpc.ReceiveStatus `json:"receives"`
 }
 
+// statusFilter is discovery.StatusFilter with the status view's own
+// default: besides inactive datasets, it leaves out members and excluded
+// datasets, which carry no transfers of their own and are counted on their
+// root's row instead. An explicit --status filters as dataset list does.
+func statusFilter(statuses []string) (func(string) bool, bool) {
+	listed, defaulted := discovery.StatusFilter(statuses)
+	if !defaulted {
+		return listed, false
+	}
+	return func(status string) bool {
+		return listed(status) && status != discovery.StatusMember && status != discovery.StatusExcluded
+	}, true
+}
+
 // normalized sorts the snapshot's lists and keeps the datasets statuses asks
-// for, as discovery.StatusFilter decides; hidden counts the datasets the
+// for, as statusFilter decides; hidden counts the inactive datasets the
 // default filter left out.
 func normalized(snapshot *controlrpc.StatusSnapshot, statuses []string) (result output, hidden int) {
 	result = output{Revision: snapshot.GetRevision(), Generation: snapshot.GetGeneration(), ConfigGeneration: snapshot.GetConfigGeneration(), Queues: slices.Clone(snapshot.GetQueues()), Jobs: slices.Clone(snapshot.GetJobs()), Destinations: slices.Clone(snapshot.GetDestinations()), Receives: slices.Clone(snapshot.GetReceives())}
-	keep, defaulted := discovery.StatusFilter(statuses)
+	keep, defaulted := statusFilter(statuses)
 	result.Datasets = []*controlrpc.DatasetStatus{}
 	for _, dataset := range snapshot.GetDatasets() {
 		if keep(dataset.GetStatus()) {
 			result.Datasets = append(result.Datasets, dataset)
-		} else if defaulted {
+		} else if defaulted && dataset.GetStatus() == discovery.StatusInactive {
 			hidden++
 		}
 	}
@@ -696,7 +710,8 @@ func writeDatasets(out *strings.Builder, datasets, all []*controlrpc.DatasetStat
 	for _, dataset := range all {
 		listed[dataset.GetName()] = true
 	}
-	if keep, _ := discovery.StatusFilter(opts.Statuses); keep(discovery.StatusTarget) {
+	keep, _ := statusFilter(opts.Statuses)
+	if keep(discovery.StatusTarget) {
 		datasets = slices.Clone(datasets)
 		for name := range incoming {
 			if !listed[name] {
@@ -725,11 +740,41 @@ func writeDatasets(out *strings.Builder, datasets, all []*controlrpc.DatasetStat
 			}
 		}
 	}
+	shown := map[string]bool{}
+	for _, dataset := range datasets {
+		shown[dataset.GetName()] = true
+	}
+	members, excluded := map[string]int{}, map[string]int{}
+	for _, dataset := range all {
+		switch dataset.GetStatus() {
+		case discovery.StatusMember:
+			members[dataset.GetCoveredBy()]++
+		case discovery.StatusExcluded:
+			excluded[dataset.GetCoveredBy()]++
+		}
+	}
 	rows := make([][]string, 0, len(datasets))
 	for _, dataset := range datasets {
 		name := dataset.GetName()
+		var notes []string
 		if dataset.GetRecursive() {
-			name += " (recursive)"
+			notes = append(notes, "recursive")
+		}
+		// What the filter leaves out of a root's group is counted on the
+		// root's row, so the root still says what it covers.
+		if count := members[name]; count > 0 && !keep(discovery.StatusMember) {
+			notes = append(notes, plural(count, "member", "members"))
+		}
+		if count := excluded[name]; count > 0 && !keep(discovery.StatusExcluded) {
+			notes = append(notes, fmt.Sprintf("%d excluded", count))
+		}
+		if len(notes) > 0 {
+			name += " (" + strings.Join(notes, ", ") + ")"
+		}
+		// A member or excluded dataset shown beneath its root is indented
+		// under it, so the group reads without comparing names.
+		if covered := dataset.GetCoveredBy(); covered != "" && shown[covered] {
+			name = "  " + name
 		}
 		state, since := "-", "-"
 		if job, found := snapshots[dataset.GetName()]; found {

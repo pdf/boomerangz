@@ -28,7 +28,7 @@ These commands are read-only and produce human-readable output by default.
 A root with a destination blocked by a collision stays `active`; `dataset list`
 names the blocked destination beside it.
 
-Each actor root comes first with the members and excluded datasets it covers
+Each actor root comes first with its members and then its excluded datasets
 straight beneath it, roots in name order; then datasets with invalid policy,
 targets, and inactive datasets, each in name order. `status` lists datasets in
 the same order. JSON output stays in name order.

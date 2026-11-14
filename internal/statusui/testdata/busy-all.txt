@@ -24,8 +24,8 @@ active    tank/db                      due            -             -
 active    tank/home (recursive)        in 13m         ok            47m ago
             -> backup/boomerangz                      ok            12m ago
             -> remote:offsite                         retrying      30s ago
-excluded  tank/home/cache              -              -             -
-member    tank/home/pdf                in 13m         -             -
+member      tank/home/pdf              in 13m         -             -
+excluded    tank/home/cache            -              -             -
 active    tank/vm/images               in 58m         snapshotting  2s ago
             -> backup/boomerangz                      sending 34%   1m ago
             -> remote:offsite                         queued        -

@@ -82,9 +82,9 @@ var listedSections = map[string]int{
 }
 
 // CompareListed orders datasets in a listing: each actor root with the
-// members and excluded datasets it covers straight beneath it, roots by
-// name, then datasets with invalid policy, targets and inactive datasets,
-// each by name. Every terminal listing of datasets uses it, so they read in
+// members and then the excluded datasets it covers straight beneath it,
+// roots by name, then datasets with invalid policy, targets and inactive
+// datasets, each by name. Every terminal listing of datasets uses it, so they read in
 // one order.
 func CompareListed(a, b Listed) int {
 	group := func(dataset Listed) (section int, root string) {
@@ -105,12 +105,24 @@ func CompareListed(a, b Listed) int {
 	if rootA != rootB {
 		return strings.Compare(rootA, rootB)
 	}
-	// The root itself leads its group.
-	if leadA, leadB := a.Name == rootA, b.Name == rootB; leadA != leadB {
-		if leadA {
-			return -1
-		}
-		return 1
+	// Within a root's group the root leads, then its members, then what it
+	// excludes.
+	if rankA, rankB := withinRoot(a, rootA), withinRoot(b, rootB); rankA != rankB {
+		return rankA - rankB
 	}
 	return strings.Compare(a.Name, b.Name)
+}
+
+// withinRoot ranks a dataset inside its root's group: the root, its members,
+// then its excluded datasets. Outside the sources it ranks everything alike.
+func withinRoot(dataset Listed, root string) int {
+	switch {
+	case dataset.Name == root:
+		return 0
+	case dataset.Status == StatusMember:
+		return 1
+	case dataset.Status == StatusExcluded:
+		return 2
+	}
+	return 0
 }

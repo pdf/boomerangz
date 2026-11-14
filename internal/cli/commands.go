@@ -172,7 +172,7 @@ type statusCommand struct {
 	configOptions `embed:""`
 	Credential    string   `help:"Imported pairing name or absolute bundle path."`
 	Watch         bool     `short:"w" help:"Continuously watch status."`
-	Statuses      []string `name:"status" enum:"all,active,member,excluded,target,inactive,invalid" help:"List only datasets with this status; repeat as needed. Allowed: ${enum}. Default: every status but inactive."`
+	Statuses      []string `name:"status" enum:"all,active,member,excluded,target,inactive,invalid" help:"List only datasets with this status; repeat as needed. Allowed: ${enum}. Default: every status but member, excluded and inactive."`
 	JSON          bool     `help:"Emit JSON."`
 }
 

@@ -26,7 +26,7 @@ Commands that read configuration accept:
 | Command | Options and arguments |
 | --- | --- |
 | `boomerangz daemon` | Run management in the foreground. |
-| `boomerangz status` | `--credential NAME_OR_PATH`, `--watch`/`-w`, `--status STATUS`, and `--json`. `--status` lists only datasets with that status, as `dataset list --status` does: it takes `all`, `active`, `member`, `excluded`, `target`, `inactive` or `invalid`, can be repeated or given a comma-separated list, and by default lists every status but `inactive`. |
+| `boomerangz status` | `--credential NAME_OR_PATH`, `--watch`/`-w`, `--status STATUS`, and `--json`. `--status` lists only datasets with that status, as `dataset list --status` does: it takes `all`, `active`, `member`, `excluded`, `target`, `inactive` or `invalid`, can be repeated or given a comma-separated list, and by default lists every status but `member`, `excluded` and `inactive`; a root's row counts its hidden members and excluded datasets. |
 | `boomerangz trigger [DATASET...]` | Snapshot each named actor root's members now. Empty selects every active root; a member is refused with the root to use instead. `--credential NAME_OR_PATH` addresses a paired listener. |
 
 Interactive status uses a readable terminal view: what needs attention, what

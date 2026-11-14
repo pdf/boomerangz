@@ -17,20 +17,18 @@ tank/vm/images -> backup/boomerangz   sending, 34%, 41.0 GiB of 120.0 GiB, 410.0
 tank/vm/images snapshot               snapshotting
 tank/vm/images -> remote:offsite      queued, position 1 of 1
 
-STATUS    DATASET                      NEXT SNAPSHOT  STATE         SINCE
-active    tank/db                      due            -             -
-            -> archive/boomerangz                     failed        3h ago
-            -> backup/boomerangz                      blocked       -
-active    tank/home (recursive)        in 13m         ok            47m ago
-            -> backup/boomerangz                      ok            12m ago
-            -> remote:offsite                         retrying      30s ago
-excluded  tank/home/cache              -              -             -
-member    tank/home/pdf                in 13m         -             -
-active    tank/vm/images               in 58m         snapshotting  2s ago
-            -> backup/boomerangz                      sending 34%   1m ago
-            -> remote:offsite                         queued        -
-invalid   tank/broken                  -              -             -
-target    backup/boomerangz/tank/home  -              -             -
+STATUS   DATASET                                      NEXT SNAPSHOT  STATE         SINCE
+active   tank/db                                      due            -             -
+           -> archive/boomerangz                                     failed        3h ago
+           -> backup/boomerangz                                      blocked       -
+active   tank/home (recursive, 1 member, 1 excluded)  in 13m         ok            47m ago
+           -> backup/boomerangz                                      ok            12m ago
+           -> remote:offsite                                         retrying      30s ago
+active   tank/vm/images                               in 58m         snapshotting  2s ago
+           -> backup/boomerangz                                      sending 34%   1m ago
+           -> remote:offsite                                         queued        -
+invalid  tank/broken                                  -              -             -
+target   backup/boomerangz/tank/home                  -              -             -
 
 2 inactive datasets hidden; show them with: boomerangz status --status all
 

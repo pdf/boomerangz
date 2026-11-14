@@ -57,7 +57,7 @@ func TestStatusFilter(t *testing.T) {
 	}
 }
 
-func TestCompareListedGroupsEachRootWithWhatItCovers(t *testing.T) {
+func TestCompareListedGroupsEachRootWithItsMembersThenExclusions(t *testing.T) {
 	t.Parallel()
 	listed := []Listed{
 		{Name: "zroot/home/.cache", Status: StatusExcluded, CoveredBy: "zroot/home"},
@@ -68,6 +68,8 @@ func TestCompareListedGroupsEachRootWithWhatItCovers(t *testing.T) {
 		{Name: "storage/broken", Status: StatusInvalid},
 		{Name: "storage/pdf", Status: StatusActive},
 		{Name: "storage/pdf/personal", Status: StatusMember, CoveredBy: "storage/pdf"},
+		// Members precede excluded datasets whatever their names.
+		{Name: "storage/pdf/zz", Status: StatusMember, CoveredBy: "storage/pdf"},
 		// A member whose root a filter left out still sorts as its group.
 		{Name: "aaa/member", Status: StatusMember, CoveredBy: "zroot/home"},
 	}
@@ -77,7 +79,7 @@ func TestCompareListedGroupsEachRootWithWhatItCovers(t *testing.T) {
 		got = append(got, dataset.Name)
 	}
 	want := []string{
-		"storage/pdf", "storage/pdf/personal", "storage/pdf/tmp",
+		"storage/pdf", "storage/pdf/personal", "storage/pdf/zz", "storage/pdf/tmp",
 		"zroot/home", "aaa/member", "zroot/home/.cache",
 		"storage/broken",
 		"storage/backup/home",

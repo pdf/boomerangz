@@ -44,16 +44,14 @@ active  tank/db
       state failed, since 3h ago
   -> backup/boomerangz
       state blocked
-active  tank/home (recursive)
+active tank/home (recursive, 1 member, 1
+excluded)
     next snapshot in 13m, state ok,
     since 47m ago
   -> backup/boomerangz
       state ok, since 12m ago
   -> remote:offsite
       state retrying, since 30s ago
-excluded  tank/home/cache
-member  tank/home/pdf
-    next snapshot in 13m
 active  tank/vm/images
     next snapshot in 58m, state
     snapshotting, since 2s ago
