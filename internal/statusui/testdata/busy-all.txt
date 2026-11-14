@@ -1,13 +1,13 @@
 boomerangz  15:02:11 CET  3 active datasets  3 running  1 queued  5 problems
 
 PROBLEMS
-remote offsite                 permissions not checked: list destination datasets: dial tcp 10.0.0.9:22: connect:
+remote:offsite                 permissions not checked: list destination datasets: dial tcp 10.0.0.9:22: connect:
                                connection refused
 tank/broken                    invalid policy; inspect with: boomerangz dataset inspect tank/broken
 tank/db -> backup/boomerangz   blocked: its replica would overlap the replica of tank/vm
 tank/db -> archive/boomerangz  failed, 3h ago: cannot receive incremental stream: destination archive/boomerangz/tank/db
                                has been modified since most recent snapshot
-tank/home -> remote offsite    waiting-retry, 30s ago, 3 failed attempts, retry in 4m: ssh: connect to host
+tank/home -> remote:offsite    waiting-retry, 30s ago, 3 failed attempts, retry in 4m: ssh: connect to host
                                offsite.example port 22: Connection refused
 
 IN PROGRESS
@@ -15,7 +15,7 @@ tank/home prune on backup/boomerangz  pruning
 tank/vm/images -> backup/boomerangz   sending, 34%, 41.0 GiB of 120.0 GiB, 410.0 MiB/s, ETA 3m17s
                                       [=============                           ]
 tank/vm/images snapshot               snapshotting
-tank/vm/images -> remote offsite      queued, position 1 of 1
+tank/vm/images -> remote:offsite      queued, position 1 of 1
 
 STATUS    DATASET                      NEXT SNAPSHOT  STATE         SINCE
 target    backup/boomerangz/tank/home  -              -             -
@@ -25,13 +25,13 @@ active    tank/db                      due            -             -
             -> backup/boomerangz                      blocked       -
 active    tank/home (recursive)        in 13m         ok            47m ago
             -> backup/boomerangz                      ok            12m ago
-            -> remote offsite                         retrying      30s ago
+            -> remote:offsite                         retrying      30s ago
 excluded  tank/home/cache              -              -             -
 member    tank/home/pdf                in 13m         -             -
 inactive  tank/scratch                 -              -             -
 inactive  tank/tmp                     -              -             -
 active    tank/vm/images               in 58m         snapshotting  2s ago
             -> backup/boomerangz                      sending 34%   1m ago
-            -> remote offsite                         queued        -
+            -> remote:offsite                         queued        -
 
 queues  local 7/8 (nearly full), management 1/64, remote 0/64

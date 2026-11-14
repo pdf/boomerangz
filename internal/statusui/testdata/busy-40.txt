@@ -3,7 +3,7 @@ boomerangz  15:02:11 CET
 5 problems
 
 PROBLEMS
-remote offsite
+remote:offsite
     permissions not checked: list
     destination datasets: dial tcp
     10.0.0.9:22: connect: connection
@@ -20,7 +20,7 @@ tank/db -> archive/boomerangz
     incremental stream: destination
     archive/boomerangz/tank/db has been
     modified since most recent snapshot
-tank/home -> remote offsite
+tank/home -> remote:offsite
     waiting-retry, 30s ago, 3 failed
     attempts, retry in 4m: ssh: connect
     to host offsite.example port 22:
@@ -35,7 +35,7 @@ tank/vm/images -> backup/boomerangz
     [===========                       ]
 tank/vm/images snapshot
     snapshotting
-tank/vm/images -> remote offsite
+tank/vm/images -> remote:offsite
     queued, position 1 of 1
 
 target  backup/boomerangz/tank/home
@@ -51,7 +51,7 @@ active  tank/home (recursive)
     since 47m ago
   -> backup/boomerangz
       state ok, since 12m ago
-  -> remote offsite
+  -> remote:offsite
       state retrying, since 30s ago
 excluded  tank/home/cache
 member  tank/home/pdf
@@ -61,7 +61,7 @@ active  tank/vm/images
     snapshotting, since 2s ago
   -> backup/boomerangz
       state sending 34%, since 1m ago
-  -> remote offsite
+  -> remote:offsite
       state queued
 
 2 inactive datasets hidden; show them

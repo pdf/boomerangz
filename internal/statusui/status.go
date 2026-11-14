@@ -198,7 +198,7 @@ func destination(job *controlrpc.JobStatus) (string, bool) {
 	case "local":
 		return rest, true
 	case "remote":
-		return "remote " + rest, true
+		return "remote:" + rest, true
 	}
 	return "", false
 }
@@ -496,7 +496,7 @@ func problemRows(view output, datasets []*controlrpc.DatasetStatus, jobs []*cont
 	for _, destination := range view.Destinations {
 		name := destination.GetDestination()
 		if destination.GetRemote() {
-			name = "remote " + name
+			name = "remote:" + name
 		}
 		switch {
 		case len(destination.GetMissing()) != 0:
@@ -537,10 +537,10 @@ func problemRows(view output, datasets []*controlrpc.DatasetStatus, jobs []*cont
 }
 
 // blockedName names a blocked target: a local destination root as
-// configured, a remote as "remote <name>".
+// configured, a remote as "remote:<name>".
 func blockedName(blocked *controlrpc.BlockedTarget) string {
 	if blocked.GetRemote() {
-		return "remote " + blocked.GetTarget()
+		return "remote:" + blocked.GetTarget()
 	}
 	return blocked.GetTarget()
 }

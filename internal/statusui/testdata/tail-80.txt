@@ -7,7 +7,7 @@ Nov 12 19:02:11  tank/home snapshot                   succeeded
     base=@boomerangz_2026-11-13T12:00:00Z mode=incremental-latest
 15:01:11         tank/home prune                      succeeded
     destroyed=1
-15:01:41         tank/home -> remote offsite          waiting-retry
+15:01:41         tank/home -> remote:offsite          waiting-retry
     snapshot=@boomerangz_2026-11-13T13:15:00Z ssh: connect to host
     offsite.example port 22: Connection refused
 15:02:01         configuration reload                 succeeded
