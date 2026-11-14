@@ -286,6 +286,10 @@ func (c *sshShellCommand) Run(env *commandEnvironment) error {
 	if err != nil {
 		return err
 	}
+	// The packaged ssh-shell account is the daemon's own, so it can reach the
+	// control socket; any other account, or a host with no daemon running,
+	// serves receives the daemon's status does not show.
+	service.TrackReceives(control.NewReceiveForwarder(loaded.Config.Paths.SocketPath), control.TransportSSHShell)
 	return remoterpc.ServeStdio(env.Context, service, os.Stdin, env.Stdout)
 }
 

@@ -394,15 +394,19 @@ func (s *Server) buildEndpoint(name string, definition config.ListenerConfig, id
 			_ = closeEndpoint(endpoint)
 			return nil, fmt.Errorf("replication backend is required")
 		}
-		remote, err = remoterpc.NewServerForRoots(s.replication, definition.ReplicationRoots, s.zfsPath)
-		if err != nil {
+		served, serverErr := remoterpc.NewServerForRoots(s.replication, definition.ReplicationRoots, s.zfsPath)
+		if serverErr != nil {
 			_ = closeEndpoint(endpoint)
-			return nil, err
+			return nil, serverErr
 		}
+		if tracker := receiveTracker(s.backend); tracker != nil {
+			served.TrackReceives(tracker, TransportNative)
+		}
+		remote = served
 	}
 	drain, startDrain := context.WithCancel(context.Background())
 	endpoint.startDrain = startDrain
-	server := grpcServer(&service{runtime: s.backend, reloader: s.reloader, reloadAllowed: name == "@default", drain: drain}, remote, definition.Network == "tcp" && strings.Contains(definition.AuthMode, "token"), s.store, tlsConfig)
+	server := grpcServer(&service{runtime: s.backend, reloader: s.reloader, reloadAllowed: name == "@default", reportAllowed: definition.Network == "unix", drain: drain}, remote, definition.Network == "tcp" && strings.Contains(definition.AuthMode, "token"), s.store, tlsConfig)
 	endpoint.server = server
 	return endpoint, nil
 }

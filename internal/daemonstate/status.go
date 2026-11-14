@@ -157,6 +157,8 @@ type ControlSnapshot struct {
 	// Destinations holds the latest permission check of each destination
 	// checked so far, sorted local first and then by name.
 	Destinations []DestinationPermissions
+	// Receives lists the receives into this host, sorted by dataset.
+	Receives []Receive
 }
 
 // Update is one delivery to a status subscriber: every transition since the
@@ -180,4 +182,49 @@ type ReloadResult struct {
 	Generation      uint64
 	Applied         []string
 	RestartRequired []string
+}
+
+// Receive states.
+const (
+	// ReceiveReceiving is a receive in progress.
+	ReceiveReceiving = "receiving"
+	// ReceiveInterrupted is a receive that stopped and left a resume token on
+	// its destination, for its sender to resume.
+	ReceiveInterrupted = "interrupted"
+)
+
+// Receive is one receive into this host. Dataset is the receive's destination
+// root: the dataset itself for an exact receive, its parent for one that
+// derives the name from the stream. Sender is the sending host as it names
+// itself, and is display text only. Transport says which endpoint serves the
+// receive: native, ssh-shell, or empty for one found only by its traces in
+// ZFS, which has no figures. TotalBytes is the sender's estimate when
+// TotalKnown is set.
+type Receive struct {
+	Dataset        string        `json:"dataset"`
+	State          string        `json:"state"`
+	Sender         string        `json:"sender_host,omitempty"`
+	Transport      string        `json:"transport,omitempty"`
+	Started        time.Time     `json:"started,omitzero"`
+	Bytes          uint64        `json:"bytes,omitempty"`
+	TotalBytes     uint64        `json:"total_bytes,omitempty"`
+	TotalKnown     bool          `json:"total_known,omitempty"`
+	BytesPerSecond float64       `json:"bytes_per_second,omitempty"`
+	ETA            time.Duration `json:"eta,omitempty"`
+}
+
+// ReceiveTracker is told about each receive an endpoint serves, so that the
+// receiving host can show it. BeginReceive is called as a receive starts,
+// with its counters zero; the returned reporter takes its progress, and End
+// once it has ended, however it ended. Neither may block for long: they run
+// beside the stream.
+type ReceiveTracker interface {
+	BeginReceive(Receive) ReceiveReporter
+}
+
+// ReceiveReporter takes one receive's progress and its end. Progress is
+// called serially and never after End.
+type ReceiveReporter interface {
+	Progress(bytes uint64, bytesPerSecond float64)
+	End()
 }

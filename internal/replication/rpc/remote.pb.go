@@ -1417,11 +1417,18 @@ func (*DestroySnapshotResponse) Descriptor() ([]byte, []int) {
 }
 
 type ReceiveOptions struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Root          string                 `protobuf:"bytes,1,opt,name=root,proto3" json:"root,omitempty"`
-	Discard       string                 `protobuf:"bytes,2,opt,name=discard,proto3" json:"discard,omitempty"`
-	Set           map[string]string      `protobuf:"bytes,3,rep,name=set,proto3" json:"set,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Exclude       []string               `protobuf:"bytes,4,rep,name=exclude,proto3" json:"exclude,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Root    string                 `protobuf:"bytes,1,opt,name=root,proto3" json:"root,omitempty"`
+	Discard string                 `protobuf:"bytes,2,opt,name=discard,proto3" json:"discard,omitempty"`
+	Set     map[string]string      `protobuf:"bytes,3,rep,name=set,proto3" json:"set,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Exclude []string               `protobuf:"bytes,4,rep,name=exclude,proto3" json:"exclude,omitempty"`
+	// estimated_bytes is the sender's dry-run estimate of the stream's size. It
+	// is unset when the sender could not estimate it, and is used only to show
+	// the receive's progress on the receiving host.
+	EstimatedBytes *uint64 `protobuf:"varint,5,opt,name=estimated_bytes,json=estimatedBytes,proto3,oneof" json:"estimated_bytes,omitempty"`
+	// sender_host names the sending host, as its own hostname reports it. It is
+	// display text only and is never trusted for authorization.
+	SenderHost    string `protobuf:"bytes,6,opt,name=sender_host,json=senderHost,proto3" json:"sender_host,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1482,6 +1489,20 @@ func (x *ReceiveOptions) GetExclude() []string {
 		return x.Exclude
 	}
 	return nil
+}
+
+func (x *ReceiveOptions) GetEstimatedBytes() uint64 {
+	if x != nil && x.EstimatedBytes != nil {
+		return *x.EstimatedBytes
+	}
+	return 0
+}
+
+func (x *ReceiveOptions) GetSenderHost() string {
+	if x != nil {
+		return x.SenderHost
+	}
+	return ""
 }
 
 type ReceiveRequest struct {
@@ -1822,15 +1843,19 @@ const file_boomerangz_replication_v1_remote_proto_rawDesc = "" +
 	"\x17InheritPropertyResponse\"4\n" +
 	"\x16DestroySnapshotRequest\x12\x1a\n" +
 	"\bsnapshot\x18\x01 \x01(\tR\bsnapshot\"\x19\n" +
-	"\x17DestroySnapshotResponse\"\xd6\x01\n" +
+	"\x17DestroySnapshotResponse\"\xb9\x02\n" +
 	"\x0eReceiveOptions\x12\x12\n" +
 	"\x04root\x18\x01 \x01(\tR\x04root\x12\x18\n" +
 	"\adiscard\x18\x02 \x01(\tR\adiscard\x12D\n" +
 	"\x03set\x18\x03 \x03(\v22.boomerangz.replication.v1.ReceiveOptions.SetEntryR\x03set\x12\x18\n" +
-	"\aexclude\x18\x04 \x03(\tR\aexclude\x1a6\n" +
+	"\aexclude\x18\x04 \x03(\tR\aexclude\x12,\n" +
+	"\x0festimated_bytes\x18\x05 \x01(\x04H\x00R\x0eestimatedBytes\x88\x01\x01\x12\x1f\n" +
+	"\vsender_host\x18\x06 \x01(\tR\n" +
+	"senderHost\x1a6\n" +
 	"\bSetEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"i\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x12\n" +
+	"\x10_estimated_bytes\"i\n" +
 	"\x0eReceiveRequest\x12C\n" +
 	"\aoptions\x18\x01 \x01(\v2).boomerangz.replication.v1.ReceiveOptionsR\aoptions\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\"'\n" +
@@ -1959,6 +1984,7 @@ func file_boomerangz_replication_v1_remote_proto_init() {
 	if File_boomerangz_replication_v1_remote_proto != nil {
 		return
 	}
+	file_boomerangz_replication_v1_remote_proto_msgTypes[28].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

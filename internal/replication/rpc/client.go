@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"os/exec"
 	"slices"
 	"time"
@@ -163,6 +164,8 @@ type Stream struct {
 	client *Client
 	sender zfs.CommandFactory
 	label  string
+	// host names this host to the receiving side, for its status display.
+	host string
 }
 
 // NewStream constructs a stream using an explicit local ZFS executable.
@@ -183,7 +186,10 @@ func NewStreamWithSender(client *Client, sender zfs.CommandFactory, label string
 	if label == "" {
 		label = "remote RPC"
 	}
-	return &Stream{client: client, sender: sender, label: label}, nil
+	// A host that cannot name itself sends no name; the receiving side shows
+	// the receive without one.
+	host, _ := os.Hostname()
+	return &Stream{client: client, sender: sender, label: label, host: host}, nil
 }
 
 // Run executes one bounded sender and gRPC client-streaming receive.
@@ -201,7 +207,10 @@ func (s *Stream) Run(ctx context.Context, send zfs.SendOptions, receive zfs.Rece
 	if err != nil {
 		return zfs.Progress{}, s.client.mapError(err)
 	}
-	options := &ReceiveOptions{Root: receive.Root, Discard: string(receive.Discard), Set: receive.Set, Exclude: receive.Exclude}
+	options := &ReceiveOptions{Root: receive.Root, Discard: string(receive.Discard), Set: receive.Set, Exclude: receive.Exclude, SenderHost: s.host}
+	if estimate.Known {
+		options.EstimatedBytes = &estimate.Bytes
+	}
 	if err := stream.Send(&ReceiveRequest{Options: options}); err != nil {
 		return zfs.Progress{}, s.client.mapError(err)
 	}

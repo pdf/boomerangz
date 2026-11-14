@@ -141,7 +141,8 @@ reconnect, not as the daemon failing.
 The terminal view puts what needs attention first:
 
 1. A summary line: the time of the snapshot, how many active datasets there
-   are, and how many jobs are running, queued, or in trouble.
+   are, how many jobs are running, queued, or in trouble, and how many
+   [receives into this host](#incoming-receives) are in progress.
 2. `PROBLEMS`, shown only when there are any: destinations whose
    [permission check](#destination-permissions) found something missing or
    could not run, datasets with invalid policy, targets a root is blocked from
@@ -150,13 +151,19 @@ The terminal view puts what needs attention first:
    many attempts in a row have failed where the transfer counts them, and when
    it runs again. Problems are listed whatever the dataset filter.
 3. `IN PROGRESS`, shown only when there is work: running jobs with their state,
-   then queued ones in queue order. A sending transfer shows its share sent,
-   bytes, rate and time left, and a progress bar once it knows its total.
+   then receives into this host, then queued jobs in queue order. A sending
+   transfer shows its share sent, bytes, rate and time left, and a progress bar
+   once it knows its total. A receive is labelled `<dataset> <- <sending host>`
+   and shown the same way, with bytes and rate alone when the sender had no
+   estimate.
 4. The datasets, in one grid: each dataset's row gives its status, its next
    snapshot, and the state of its latest snapshot job, and under it a row per
    destination gives the state of its latest transfer, so every state lines
    up in the `STATE` column. `SINCE` says how long ago that state began. A
-   finished job reads `ok`.
+   finished job reads `ok`. A target dataset being received into reads
+   `receiving`, with its share received when the sender's estimate is known,
+   or `interrupted`; a full receive's new dataset, which discovery lists only
+   once it exists, gets a `target` row of its own while it is received.
 5. One line summarising the queues, marking any that is nearly full.
 
 Datasets follow the same rules as `boomerangz dataset list`: each has the same
@@ -177,6 +184,40 @@ In JSON, each entry in `datasets` carries `status`, `covered_by` on a member
 or excluded dataset (the root it lies under), `blocked` on a root (each
 target it may not send to, with `target`, `remote` and `reason`), and
 `active` on a root the daemon schedules.
+
+### Incoming receives
+
+On a host other hosts send to, `status` shows the receives into it. What it
+can show depends on how the sender reaches it:
+
+| Transport | Shown | Figures |
+|---|---|---|
+| `native` | Always: the daemon serves the receive itself | Bytes, rate, and with the sender's estimate a share, time left and progress bar |
+| `ssh-shell` | When the `ssh-shell` process can reach the daemon's control socket, as the packaged `boomerangz` account can | As for `native` |
+| `ssh` direct | From the resume token `zfs receive -s` keeps on the destination, beneath a target or replication root | None: `receiving` or `interrupted` only |
+
+A receive over `ssh` direct is found when discovery next runs, so it can take
+up to a `reconcile_interval` to appear. Its resume token changes as the
+receive writes, so a token that has not changed for 15 seconds reads
+`interrupted`: the receive stopped, or has stalled. An interrupted receive
+stays listed until the sender resumes it or
+[abort-receive](/operations/recovery#discard-an-interrupted-receive) discards
+it. The first receive into a destination that discovery does not yet know as
+a target is not found this way.
+
+The JSON object carries `receives`, an array sorted by dataset, empty when
+there are none:
+
+| Field | Meaning |
+|---|---|
+| `dataset` | The receive's destination: the dataset, or for a receive that names its datasets from the stream, the root they land under |
+| `state` | `receiving` or `interrupted` |
+| `sender_host` | The sending host as it names itself; display text only |
+| `transport` | `native` or `ssh-shell`; absent for a receive found by its resume token |
+| `started_unix_nano` | When the receive began; absent when not known |
+| `bytes`, `bytes_per_second` | What the receive has accepted so far, and how fast |
+| `total_bytes`, `total_known` | The sender's estimate of the stream, when it had one |
+| `eta_nanoseconds` | Time left at the current rate, when the total is known |
 
 ### Destination permissions
 

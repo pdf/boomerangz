@@ -42,6 +42,8 @@ type service struct {
 	runtime       runtime
 	reloader      *reloadHandler
 	reloadAllowed bool
+	// reportAllowed admits receive reports, on a Unix socket alone.
+	reportAllowed bool
 	// drain is cancelled when the listener serving this service starts to
 	// drain; calls with no natural end watch it and end early.
 	drain context.Context
@@ -62,7 +64,18 @@ func toSnapshot(snapshot daemonstate.ControlSnapshot) *controlrpc.StatusSnapshot
 		result.Destinations = append(result.Destinations, &controlrpc.DestinationPermissions{Destination: destination.Destination, Remote: destination.Remote, Dataset: destination.Dataset, Account: destination.Account,
 			Missing: slices.Clone(destination.Missing), Error: destination.Error, CheckedUnixNano: destination.Checked.UnixNano()})
 	}
+	for _, receive := range snapshot.Receives {
+		result.Receives = append(result.Receives, toReceiveStatus(receive))
+	}
 	return result
+}
+
+func toReceiveStatus(receive daemonstate.Receive) *controlrpc.ReceiveStatus {
+	item := &controlrpc.ReceiveStatus{Dataset: receive.Dataset, State: receive.State, SenderHost: receive.Sender, Transport: receive.Transport, Bytes: receive.Bytes, TotalBytes: receive.TotalBytes, TotalKnown: receive.TotalKnown, BytesPerSecond: receive.BytesPerSecond, EtaNanoseconds: int64(receive.ETA)}
+	if !receive.Started.IsZero() {
+		item.StartedUnixNano = receive.Started.UnixNano()
+	}
+	return item
 }
 
 func toDatasetStatus(dataset daemonstate.DatasetStatus) *controlrpc.DatasetStatus {

@@ -124,7 +124,9 @@ Roughly bottom-up, in dependency order:
   delivers every transition to its subscribers: `WatchStatus` and the daemon
   log), `permissions.go` (checks each destination's delegation against
   `transfer.DestinationPermissions` when the daemon first reaches it, and
-  reports what is missing as a warning in status and the log).
+  reports what is missing as a warning in status and the log), `receives.go`
+  (receives into this host found only by their resume tokens; see "Incoming
+  receives" below).
 - **daemonstate** - plain shared data types (`Event`, `ControlSnapshot`,
   `ReloadResult`, ...) with no behavior, used so `daemon` and `control` don't
   depend on each other's internals.
@@ -499,6 +501,45 @@ every mutation - `signal()` - to release whichever goroutine is blocked in
   intermediate before it is sent; verification then expects only the
   intermediates the source still has (`settleIntermediates`).
 
+## Incoming receives (`internal/daemon/status.go`, `internal/daemon/receives.go`, `internal/control/receive.go`)
+
+A receiving host's status lists the receives into it, as
+`ControlSnapshot.Receives`. Where a receive is seen depends on which process
+runs `zfs receive`:
+
+- `native`: the daemon's own control server hosts `rpc.Server`, which
+  `buildEndpoint` hands the runtime as its `daemonstate.ReceiveTracker`.
+  `Server.Receive` meters the bytes `zfs receive` accepts with a
+  `zfs.ProgressMeter` and reports them; the sender supplies its dry-run
+  estimate and hostname in `ReceiveOptions` (`estimated_bytes`, unset when
+  unknown, and `sender_host`, reduced by `rpc.DisplayHost` to host-name
+  characters).
+- `ssh-shell`: a separate process per connection. It tracks receives with a
+  `control.ReceiveForwarder`, which opens a `ControlService.ReportReceive`
+  stream to the daemon on `paths.socket_path` in the background and sends the
+  newest sample whenever the stream can take one. The packaged account is the
+  daemon's own, so it can reach the socket; any other account, or a host with
+  no daemon, leaves the receive unlisted and the transfer unaffected.
+  `ReportReceive` is accepted on Unix sockets only, and the receive is listed
+  for exactly as long as its stream stays open.
+- plain `ssh` direct mode has no boomerangz in the path. After each discovery
+  generation the daemon reads `receive_resume_token` beneath every target root
+  and configured replication root (`zfs.Direct.ResumeTokens`). A receive with
+  `-s` keeps that token on its destination while it runs, not only after it is
+  interrupted, so a single reading cannot tell the two apart: a token that
+  changed within `receiveTraceWindow` (15s, three transaction groups) shows as
+  `receiving`, one unchanged for longer as `interrupted`, and a token not yet
+  seen to change is held back until the window has passed. These carry no
+  figures, and the status owner hides any at or beneath a reported receive's
+  root, which is the same receive.
+
+`Status.BeginReceive` delivers a receive's start and end through the owner's
+ordered input, so neither is lost; its samples travel like job progress, on a
+droppable channel, and one arriving after the end is discarded. `statusui`
+draws a receive in `IN PROGRESS` beside sending jobs and gives its state to
+the target dataset's row, adding a row for a destination discovery has not
+listed yet.
+
 ## Protobuf / gRPC surface
 
 Two service definitions under `proto/boomerangz/`, built with
@@ -507,7 +548,8 @@ files are committed and regenerated via `go tool buf generate`.
 
 - `control/v1/control.proto` - `StatusService` (`GetStatus`, `WatchStatus`
   streaming, `ListDatasets`) and `ControlService` (`Trigger`, `Reconcile`,
-  `Reload`, `Clean`). This is the local admin API used by the CLI.
+  `Reload`, `Clean`, and `ReportReceive`, the client stream an `ssh-shell`
+  process reports a receive on). This is the local admin API used by the CLI.
 - `replication/v1/remote.proto` - `RemoteService`: dataset
   inspection/mutation RPCs (`InspectState`, `CreateReceiveParent`,
   `SetProperties`, `InheritProperty`, `DestroySnapshot`, ...) plus a

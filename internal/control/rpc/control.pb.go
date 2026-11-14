@@ -690,7 +690,10 @@ type StatusSnapshot struct {
 	// destinations holds the latest delegated-permission check of each
 	// destination checked so far, local destinations first and each kind by
 	// name.
-	Destinations  []*DestinationPermissions `protobuf:"bytes,8,rep,name=destinations,proto3" json:"destinations,omitempty"`
+	Destinations []*DestinationPermissions `protobuf:"bytes,8,rep,name=destinations,proto3" json:"destinations,omitempty"`
+	// receives lists the receives into this host in progress, and the
+	// interrupted ones a sender may resume, by dataset.
+	Receives      []*ReceiveStatus `protobuf:"bytes,9,rep,name=receives,proto3" json:"receives,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -781,6 +784,140 @@ func (x *StatusSnapshot) GetDestinations() []*DestinationPermissions {
 	return nil
 }
 
+func (x *StatusSnapshot) GetReceives() []*ReceiveStatus {
+	if x != nil {
+		return x.Receives
+	}
+	return nil
+}
+
+// ReceiveStatus is one receive into this host. Progress is known only for a
+// receive the daemon serves itself (the native transport) or one an ssh-shell
+// process reports; a receive found only by its traces in ZFS has none.
+type ReceiveStatus struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// dataset is the receive's destination dataset: the root of a recursive
+	// receive.
+	Dataset string `protobuf:"bytes,1,opt,name=dataset,proto3" json:"dataset,omitempty"`
+	// state is receiving, or interrupted for a receive that stopped and left
+	// a resume token behind.
+	State string `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	// sender_host is the sending host as it names itself: display text only.
+	SenderHost string `protobuf:"bytes,3,opt,name=sender_host,json=senderHost,proto3" json:"sender_host,omitempty"`
+	// transport is native, ssh-shell, or empty when the receive was found only
+	// by its traces in ZFS.
+	Transport       string `protobuf:"bytes,4,opt,name=transport,proto3" json:"transport,omitempty"`
+	StartedUnixNano int64  `protobuf:"varint,5,opt,name=started_unix_nano,json=startedUnixNano,proto3" json:"started_unix_nano,omitempty"`
+	Bytes           uint64 `protobuf:"varint,6,opt,name=bytes,proto3" json:"bytes,omitempty"`
+	// total_bytes is the sender's estimate, when total_known is set.
+	TotalBytes     uint64  `protobuf:"varint,7,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
+	TotalKnown     bool    `protobuf:"varint,8,opt,name=total_known,json=totalKnown,proto3" json:"total_known,omitempty"`
+	BytesPerSecond float64 `protobuf:"fixed64,9,opt,name=bytes_per_second,json=bytesPerSecond,proto3" json:"bytes_per_second,omitempty"`
+	EtaNanoseconds int64   `protobuf:"varint,10,opt,name=eta_nanoseconds,json=etaNanoseconds,proto3" json:"eta_nanoseconds,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ReceiveStatus) Reset() {
+	*x = ReceiveStatus{}
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReceiveStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReceiveStatus) ProtoMessage() {}
+
+func (x *ReceiveStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReceiveStatus.ProtoReflect.Descriptor instead.
+func (*ReceiveStatus) Descriptor() ([]byte, []int) {
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ReceiveStatus) GetDataset() string {
+	if x != nil {
+		return x.Dataset
+	}
+	return ""
+}
+
+func (x *ReceiveStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *ReceiveStatus) GetSenderHost() string {
+	if x != nil {
+		return x.SenderHost
+	}
+	return ""
+}
+
+func (x *ReceiveStatus) GetTransport() string {
+	if x != nil {
+		return x.Transport
+	}
+	return ""
+}
+
+func (x *ReceiveStatus) GetStartedUnixNano() int64 {
+	if x != nil {
+		return x.StartedUnixNano
+	}
+	return 0
+}
+
+func (x *ReceiveStatus) GetBytes() uint64 {
+	if x != nil {
+		return x.Bytes
+	}
+	return 0
+}
+
+func (x *ReceiveStatus) GetTotalBytes() uint64 {
+	if x != nil {
+		return x.TotalBytes
+	}
+	return 0
+}
+
+func (x *ReceiveStatus) GetTotalKnown() bool {
+	if x != nil {
+		return x.TotalKnown
+	}
+	return false
+}
+
+func (x *ReceiveStatus) GetBytesPerSecond() float64 {
+	if x != nil {
+		return x.BytesPerSecond
+	}
+	return 0
+}
+
+func (x *ReceiveStatus) GetEtaNanoseconds() int64 {
+	if x != nil {
+		return x.EtaNanoseconds
+	}
+	return 0
+}
+
 // DestinationPermissions is the latest check of one destination's delegated
 // ZFS permissions against everything boomerangz may need there. A non-empty
 // missing or error is a warning: transfers go on, and an operation that needs a
@@ -805,7 +942,7 @@ type DestinationPermissions struct {
 
 func (x *DestinationPermissions) Reset() {
 	*x = DestinationPermissions{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[9]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -817,7 +954,7 @@ func (x *DestinationPermissions) String() string {
 func (*DestinationPermissions) ProtoMessage() {}
 
 func (x *DestinationPermissions) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[9]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -830,7 +967,7 @@ func (x *DestinationPermissions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestinationPermissions.ProtoReflect.Descriptor instead.
 func (*DestinationPermissions) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{9}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *DestinationPermissions) GetDestination() string {
@@ -890,7 +1027,7 @@ type ListDatasetsRequest struct {
 
 func (x *ListDatasetsRequest) Reset() {
 	*x = ListDatasetsRequest{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[10]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -902,7 +1039,7 @@ func (x *ListDatasetsRequest) String() string {
 func (*ListDatasetsRequest) ProtoMessage() {}
 
 func (x *ListDatasetsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[10]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -915,7 +1052,7 @@ func (x *ListDatasetsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDatasetsRequest.ProtoReflect.Descriptor instead.
 func (*ListDatasetsRequest) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{10}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{11}
 }
 
 type ListDatasetsResponse struct {
@@ -928,7 +1065,7 @@ type ListDatasetsResponse struct {
 
 func (x *ListDatasetsResponse) Reset() {
 	*x = ListDatasetsResponse{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[11]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -940,7 +1077,7 @@ func (x *ListDatasetsResponse) String() string {
 func (*ListDatasetsResponse) ProtoMessage() {}
 
 func (x *ListDatasetsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[11]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -953,7 +1090,7 @@ func (x *ListDatasetsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDatasetsResponse.ProtoReflect.Descriptor instead.
 func (*ListDatasetsResponse) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{11}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ListDatasetsResponse) GetGeneration() uint64 {
@@ -979,7 +1116,7 @@ type TriggerRequest struct {
 
 func (x *TriggerRequest) Reset() {
 	*x = TriggerRequest{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[12]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -991,7 +1128,7 @@ func (x *TriggerRequest) String() string {
 func (*TriggerRequest) ProtoMessage() {}
 
 func (x *TriggerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[12]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1004,7 +1141,7 @@ func (x *TriggerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TriggerRequest.ProtoReflect.Descriptor instead.
 func (*TriggerRequest) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{12}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TriggerRequest) GetDatasets() []string {
@@ -1022,7 +1159,7 @@ type ReconcileRequest struct {
 
 func (x *ReconcileRequest) Reset() {
 	*x = ReconcileRequest{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[13]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1034,7 +1171,7 @@ func (x *ReconcileRequest) String() string {
 func (*ReconcileRequest) ProtoMessage() {}
 
 func (x *ReconcileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[13]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1047,7 +1184,7 @@ func (x *ReconcileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileRequest.ProtoReflect.Descriptor instead.
 func (*ReconcileRequest) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{13}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{14}
 }
 
 type TriggerResponse struct {
@@ -1059,7 +1196,7 @@ type TriggerResponse struct {
 
 func (x *TriggerResponse) Reset() {
 	*x = TriggerResponse{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[14]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1071,7 +1208,7 @@ func (x *TriggerResponse) String() string {
 func (*TriggerResponse) ProtoMessage() {}
 
 func (x *TriggerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[14]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1084,7 +1221,7 @@ func (x *TriggerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TriggerResponse.ProtoReflect.Descriptor instead.
 func (*TriggerResponse) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{14}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *TriggerResponse) GetAccepted() []string {
@@ -1103,7 +1240,7 @@ type ReconcileResponse struct {
 
 func (x *ReconcileResponse) Reset() {
 	*x = ReconcileResponse{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[15]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1115,7 +1252,7 @@ func (x *ReconcileResponse) String() string {
 func (*ReconcileResponse) ProtoMessage() {}
 
 func (x *ReconcileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[15]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1128,7 +1265,7 @@ func (x *ReconcileResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileResponse.ProtoReflect.Descriptor instead.
 func (*ReconcileResponse) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{15}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ReconcileResponse) GetAccepted() bool {
@@ -1146,7 +1283,7 @@ type ReloadRequest struct {
 
 func (x *ReloadRequest) Reset() {
 	*x = ReloadRequest{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[16]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1158,7 +1295,7 @@ func (x *ReloadRequest) String() string {
 func (*ReloadRequest) ProtoMessage() {}
 
 func (x *ReloadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[16]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1171,7 +1308,7 @@ func (x *ReloadRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReloadRequest.ProtoReflect.Descriptor instead.
 func (*ReloadRequest) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{16}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{17}
 }
 
 type ReloadResponse struct {
@@ -1185,7 +1322,7 @@ type ReloadResponse struct {
 
 func (x *ReloadResponse) Reset() {
 	*x = ReloadResponse{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[17]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1197,7 +1334,7 @@ func (x *ReloadResponse) String() string {
 func (*ReloadResponse) ProtoMessage() {}
 
 func (x *ReloadResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[17]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1210,7 +1347,7 @@ func (x *ReloadResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReloadResponse.ProtoReflect.Descriptor instead.
 func (*ReloadResponse) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{17}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ReloadResponse) GetGeneration() uint64 {
@@ -1234,6 +1371,164 @@ func (x *ReloadResponse) GetRestartRequired() []string {
 	return nil
 }
 
+type ReportReceiveRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// start is set on the first message only.
+	Start *ReceiveStart `protobuf:"bytes,1,opt,name=start,proto3" json:"start,omitempty"`
+	// bytes is how many bytes of the stream zfs receive has accepted so far.
+	Bytes          uint64  `protobuf:"varint,2,opt,name=bytes,proto3" json:"bytes,omitempty"`
+	BytesPerSecond float64 `protobuf:"fixed64,3,opt,name=bytes_per_second,json=bytesPerSecond,proto3" json:"bytes_per_second,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ReportReceiveRequest) Reset() {
+	*x = ReportReceiveRequest{}
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportReceiveRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportReceiveRequest) ProtoMessage() {}
+
+func (x *ReportReceiveRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportReceiveRequest.ProtoReflect.Descriptor instead.
+func (*ReportReceiveRequest) Descriptor() ([]byte, []int) {
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *ReportReceiveRequest) GetStart() *ReceiveStart {
+	if x != nil {
+		return x.Start
+	}
+	return nil
+}
+
+func (x *ReportReceiveRequest) GetBytes() uint64 {
+	if x != nil {
+		return x.Bytes
+	}
+	return 0
+}
+
+func (x *ReportReceiveRequest) GetBytesPerSecond() float64 {
+	if x != nil {
+		return x.BytesPerSecond
+	}
+	return 0
+}
+
+type ReceiveStart struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Dataset        string                 `protobuf:"bytes,1,opt,name=dataset,proto3" json:"dataset,omitempty"`
+	SenderHost     string                 `protobuf:"bytes,2,opt,name=sender_host,json=senderHost,proto3" json:"sender_host,omitempty"`
+	EstimatedBytes *uint64                `protobuf:"varint,3,opt,name=estimated_bytes,json=estimatedBytes,proto3,oneof" json:"estimated_bytes,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ReceiveStart) Reset() {
+	*x = ReceiveStart{}
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReceiveStart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReceiveStart) ProtoMessage() {}
+
+func (x *ReceiveStart) ProtoReflect() protoreflect.Message {
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReceiveStart.ProtoReflect.Descriptor instead.
+func (*ReceiveStart) Descriptor() ([]byte, []int) {
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ReceiveStart) GetDataset() string {
+	if x != nil {
+		return x.Dataset
+	}
+	return ""
+}
+
+func (x *ReceiveStart) GetSenderHost() string {
+	if x != nil {
+		return x.SenderHost
+	}
+	return ""
+}
+
+func (x *ReceiveStart) GetEstimatedBytes() uint64 {
+	if x != nil && x.EstimatedBytes != nil {
+		return *x.EstimatedBytes
+	}
+	return 0
+}
+
+type ReportReceiveResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportReceiveResponse) Reset() {
+	*x = ReportReceiveResponse{}
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportReceiveResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportReceiveResponse) ProtoMessage() {}
+
+func (x *ReportReceiveResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportReceiveResponse.ProtoReflect.Descriptor instead.
+func (*ReportReceiveResponse) Descriptor() ([]byte, []int) {
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{21}
+}
+
 type CleanRequest struct {
 	state                 protoimpl.MessageState `protogen:"open.v1"`
 	Datasets              []string               `protobuf:"bytes,1,rep,name=datasets,proto3" json:"datasets,omitempty"`
@@ -1250,7 +1545,7 @@ type CleanRequest struct {
 
 func (x *CleanRequest) Reset() {
 	*x = CleanRequest{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[18]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1262,7 +1557,7 @@ func (x *CleanRequest) String() string {
 func (*CleanRequest) ProtoMessage() {}
 
 func (x *CleanRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[18]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1275,7 +1570,7 @@ func (x *CleanRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanRequest.ProtoReflect.Descriptor instead.
 func (*CleanRequest) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{18}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *CleanRequest) GetDatasets() []string {
@@ -1332,7 +1627,7 @@ type CleanAction struct {
 
 func (x *CleanAction) Reset() {
 	*x = CleanAction{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[19]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1344,7 +1639,7 @@ func (x *CleanAction) String() string {
 func (*CleanAction) ProtoMessage() {}
 
 func (x *CleanAction) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[19]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1357,7 +1652,7 @@ func (x *CleanAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanAction.ProtoReflect.Descriptor instead.
 func (*CleanAction) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{19}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *CleanAction) GetOperation() string {
@@ -1404,7 +1699,7 @@ type CleanPlan struct {
 
 func (x *CleanPlan) Reset() {
 	*x = CleanPlan{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[20]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1416,7 +1711,7 @@ func (x *CleanPlan) String() string {
 func (*CleanPlan) ProtoMessage() {}
 
 func (x *CleanPlan) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[20]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1429,7 +1724,7 @@ func (x *CleanPlan) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanPlan.ProtoReflect.Descriptor instead.
 func (*CleanPlan) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{20}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *CleanPlan) GetDataset() string {
@@ -1498,7 +1793,7 @@ type CleanResponse struct {
 
 func (x *CleanResponse) Reset() {
 	*x = CleanResponse{}
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[21]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1510,7 +1805,7 @@ func (x *CleanResponse) String() string {
 func (*CleanResponse) ProtoMessage() {}
 
 func (x *CleanResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_boomerangz_control_v1_control_proto_msgTypes[21]
+	mi := &file_boomerangz_control_v1_control_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1523,7 +1818,7 @@ func (x *CleanResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanResponse.ProtoReflect.Descriptor instead.
 func (*CleanResponse) Descriptor() ([]byte, []int) {
-	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{21}
+	return file_boomerangz_control_v1_control_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *CleanResponse) GetPlans() []*CleanPlan {
@@ -1598,7 +1893,7 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"\rBlockedTarget\x12\x16\n" +
 	"\x06target\x18\x01 \x01(\tR\x06target\x12\x16\n" +
 	"\x06remote\x18\x02 \x01(\bR\x06remote\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xae\x03\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xf0\x03\n" +
 	"\x0eStatusSnapshot\x12\x1a\n" +
 	"\brevision\x18\x01 \x01(\x04R\brevision\x12,\n" +
 	"\x12observed_unix_nano\x18\x02 \x01(\x03R\x10observedUnixNano\x12\x1e\n" +
@@ -1609,7 +1904,23 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"\x06queues\x18\x05 \x03(\v2\".boomerangz.control.v1.QueueStatusR\x06queues\x124\n" +
 	"\x04jobs\x18\x06 \x03(\v2 .boomerangz.control.v1.JobStatusR\x04jobs\x12+\n" +
 	"\x11config_generation\x18\a \x01(\x04R\x10configGeneration\x12Q\n" +
-	"\fdestinations\x18\b \x03(\v2-.boomerangz.control.v1.DestinationPermissionsR\fdestinations\"\xe2\x01\n" +
+	"\fdestinations\x18\b \x03(\v2-.boomerangz.control.v1.DestinationPermissionsR\fdestinations\x12@\n" +
+	"\breceives\x18\t \x03(\v2$.boomerangz.control.v1.ReceiveStatusR\breceives\"\xd5\x02\n" +
+	"\rReceiveStatus\x12\x18\n" +
+	"\adataset\x18\x01 \x01(\tR\adataset\x12\x14\n" +
+	"\x05state\x18\x02 \x01(\tR\x05state\x12\x1f\n" +
+	"\vsender_host\x18\x03 \x01(\tR\n" +
+	"senderHost\x12\x1c\n" +
+	"\ttransport\x18\x04 \x01(\tR\ttransport\x12*\n" +
+	"\x11started_unix_nano\x18\x05 \x01(\x03R\x0fstartedUnixNano\x12\x14\n" +
+	"\x05bytes\x18\x06 \x01(\x04R\x05bytes\x12\x1f\n" +
+	"\vtotal_bytes\x18\a \x01(\x04R\n" +
+	"totalBytes\x12\x1f\n" +
+	"\vtotal_known\x18\b \x01(\bR\n" +
+	"totalKnown\x12(\n" +
+	"\x10bytes_per_second\x18\t \x01(\x01R\x0ebytesPerSecond\x12'\n" +
+	"\x0feta_nanoseconds\x18\n" +
+	" \x01(\x03R\x0eetaNanoseconds\"\xe2\x01\n" +
 	"\x16DestinationPermissions\x12 \n" +
 	"\vdestination\x18\x01 \x01(\tR\vdestination\x12\x16\n" +
 	"\x06remote\x18\x02 \x01(\bR\x06remote\x12\x18\n" +
@@ -1637,7 +1948,18 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"generation\x18\x01 \x01(\x04R\n" +
 	"generation\x12\x18\n" +
 	"\aapplied\x18\x02 \x03(\tR\aapplied\x12)\n" +
-	"\x10restart_required\x18\x03 \x03(\tR\x0frestartRequired\"\xcf\x01\n" +
+	"\x10restart_required\x18\x03 \x03(\tR\x0frestartRequired\"\x91\x01\n" +
+	"\x14ReportReceiveRequest\x129\n" +
+	"\x05start\x18\x01 \x01(\v2#.boomerangz.control.v1.ReceiveStartR\x05start\x12\x14\n" +
+	"\x05bytes\x18\x02 \x01(\x04R\x05bytes\x12(\n" +
+	"\x10bytes_per_second\x18\x03 \x01(\x01R\x0ebytesPerSecond\"\x8b\x01\n" +
+	"\fReceiveStart\x12\x18\n" +
+	"\adataset\x18\x01 \x01(\tR\adataset\x12\x1f\n" +
+	"\vsender_host\x18\x02 \x01(\tR\n" +
+	"senderHost\x12,\n" +
+	"\x0festimated_bytes\x18\x03 \x01(\x04H\x00R\x0eestimatedBytes\x88\x01\x01B\x12\n" +
+	"\x10_estimated_bytes\"\x17\n" +
+	"\x15ReportReceiveResponse\"\xcf\x01\n" +
 	"\fCleanRequest\x12\x1a\n" +
 	"\bdatasets\x18\x01 \x03(\tR\bdatasets\x12\x1c\n" +
 	"\trecursive\x18\x02 \x01(\bR\trecursive\x12\x10\n" +
@@ -1665,12 +1987,13 @@ const file_boomerangz_control_v1_control_proto_rawDesc = "" +
 	"\rStatusService\x12^\n" +
 	"\tGetStatus\x12'.boomerangz.control.v1.GetStatusRequest\x1a(.boomerangz.control.v1.GetStatusResponse\x12f\n" +
 	"\vWatchStatus\x12).boomerangz.control.v1.WatchStatusRequest\x1a*.boomerangz.control.v1.WatchStatusResponse0\x01\x12g\n" +
-	"\fListDatasets\x12*.boomerangz.control.v1.ListDatasetsRequest\x1a+.boomerangz.control.v1.ListDatasetsResponse2\xf5\x02\n" +
+	"\fListDatasets\x12*.boomerangz.control.v1.ListDatasetsRequest\x1a+.boomerangz.control.v1.ListDatasetsResponse2\xe3\x03\n" +
 	"\x0eControlService\x12X\n" +
 	"\aTrigger\x12%.boomerangz.control.v1.TriggerRequest\x1a&.boomerangz.control.v1.TriggerResponse\x12^\n" +
 	"\tReconcile\x12'.boomerangz.control.v1.ReconcileRequest\x1a(.boomerangz.control.v1.ReconcileResponse\x12U\n" +
 	"\x06Reload\x12$.boomerangz.control.v1.ReloadRequest\x1a%.boomerangz.control.v1.ReloadResponse\x12R\n" +
-	"\x05Clean\x12#.boomerangz.control.v1.CleanRequest\x1a$.boomerangz.control.v1.CleanResponseB4Z2github.com/pdf/boomerangz/internal/control/rpc;rpcb\x06proto3"
+	"\x05Clean\x12#.boomerangz.control.v1.CleanRequest\x1a$.boomerangz.control.v1.CleanResponse\x12l\n" +
+	"\rReportReceive\x12+.boomerangz.control.v1.ReportReceiveRequest\x1a,.boomerangz.control.v1.ReportReceiveResponse(\x01B4Z2github.com/pdf/boomerangz/internal/control/rpc;rpcb\x06proto3"
 
 var (
 	file_boomerangz_control_v1_control_proto_rawDescOnce sync.Once
@@ -1684,7 +2007,7 @@ func file_boomerangz_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_boomerangz_control_v1_control_proto_rawDescData
 }
 
-var file_boomerangz_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_boomerangz_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_boomerangz_control_v1_control_proto_goTypes = []any{
 	(*GetStatusRequest)(nil),       // 0: boomerangz.control.v1.GetStatusRequest
 	(*GetStatusResponse)(nil),      // 1: boomerangz.control.v1.GetStatusResponse
@@ -1695,19 +2018,23 @@ var file_boomerangz_control_v1_control_proto_goTypes = []any{
 	(*DatasetStatus)(nil),          // 6: boomerangz.control.v1.DatasetStatus
 	(*BlockedTarget)(nil),          // 7: boomerangz.control.v1.BlockedTarget
 	(*StatusSnapshot)(nil),         // 8: boomerangz.control.v1.StatusSnapshot
-	(*DestinationPermissions)(nil), // 9: boomerangz.control.v1.DestinationPermissions
-	(*ListDatasetsRequest)(nil),    // 10: boomerangz.control.v1.ListDatasetsRequest
-	(*ListDatasetsResponse)(nil),   // 11: boomerangz.control.v1.ListDatasetsResponse
-	(*TriggerRequest)(nil),         // 12: boomerangz.control.v1.TriggerRequest
-	(*ReconcileRequest)(nil),       // 13: boomerangz.control.v1.ReconcileRequest
-	(*TriggerResponse)(nil),        // 14: boomerangz.control.v1.TriggerResponse
-	(*ReconcileResponse)(nil),      // 15: boomerangz.control.v1.ReconcileResponse
-	(*ReloadRequest)(nil),          // 16: boomerangz.control.v1.ReloadRequest
-	(*ReloadResponse)(nil),         // 17: boomerangz.control.v1.ReloadResponse
-	(*CleanRequest)(nil),           // 18: boomerangz.control.v1.CleanRequest
-	(*CleanAction)(nil),            // 19: boomerangz.control.v1.CleanAction
-	(*CleanPlan)(nil),              // 20: boomerangz.control.v1.CleanPlan
-	(*CleanResponse)(nil),          // 21: boomerangz.control.v1.CleanResponse
+	(*ReceiveStatus)(nil),          // 9: boomerangz.control.v1.ReceiveStatus
+	(*DestinationPermissions)(nil), // 10: boomerangz.control.v1.DestinationPermissions
+	(*ListDatasetsRequest)(nil),    // 11: boomerangz.control.v1.ListDatasetsRequest
+	(*ListDatasetsResponse)(nil),   // 12: boomerangz.control.v1.ListDatasetsResponse
+	(*TriggerRequest)(nil),         // 13: boomerangz.control.v1.TriggerRequest
+	(*ReconcileRequest)(nil),       // 14: boomerangz.control.v1.ReconcileRequest
+	(*TriggerResponse)(nil),        // 15: boomerangz.control.v1.TriggerResponse
+	(*ReconcileResponse)(nil),      // 16: boomerangz.control.v1.ReconcileResponse
+	(*ReloadRequest)(nil),          // 17: boomerangz.control.v1.ReloadRequest
+	(*ReloadResponse)(nil),         // 18: boomerangz.control.v1.ReloadResponse
+	(*ReportReceiveRequest)(nil),   // 19: boomerangz.control.v1.ReportReceiveRequest
+	(*ReceiveStart)(nil),           // 20: boomerangz.control.v1.ReceiveStart
+	(*ReportReceiveResponse)(nil),  // 21: boomerangz.control.v1.ReportReceiveResponse
+	(*CleanRequest)(nil),           // 22: boomerangz.control.v1.CleanRequest
+	(*CleanAction)(nil),            // 23: boomerangz.control.v1.CleanAction
+	(*CleanPlan)(nil),              // 24: boomerangz.control.v1.CleanPlan
+	(*CleanResponse)(nil),          // 25: boomerangz.control.v1.CleanResponse
 }
 var file_boomerangz_control_v1_control_proto_depIdxs = []int32{
 	8,  // 0: boomerangz.control.v1.GetStatusResponse.status:type_name -> boomerangz.control.v1.StatusSnapshot
@@ -1717,29 +2044,33 @@ var file_boomerangz_control_v1_control_proto_depIdxs = []int32{
 	6,  // 4: boomerangz.control.v1.StatusSnapshot.datasets:type_name -> boomerangz.control.v1.DatasetStatus
 	4,  // 5: boomerangz.control.v1.StatusSnapshot.queues:type_name -> boomerangz.control.v1.QueueStatus
 	5,  // 6: boomerangz.control.v1.StatusSnapshot.jobs:type_name -> boomerangz.control.v1.JobStatus
-	9,  // 7: boomerangz.control.v1.StatusSnapshot.destinations:type_name -> boomerangz.control.v1.DestinationPermissions
-	6,  // 8: boomerangz.control.v1.ListDatasetsResponse.datasets:type_name -> boomerangz.control.v1.DatasetStatus
-	19, // 9: boomerangz.control.v1.CleanPlan.actions:type_name -> boomerangz.control.v1.CleanAction
-	20, // 10: boomerangz.control.v1.CleanResponse.plans:type_name -> boomerangz.control.v1.CleanPlan
-	0,  // 11: boomerangz.control.v1.StatusService.GetStatus:input_type -> boomerangz.control.v1.GetStatusRequest
-	2,  // 12: boomerangz.control.v1.StatusService.WatchStatus:input_type -> boomerangz.control.v1.WatchStatusRequest
-	10, // 13: boomerangz.control.v1.StatusService.ListDatasets:input_type -> boomerangz.control.v1.ListDatasetsRequest
-	12, // 14: boomerangz.control.v1.ControlService.Trigger:input_type -> boomerangz.control.v1.TriggerRequest
-	13, // 15: boomerangz.control.v1.ControlService.Reconcile:input_type -> boomerangz.control.v1.ReconcileRequest
-	16, // 16: boomerangz.control.v1.ControlService.Reload:input_type -> boomerangz.control.v1.ReloadRequest
-	18, // 17: boomerangz.control.v1.ControlService.Clean:input_type -> boomerangz.control.v1.CleanRequest
-	1,  // 18: boomerangz.control.v1.StatusService.GetStatus:output_type -> boomerangz.control.v1.GetStatusResponse
-	3,  // 19: boomerangz.control.v1.StatusService.WatchStatus:output_type -> boomerangz.control.v1.WatchStatusResponse
-	11, // 20: boomerangz.control.v1.StatusService.ListDatasets:output_type -> boomerangz.control.v1.ListDatasetsResponse
-	14, // 21: boomerangz.control.v1.ControlService.Trigger:output_type -> boomerangz.control.v1.TriggerResponse
-	15, // 22: boomerangz.control.v1.ControlService.Reconcile:output_type -> boomerangz.control.v1.ReconcileResponse
-	17, // 23: boomerangz.control.v1.ControlService.Reload:output_type -> boomerangz.control.v1.ReloadResponse
-	21, // 24: boomerangz.control.v1.ControlService.Clean:output_type -> boomerangz.control.v1.CleanResponse
-	18, // [18:25] is the sub-list for method output_type
-	11, // [11:18] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	10, // 7: boomerangz.control.v1.StatusSnapshot.destinations:type_name -> boomerangz.control.v1.DestinationPermissions
+	9,  // 8: boomerangz.control.v1.StatusSnapshot.receives:type_name -> boomerangz.control.v1.ReceiveStatus
+	6,  // 9: boomerangz.control.v1.ListDatasetsResponse.datasets:type_name -> boomerangz.control.v1.DatasetStatus
+	20, // 10: boomerangz.control.v1.ReportReceiveRequest.start:type_name -> boomerangz.control.v1.ReceiveStart
+	23, // 11: boomerangz.control.v1.CleanPlan.actions:type_name -> boomerangz.control.v1.CleanAction
+	24, // 12: boomerangz.control.v1.CleanResponse.plans:type_name -> boomerangz.control.v1.CleanPlan
+	0,  // 13: boomerangz.control.v1.StatusService.GetStatus:input_type -> boomerangz.control.v1.GetStatusRequest
+	2,  // 14: boomerangz.control.v1.StatusService.WatchStatus:input_type -> boomerangz.control.v1.WatchStatusRequest
+	11, // 15: boomerangz.control.v1.StatusService.ListDatasets:input_type -> boomerangz.control.v1.ListDatasetsRequest
+	13, // 16: boomerangz.control.v1.ControlService.Trigger:input_type -> boomerangz.control.v1.TriggerRequest
+	14, // 17: boomerangz.control.v1.ControlService.Reconcile:input_type -> boomerangz.control.v1.ReconcileRequest
+	17, // 18: boomerangz.control.v1.ControlService.Reload:input_type -> boomerangz.control.v1.ReloadRequest
+	22, // 19: boomerangz.control.v1.ControlService.Clean:input_type -> boomerangz.control.v1.CleanRequest
+	19, // 20: boomerangz.control.v1.ControlService.ReportReceive:input_type -> boomerangz.control.v1.ReportReceiveRequest
+	1,  // 21: boomerangz.control.v1.StatusService.GetStatus:output_type -> boomerangz.control.v1.GetStatusResponse
+	3,  // 22: boomerangz.control.v1.StatusService.WatchStatus:output_type -> boomerangz.control.v1.WatchStatusResponse
+	12, // 23: boomerangz.control.v1.StatusService.ListDatasets:output_type -> boomerangz.control.v1.ListDatasetsResponse
+	15, // 24: boomerangz.control.v1.ControlService.Trigger:output_type -> boomerangz.control.v1.TriggerResponse
+	16, // 25: boomerangz.control.v1.ControlService.Reconcile:output_type -> boomerangz.control.v1.ReconcileResponse
+	18, // 26: boomerangz.control.v1.ControlService.Reload:output_type -> boomerangz.control.v1.ReloadResponse
+	25, // 27: boomerangz.control.v1.ControlService.Clean:output_type -> boomerangz.control.v1.CleanResponse
+	21, // 28: boomerangz.control.v1.ControlService.ReportReceive:output_type -> boomerangz.control.v1.ReportReceiveResponse
+	21, // [21:29] is the sub-list for method output_type
+	13, // [13:21] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_boomerangz_control_v1_control_proto_init() }
@@ -1747,13 +2078,14 @@ func file_boomerangz_control_v1_control_proto_init() {
 	if File_boomerangz_control_v1_control_proto != nil {
 		return
 	}
+	file_boomerangz_control_v1_control_proto_msgTypes[20].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_boomerangz_control_v1_control_proto_rawDesc), len(file_boomerangz_control_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   22,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

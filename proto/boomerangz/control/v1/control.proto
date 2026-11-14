@@ -15,6 +15,11 @@ service ControlService {
   rpc Reconcile(ReconcileRequest) returns (ReconcileResponse);
   rpc Reload(ReloadRequest) returns (ReloadResponse);
   rpc Clean(CleanRequest) returns (CleanResponse);
+  // ReportReceive lets a receive served outside the daemon, by an ssh-shell
+  // process, show in the daemon's status. Its first message starts the
+  // receive; each later one reports progress. The receive stays listed until
+  // the stream ends, however it ends. It is accepted only on a Unix socket.
+  rpc ReportReceive(stream ReportReceiveRequest) returns (ReportReceiveResponse);
 }
 
 message GetStatusRequest {}
@@ -130,6 +135,33 @@ message StatusSnapshot {
   // destination checked so far, local destinations first and each kind by
   // name.
   repeated DestinationPermissions destinations = 8;
+  // receives lists the receives into this host in progress, and the
+  // interrupted ones a sender may resume, by dataset.
+  repeated ReceiveStatus receives = 9;
+}
+
+// ReceiveStatus is one receive into this host. Progress is known only for a
+// receive the daemon serves itself (the native transport) or one an ssh-shell
+// process reports; a receive found only by its traces in ZFS has none.
+message ReceiveStatus {
+  // dataset is the receive's destination dataset: the root of a recursive
+  // receive.
+  string dataset = 1;
+  // state is receiving, or interrupted for a receive that stopped and left
+  // a resume token behind.
+  string state = 2;
+  // sender_host is the sending host as it names itself: display text only.
+  string sender_host = 3;
+  // transport is native, ssh-shell, or empty when the receive was found only
+  // by its traces in ZFS.
+  string transport = 4;
+  int64 started_unix_nano = 5;
+  uint64 bytes = 6;
+  // total_bytes is the sender's estimate, when total_known is set.
+  uint64 total_bytes = 7;
+  bool total_known = 8;
+  double bytes_per_second = 9;
+  int64 eta_nanoseconds = 10;
 }
 
 // DestinationPermissions is the latest check of one destination's delegated
@@ -179,6 +211,22 @@ message ReloadResponse {
   repeated string applied = 2;
   repeated string restart_required = 3;
 }
+
+message ReportReceiveRequest {
+  // start is set on the first message only.
+  ReceiveStart start = 1;
+  // bytes is how many bytes of the stream zfs receive has accepted so far.
+  uint64 bytes = 2;
+  double bytes_per_second = 3;
+}
+
+message ReceiveStart {
+  string dataset = 1;
+  string sender_host = 2;
+  optional uint64 estimated_bytes = 3;
+}
+
+message ReportReceiveResponse {}
 
 message CleanRequest {
   repeated string datasets = 1;

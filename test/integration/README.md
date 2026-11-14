@@ -117,6 +117,9 @@ failure attributable to the transport instead of to the test.
 | `prune:<dataset>` jobs reaching `succeeded`, and destroying what falls outside the grid | `TestGuestDaemonPruneJob` |
 | The destination prune after a transfer keeping the snapshot just received when an older replica snapshot shares its window, leaving nothing written since it, and the next incremental received onto it | `TestGuestDaemonDestinationPruneKeepsReplicaBase` |
 | Retry and backoff state sequence, rather than its endpoints | `TestGuestDaemonRemoteBackoff` |
+| A receive into the daemon's native listener shown in its status with the sender's host, estimate and bytes so far, once, through a pause long enough for its resume token to look interrupted, and gone when it completes | `TestGuestReceiveStatus/native` |
+| A bare `zfs receive -s`, as plain ssh direct mode runs it, found by its resume token: `receiving` while the token moves, `interrupted` once it stops, gone once aborted | `TestGuestReceiveStatus/traced` |
+| An `ssh-shell` receive reported to the receiving host's daemon over its control socket | Nothing in the guest: no guest test runs `ssh-shell` beside a daemon. The forwarder and `ReportReceive` are unit-tested against a real control socket in `internal/control` |
 
 ### Control plane and packaging
 
