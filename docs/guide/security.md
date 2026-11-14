@@ -73,6 +73,13 @@ and in its log. See
 - protect private keys from world read access and from group or world write
   access.
 
+An `ssh-shell` process reports each receive it serves to the daemon on the
+same host over the control socket, so that the daemon's `status` shows it.
+The packaged account is the daemon's own and can reach the socket without any
+change to its permissions; an `ssh-shell` running as another account, or on a
+host with no daemon, serves receives as before and they go unlisted. The
+socket accepts these reports only locally: a TCP listener refuses them.
+
 ## TCP listeners and pairing
 
 TCP listeners are opt-in and always require TLS plus `token`, `mtls`, or
