@@ -102,8 +102,8 @@ jobs:
           cache: true
       # The harness reuses a provisioned guest image for up to a week; the
       # cache carries it between runs, and the week in the key retires it.
-      # The image only boots on hosts of the CPU class it was provisioned on,
-      # and runners vary, so the key is the harness's own image key.
+      # The harness's own image key names the provisioning inputs, so a
+      # change to them provisions afresh.
       - name: Name the guest image cache
         id: image
         run: |
