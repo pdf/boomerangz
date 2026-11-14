@@ -173,7 +173,9 @@ Each dataset has the status `boomerangz dataset list` gives it (`active`,
 `member`, `excluded`, `target`, `inactive`, or `invalid`). By default the view
 lists every status but three. Members and excluded datasets carry no
 transfers of their own, so a root's row counts them instead, as in
-`tank/home (recursive, 2 members, 1 excluded)`. Inactive datasets are hidden
+`tank/home (recursive, 2 members, 1 excluded)`; on a terminal too narrow for
+the grid to fit on one line per row, the counts are left off. Inactive
+datasets are hidden
 with a line saying how many and how to show them. `--status STATUS` lists
 only datasets with that status, exactly as `dataset list --status` does; it
 takes `all` or any status, and can be repeated or given a comma-separated

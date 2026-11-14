@@ -754,12 +754,16 @@ func writeDatasets(out *strings.Builder, datasets, all []*controlrpc.DatasetStat
 		}
 	}
 	rows := make([][]string, 0, len(datasets))
+	// collapsed holds, by row, a root's name without its counts, for a
+	// terminal too narrow to fit them.
+	collapsed := map[int]string{}
 	for _, dataset := range datasets {
 		name := dataset.GetName()
 		var notes []string
 		if dataset.GetRecursive() {
 			notes = append(notes, "recursive")
 		}
+		short := withNotes(name, notes)
 		// What the filter leaves out of a root's group is counted on the
 		// root's row, so the root still says what it covers.
 		if count := members[name]; count > 0 && !keep(discovery.StatusMember) {
@@ -768,8 +772,11 @@ func writeDatasets(out *strings.Builder, datasets, all []*controlrpc.DatasetStat
 		if count := excluded[name]; count > 0 && !keep(discovery.StatusExcluded) {
 			notes = append(notes, fmt.Sprintf("%d excluded", count))
 		}
-		if len(notes) > 0 {
-			name += " (" + strings.Join(notes, ", ") + ")"
+		if full := withNotes(name, notes); full != short {
+			collapsed[len(rows)] = short
+			name = full
+		} else {
+			name = short
 		}
 		// A member or excluded dataset shown beneath its root is indented
 		// under it, so the group reads without comparing names.
@@ -795,7 +802,15 @@ func writeDatasets(out *strings.Builder, datasets, all []*controlrpc.DatasetStat
 		slices.SortFunc(targets, func(a, b []string) int { return strings.Compare(a[1], b[1]) })
 		rows = append(rows, targets...)
 	}
-	writeTable(out, []string{"STATUS", "DATASET", "NEXT SNAPSHOT", "STATE", "SINCE"}, rows, opts.Width, nil)
+	header := []string{"STATUS", "DATASET", "NEXT SNAPSHOT", "STATE", "SINCE"}
+	// The counts are the first thing to go: a row that fits on one line
+	// reads better than a root that says what it covers.
+	if !fitsOnOneLine(header, rows, opts.Width) {
+		for row, name := range collapsed {
+			rows[row][1] = name
+		}
+	}
+	writeTable(out, header, rows, opts.Width, nil)
 	switch {
 	case hidden == 1:
 		out.WriteString("\n")
@@ -804,6 +819,32 @@ func writeDatasets(out *strings.Builder, datasets, all []*controlrpc.DatasetStat
 		out.WriteString("\n")
 		writeText(out, fmt.Sprintf("%d inactive datasets hidden; show them with: boomerangz status --status all", hidden), opts.Width)
 	}
+}
+
+// withNotes appends a dataset's notes to its name in parentheses.
+func withNotes(name string, notes []string) string {
+	if len(notes) == 0 {
+		return name
+	}
+	return name + " (" + strings.Join(notes, ", ") + ")"
+}
+
+// fitsOnOneLine reports whether every row of a table, header included, fits
+// within width with its columns aligned and nothing wrapped.
+func fitsOnOneLine(header []string, rows [][]string, width int) bool {
+	widths := make([]int, len(header))
+	for _, row := range append([][]string{header}, rows...) {
+		for index, cell := range row {
+			for line := range strings.Lines(cell) {
+				widths[index] = max(widths[index], len(strings.TrimSuffix(line, "\n")))
+			}
+		}
+	}
+	total := columnGap * (len(widths) - 1)
+	for _, column := range widths {
+		total += column
+	}
+	return total <= width
 }
 
 func dash(value string) string {

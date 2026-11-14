@@ -44,8 +44,7 @@ active  tank/db
       state failed, since 3h ago
   -> backup/boomerangz
       state blocked
-active tank/home (recursive, 1 member, 1
-excluded)
+active  tank/home (recursive)
     next snapshot in 13m, state ok,
     since 47m ago
   -> backup/boomerangz
