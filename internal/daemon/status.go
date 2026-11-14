@@ -69,8 +69,12 @@ const (
 type Status struct {
 	input    chan statusMessage
 	progress chan Event
-	now      func() time.Time
-	peak     atomic.Int64
+	// receiveProgress carries receive samples as progress carries job
+	// samples: offered without waiting, dropped when full.
+	receiveProgress chan receiveSample
+	receives        atomic.Uint64 // numbers each receive; see BeginReceive
+	now             func() time.Time
+	peak            atomic.Int64
 }
 
 type statusMessage struct {
@@ -80,6 +84,8 @@ type statusMessage struct {
 	deadlines    *deadlineView                         // scheduler deadlines, sent under the scheduler lock
 	runtime      *runtimeView                          // the runtime's dataset view, sent under the runtime lock
 	destinations *[]daemonstate.DestinationPermissions // every destination's latest permission check
+	receive      *receiveChange                        // a receive beginning or ending
+	traced       *[]daemonstate.Receive                // every receive found only by its resume token
 	subscribe    *subscribeRequest
 	snapshot     chan ControlSnapshot
 	flush        chan struct{}
@@ -101,6 +107,19 @@ type runtimeView struct {
 	datasets         []DatasetStatus // sorted; NextSnapshot is filled by the owner
 }
 
+// receiveChange begins the receive numbered id when begin is set, and ends it
+// otherwise.
+type receiveChange struct {
+	id    uint64
+	begin *daemonstate.Receive
+}
+
+type receiveSample struct {
+	id             uint64
+	bytes          uint64
+	bytesPerSecond float64
+}
+
 type subscribeRequest struct {
 	log   bool // the daemon log, which marks gaps instead of ending
 	reply chan *forwarder
@@ -112,7 +131,7 @@ func NewStatus(now func() time.Time) *Status {
 	if now == nil {
 		now = time.Now
 	}
-	s := &Status{input: make(chan statusMessage, statusInputBuffer), progress: make(chan Event, progressBuffer), now: now}
+	s := &Status{input: make(chan statusMessage, statusInputBuffer), progress: make(chan Event, progressBuffer), receiveProgress: make(chan receiveSample, progressBuffer), now: now}
 	go newStatusOwner(s).run()
 	return s
 }
@@ -167,6 +186,51 @@ func (s *Status) publishDestinations(destinations []daemonstate.DestinationPermi
 		return
 	}
 	s.input <- statusMessage{destinations: &destinations}
+}
+
+// BeginReceive lists a receive into this host until the returned reporter's
+// End. Its beginning and end are delivered in order with transitions, so a
+// receive is never lost or left behind; its samples are offered without
+// waiting, as a job's are, and one arriving after End is discarded.
+func (s *Status) BeginReceive(receive daemonstate.Receive) daemonstate.ReceiveReporter {
+	id := s.receives.Add(1)
+	receive.State = daemonstate.ReceiveReceiving
+	receive.Started = s.now().UTC()
+	receive.Bytes, receive.BytesPerSecond, receive.ETA = 0, 0, 0
+	s.input <- statusMessage{receive: &receiveChange{id: id, begin: &receive}}
+	return &statusReceive{status: s, id: id}
+}
+
+// publishTraced sends every receive found only by its resume token in ZFS.
+func (s *Status) publishTraced(receives []daemonstate.Receive) {
+	if s == nil {
+		return
+	}
+	s.input <- statusMessage{traced: &receives}
+}
+
+// statusReceive reports one receive to the status owner.
+type statusReceive struct {
+	status *Status
+	id     uint64
+	ended  atomic.Bool
+}
+
+func (r *statusReceive) Progress(bytes uint64, bytesPerSecond float64) {
+	if r.ended.Load() {
+		return
+	}
+	select {
+	case r.status.receiveProgress <- receiveSample{id: r.id, bytes: bytes, bytesPerSecond: bytesPerSecond}:
+	default:
+	}
+}
+
+func (r *statusReceive) End() {
+	if r.ended.Swap(true) {
+		return
+	}
+	r.status.input <- statusMessage{receive: &receiveChange{id: r.id}}
 }
 
 // Snapshot returns a detached copy of the current state.
@@ -328,6 +392,8 @@ type statusOwner struct {
 	deadlines    map[string]time.Time
 	runtime      runtimeView
 	destinations []daemonstate.DestinationPermissions // sorted; never modified once received
+	receives     map[uint64]daemonstate.Receive       // receives in progress, by number
+	traced       []daemonstate.Receive                // found by resume token; never modified once received
 	subscribers  map[*forwarder]*subscriber
 	current      *ControlSnapshot // immutable once built; nil when stale
 }
@@ -347,6 +413,7 @@ func newStatusOwner(s *Status) *statusOwner {
 		jobQueues:   make(map[string]string),
 		queues:      make(map[string]QueueSnapshot),
 		deadlines:   make(map[string]time.Time),
+		receives:    make(map[uint64]daemonstate.Receive),
 		subscribers: make(map[*forwarder]*subscriber),
 	}
 }
@@ -376,6 +443,10 @@ func (o *statusOwner) run() {
 			o.handle(m)
 		case sample := <-o.status.progress:
 			if o.applyProgress(sample) {
+				o.fanOut(nil, nil)
+			}
+		case sample := <-o.status.receiveProgress:
+			if o.applyReceiveProgress(sample) {
 				o.fanOut(nil, nil)
 			}
 		case <-retries:
@@ -439,6 +510,18 @@ func (o *statusOwner) apply(m statusMessage) ([]Event, *discoveryRecord, bool) {
 		o.destinations = *m.destinations
 		changed = true
 	}
+	if m.receive != nil {
+		if m.receive.begin != nil {
+			o.receives[m.receive.id] = *m.receive.begin
+		} else {
+			delete(o.receives, m.receive.id)
+		}
+		changed = true
+	}
+	if m.traced != nil {
+		o.traced = *m.traced
+		changed = true
+	}
 	incoming := m.queued
 	if m.event != nil {
 		incoming = append(slices.Clone(incoming), *m.event)
@@ -479,6 +562,51 @@ func (o *statusOwner) applyProgress(sample Event) bool {
 	return true
 }
 
+// applyReceiveProgress keeps a sample only while its receive is listed: one
+// read after the receive ended must not bring it back.
+func (o *statusOwner) applyReceiveProgress(sample receiveSample) bool {
+	receive, found := o.receives[sample.id]
+	if !found {
+		return false
+	}
+	receive.Bytes, receive.BytesPerSecond, receive.ETA = sample.bytes, sample.bytesPerSecond, 0
+	if receive.TotalKnown && receive.TotalBytes >= sample.bytes && sample.bytesPerSecond > 0 {
+		seconds := float64(receive.TotalBytes-sample.bytes) / sample.bytesPerSecond
+		if seconds < float64(time.Duration(1<<63-1))/float64(time.Second) {
+			receive.ETA = time.Duration(seconds * float64(time.Second))
+		}
+	}
+	o.receives[sample.id] = receive
+	o.revision++
+	o.current = nil
+	return true
+}
+
+// receiveList is every receive an endpoint reports, then every receive found
+// only by its resume token outside them, sorted by dataset and then by when
+// each began. A reported receive leaves a token on the dataset it writes to,
+// at or beneath its root, which is the same receive, not another.
+func (o *statusOwner) receiveList() []daemonstate.Receive {
+	var result []daemonstate.Receive
+	for _, receive := range o.receives {
+		result = append(result, receive)
+	}
+	for _, receive := range o.traced {
+		if !slices.ContainsFunc(result[:len(o.receives)], func(reported daemonstate.Receive) bool {
+			return receive.Dataset == reported.Dataset || strings.HasPrefix(receive.Dataset, reported.Dataset+"/")
+		}) {
+			result = append(result, receive)
+		}
+	}
+	slices.SortFunc(result, func(a, b daemonstate.Receive) int {
+		if order := strings.Compare(a.Dataset, b.Dataset); order != 0 {
+			return order
+		}
+		return a.Started.Compare(b.Started)
+	})
+	return result
+}
+
 // stamp sets a job event's queue fields from the newest view of its queue.
 func (o *statusOwner) stamp(event *Event) {
 	name, found := o.jobQueues[event.Job]
@@ -495,7 +623,7 @@ func (o *statusOwner) state() *ControlSnapshot {
 	if o.current != nil {
 		return o.current
 	}
-	result := &ControlSnapshot{Revision: o.revision, Generation: o.runtime.generation, ConfigGeneration: o.runtime.configGeneration, Queues: maps.Clone(o.queues), Destinations: o.destinations}
+	result := &ControlSnapshot{Revision: o.revision, Generation: o.runtime.generation, ConfigGeneration: o.runtime.configGeneration, Queues: maps.Clone(o.queues), Destinations: o.destinations, Receives: o.receiveList()}
 	if result.Queues == nil {
 		result.Queues = map[string]QueueSnapshot{}
 	}
@@ -823,6 +951,7 @@ func cloneSnapshot(snapshot *ControlSnapshot) ControlSnapshot {
 	for i := range result.Destinations {
 		result.Destinations[i].Missing = slices.Clone(result.Destinations[i].Missing)
 	}
+	result.Receives = slices.Clone(snapshot.Receives)
 	result.Queues = maps.Clone(snapshot.Queues)
 	for name, queue := range result.Queues {
 		queue.IDs = slices.Clone(queue.IDs)

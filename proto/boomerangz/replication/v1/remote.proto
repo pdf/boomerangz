@@ -151,6 +151,13 @@ message ReceiveOptions {
   string discard = 2;
   map<string, string> set = 3;
   repeated string exclude = 4;
+  // estimated_bytes is the sender's dry-run estimate of the stream's size. It
+  // is unset when the sender could not estimate it, and is used only to show
+  // the receive's progress on the receiving host.
+  optional uint64 estimated_bytes = 5;
+  // sender_host names the sending host, as its own hostname reports it. It is
+  // display text only and is never trusted for authorization.
+  string sender_host = 6;
 }
 
 message ReceiveRequest {

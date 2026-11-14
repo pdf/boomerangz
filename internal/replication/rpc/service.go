@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/pdf/boomerangz/internal/daemonstate"
 	"github.com/pdf/boomerangz/internal/replication/scope"
 	"github.com/pdf/boomerangz/internal/zfs"
 	"google.golang.org/grpc/codes"
@@ -34,6 +35,15 @@ type Server struct {
 	backend      zfs.Destination
 	allowedRoots []string
 	receive      zfs.CommandFactory
+	tracker      daemonstate.ReceiveTracker
+	transport    string
+}
+
+// TrackReceives reports every receive the endpoint serves from now on to
+// tracker, as served by transport, so that the receiving host can show it.
+// Call it before the endpoint serves.
+func (s *Server) TrackReceives(tracker daemonstate.ReceiveTracker, transport string) {
+	s.tracker, s.transport = tracker, transport
 }
 
 // NewServer constructs a scoped remote endpoint using an explicit ZFS binary.
@@ -306,6 +316,8 @@ func (s *Server) Receive(stream RemoteService_ReceiveServer) error {
 		_ = input.Close()
 		return status.Error(codes.Internal, err.Error())
 	}
+	meter := s.track(first.GetOptions())
+	defer meter.finish()
 	var received uint64
 	for {
 		chunk, recvErr := stream.Recv()
@@ -324,6 +336,7 @@ func (s *Server) Receive(stream RemoteService_ReceiveServer) error {
 		}
 		n, writeErr := input.Write(chunk.GetData())
 		received += uint64(n)
+		meter.add(uint64(n))
 		if writeErr != nil || n != len(chunk.GetData()) {
 			// A write fails because zfs receive has stopped reading, so its
 			// exit status and stderr are the cause; the broken pipe is only
@@ -341,6 +354,69 @@ func (s *Server) Receive(stream RemoteService_ReceiveServer) error {
 		return status.Errorf(codes.Internal, "zfs receive: %v: %s", err, diagnostics.String())
 	}
 	return stream.SendAndClose(&ReceiveResponse{Bytes: received})
+}
+
+// receiveMeter shows one receive to the endpoint's tracker while it runs. A
+// nil meter, for an endpoint nothing tracks, does nothing.
+type receiveMeter struct {
+	progress *zfs.ProgressMeter
+	reporter daemonstate.ReceiveReporter
+}
+
+// track begins showing a receive whose header the endpoint has accepted.
+func (s *Server) track(options *ReceiveOptions) *receiveMeter {
+	if s.tracker == nil {
+		return nil
+	}
+	estimate := zfs.Estimate{}
+	start := daemonstate.Receive{Dataset: options.GetRoot(), State: daemonstate.ReceiveReceiving, Sender: DisplayHost(options.GetSenderHost()), Transport: s.transport}
+	if options.EstimatedBytes != nil {
+		estimate = zfs.Estimate{Known: true, Bytes: options.GetEstimatedBytes()}
+		start.TotalBytes, start.TotalKnown = estimate.Bytes, true
+	}
+	reporter := s.tracker.BeginReceive(start)
+	if reporter == nil {
+		return nil
+	}
+	meter := &receiveMeter{reporter: reporter}
+	meter.progress = zfs.StartProgress(estimate, func(progress zfs.Progress) {
+		reporter.Progress(progress.Bytes, progress.BytesPerSecond)
+	})
+	return meter
+}
+
+func (m *receiveMeter) add(n uint64) {
+	if m != nil {
+		m.progress.Add(n)
+	}
+}
+
+// finish reports the last sample and ends the receive.
+func (m *receiveMeter) finish() {
+	if m == nil {
+		return
+	}
+	m.progress.Finish(false)
+	m.reporter.End()
+}
+
+// maxHostLength is the longest host name DNS allows.
+const maxHostLength = 253
+
+// DisplayHost reduces a host name a peer supplied to the characters a host
+// name may hold, at most maxHostLength of them, so that what a sender claims
+// cannot carry terminal control sequences into a status display.
+func DisplayHost(host string) string {
+	var cleaned strings.Builder
+	for _, r := range host {
+		if cleaned.Len() == maxHostLength {
+			break
+		}
+		if r == '.' || r == '-' || r == '_' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			cleaned.WriteRune(r)
+		}
+	}
+	return cleaned.String()
 }
 
 func errorText(err error) string {

@@ -79,6 +79,30 @@ func idle() *controlrpc.StatusSnapshot {
 	}
 }
 
+// receivingHost is a backup host that other hosts send to: one receive the
+// daemon serves with the sender's estimate, one an ssh-shell process reports
+// without one into a dataset discovery has not listed yet, an interrupted
+// receive found in ZFS, and a sending job of its own beside them.
+func receivingHost() *controlrpc.StatusSnapshot {
+	return &controlrpc.StatusSnapshot{
+		ObservedUnixNano: observed.UnixNano(),
+		Datasets: []*controlrpc.DatasetStatus{
+			{Name: "tank/home", Status: "active", Active: true, NextSnapshotUnixNano: at(13 * time.Minute)},
+			{Name: "backup/boomerangz/host-a/tank/home", Status: "target"},
+			{Name: "backup/boomerangz/host-a/tank/db", Status: "target"},
+			{Name: "backup/boomerangz/host-b/tank/media", Status: "target"},
+		},
+		Jobs: []*controlrpc.JobStatus{
+			{Job: "remote:tank/home:offsite", Dataset: "tank/home", Target: "native:offsite.example:8443/backup", State: "sending", ChangedUnixNano: at(-20 * time.Second), Bytes: 3 << 30, TotalBytes: 12 << 30, TotalKnown: true, BytesPerSecond: 95 << 20, EtaNanoseconds: int64(97 * time.Second)},
+		},
+		Receives: []*controlrpc.ReceiveStatus{
+			{Dataset: "backup/boomerangz/host-a/tank/home", State: "receiving", SenderHost: "host-a.example", Transport: "native", StartedUnixNano: at(-4 * time.Minute), Bytes: 41 << 30, TotalBytes: 120 << 30, TotalKnown: true, BytesPerSecond: 410 << 20, EtaNanoseconds: int64(197 * time.Second)},
+			{Dataset: "backup/boomerangz/host-b/tank/vm", State: "receiving", SenderHost: "host-b", Transport: "ssh-shell", StartedUnixNano: at(-75 * time.Second), Bytes: 5 << 30, BytesPerSecond: 60 << 20},
+			{Dataset: "backup/boomerangz/host-a/tank/db", State: "interrupted"},
+		},
+	}
+}
+
 // onlyInactive is a host where nothing is managed yet.
 func onlyInactive() *controlrpc.StatusSnapshot {
 	return &controlrpc.StatusSnapshot{ObservedUnixNano: observed.UnixNano(), Datasets: []*controlrpc.DatasetStatus{{Name: "tank", Status: "inactive"}, {Name: "tank/data", Status: "inactive"}}}
@@ -119,6 +143,9 @@ func TestTerminalFrames(t *testing.T) {
 		{golden: "busy-all.txt", snapshot: busy(), opts: Options{Width: 120, Statuses: []string{"all"}}},
 		{golden: "busy-member-target.txt", snapshot: busy(), opts: Options{Width: 120, Statuses: []string{"member", "target"}}},
 		{golden: "idle.txt", snapshot: idle(), opts: Options{Width: 80}},
+		{golden: "receiving-120.txt", snapshot: receivingHost(), opts: Options{Width: 120}},
+		{golden: "receiving-40.txt", snapshot: receivingHost(), opts: Options{Width: 40}},
+		{golden: "receiving-active.txt", snapshot: receivingHost(), opts: Options{Width: 80, Statuses: []string{"active"}}},
 		{golden: "only-inactive.txt", snapshot: onlyInactive(), opts: Options{Width: 80}},
 		{golden: "empty.txt", snapshot: &controlrpc.StatusSnapshot{ObservedUnixNano: observed.UnixNano()}, opts: Options{Width: 80}},
 	} {
@@ -200,6 +227,9 @@ func TestFramesFitTheWidthWithoutLosingText(t *testing.T) {
 		if err := busyTail().Terminal(&frame, observed, Options{Width: width, Zone: zone}); err != nil {
 			t.Fatal(err)
 		}
+		if err := Terminal(&frame, receivingHost(), Options{Width: width, Zone: zone}); err != nil {
+			t.Fatal(err)
+		}
 		for line := range strings.Lines(frame.String()) {
 			if len(strings.TrimSuffix(line, "\n")) > width {
 				t.Fatalf("width %d: line %q is %d wide:\n%s", width, line, len(line)-1, frame.String())
@@ -275,10 +305,44 @@ func TestJSONFiltersDatasetsAsDatasetListDoes(t *testing.T) {
 	if err := json.Unmarshal(empty.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"datasets", "destinations"} {
+	for _, field := range []string{"datasets", "destinations", "receives"} {
 		if string(decoded[field]) != "[]" {
 			t.Errorf("%s of an empty snapshot = %s, want an empty array", field, decoded[field])
 		}
+	}
+}
+
+// TestJSONListsReceivesWhateverTheFilter keeps every receive in structured
+// output, sorted by dataset, whichever datasets the filter keeps: a receive
+// into a dataset discovery has not listed is no less a receive.
+func TestJSONListsReceivesWhateverTheFilter(t *testing.T) {
+	t.Parallel()
+	var structured bytes.Buffer
+	if err := JSON(&structured, receivingHost(), []string{"active"}); err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Receives []struct {
+			Dataset    string  `json:"dataset"`
+			State      string  `json:"state"`
+			Bytes      uint64  `json:"bytes"`
+			TotalKnown bool    `json:"total_known"`
+			Rate       float64 `json:"bytes_per_second"`
+		} `json:"receives"`
+	}
+	if err := json.Unmarshal(structured.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, receive := range decoded.Receives {
+		got = append(got, receive.Dataset+" "+receive.State)
+	}
+	want := []string{"backup/boomerangz/host-a/tank/db interrupted", "backup/boomerangz/host-a/tank/home receiving", "backup/boomerangz/host-b/tank/vm receiving"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("receives = %q, want %q", got, want)
+	}
+	if home := decoded.Receives[1]; home.Bytes != 41<<30 || !home.TotalKnown || home.Rate != 410<<20 {
+		t.Fatalf("receive figures = %+v", home)
 	}
 }
 

@@ -1,0 +1,17 @@
+boomerangz  15:02:11 CET  1 active dataset  1 running  2 receiving
+
+IN PROGRESS
+tank/home -> remote:offsite                           sending, 25%,
+                                                      3.0 GiB of 12.0 GiB,
+                                                      95.0 MiB/s, ETA 1m37s
+                                                      [======                  ]
+backup/boomerangz/host-a/tank/home <- host-a.example  receiving, 34%,
+                                                      41.0 GiB of 120.0 GiB,
+                                                      410.0 MiB/s, ETA 3m17s
+                                                      [========                ]
+backup/boomerangz/host-b/tank/vm <- host-b            receiving, 5.0 GiB,
+                                                      60.0 MiB/s
+
+STATUS  DATASET              NEXT SNAPSHOT  STATE        SINCE
+active  tank/home            in 13m         -            -
+          -> remote:offsite                 sending 25%  20s ago

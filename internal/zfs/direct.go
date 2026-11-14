@@ -189,6 +189,40 @@ func parseDatasets(output []byte) ([]Dataset, error) {
 	return datasets, nil
 }
 
+// ResumeTokens reads the receive resume token of every filesystem and volume
+// at or beneath roots and returns those that carry one, by dataset. A receive
+// run with -s sets the token on its destination while it runs, not only once
+// it is interrupted, so a token alone says only that a receive is running or
+// was left unfinished there.
+func (d *Direct) ResumeTokens(ctx context.Context, roots []string) (map[string]string, error) {
+	if len(roots) == 0 {
+		return map[string]string{}, nil
+	}
+	for _, root := range roots {
+		if err := validateDataset(root); err != nil {
+			return nil, err
+		}
+	}
+	output, err := d.runner.Run(ctx, append([]string{"get", "-H", "-p", "-r", "-t", "filesystem,volume", "-o", "name,value", "receive_resume_token"}, roots...)...)
+	if err != nil {
+		return nil, err
+	}
+	tokens := make(map[string]string)
+	err = parseTable(output, 2, func(fields []string) error {
+		if err := validateDataset(fields[0]); err != nil {
+			return err
+		}
+		if fields[1] != "-" && fields[1] != "" {
+			tokens[fields[0]] = fields[1]
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return tokens, nil
+}
+
 // GetActivationProperties retrieves the global sparse activation inventory.
 func (d *Direct) GetActivationProperties(ctx context.Context) ([]Property, error) {
 	output, err := d.runner.Run(ctx, "get", "-H", "-p", "-s", "local,received", "-t", "filesystem,volume", "-o", "name,property,value,source", propertyNamespace+"enabled")

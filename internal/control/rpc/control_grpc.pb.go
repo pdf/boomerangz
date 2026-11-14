@@ -201,10 +201,11 @@ var StatusService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ControlService_Trigger_FullMethodName   = "/boomerangz.control.v1.ControlService/Trigger"
-	ControlService_Reconcile_FullMethodName = "/boomerangz.control.v1.ControlService/Reconcile"
-	ControlService_Reload_FullMethodName    = "/boomerangz.control.v1.ControlService/Reload"
-	ControlService_Clean_FullMethodName     = "/boomerangz.control.v1.ControlService/Clean"
+	ControlService_Trigger_FullMethodName       = "/boomerangz.control.v1.ControlService/Trigger"
+	ControlService_Reconcile_FullMethodName     = "/boomerangz.control.v1.ControlService/Reconcile"
+	ControlService_Reload_FullMethodName        = "/boomerangz.control.v1.ControlService/Reload"
+	ControlService_Clean_FullMethodName         = "/boomerangz.control.v1.ControlService/Clean"
+	ControlService_ReportReceive_FullMethodName = "/boomerangz.control.v1.ControlService/ReportReceive"
 )
 
 // ControlServiceClient is the client API for ControlService service.
@@ -215,6 +216,11 @@ type ControlServiceClient interface {
 	Reconcile(ctx context.Context, in *ReconcileRequest, opts ...grpc.CallOption) (*ReconcileResponse, error)
 	Reload(ctx context.Context, in *ReloadRequest, opts ...grpc.CallOption) (*ReloadResponse, error)
 	Clean(ctx context.Context, in *CleanRequest, opts ...grpc.CallOption) (*CleanResponse, error)
+	// ReportReceive lets a receive served outside the daemon, by an ssh-shell
+	// process, show in the daemon's status. Its first message starts the
+	// receive; each later one reports progress. The receive stays listed until
+	// the stream ends, however it ends. It is accepted only on a Unix socket.
+	ReportReceive(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ReportReceiveRequest, ReportReceiveResponse], error)
 }
 
 type controlServiceClient struct {
@@ -265,6 +271,19 @@ func (c *controlServiceClient) Clean(ctx context.Context, in *CleanRequest, opts
 	return out, nil
 }
 
+func (c *controlServiceClient) ReportReceive(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ReportReceiveRequest, ReportReceiveResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ControlService_ServiceDesc.Streams[0], ControlService_ReportReceive_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ReportReceiveRequest, ReportReceiveResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlService_ReportReceiveClient = grpc.ClientStreamingClient[ReportReceiveRequest, ReportReceiveResponse]
+
 // ControlServiceServer is the server API for ControlService service.
 // All implementations must embed UnimplementedControlServiceServer
 // for forward compatibility.
@@ -273,6 +292,11 @@ type ControlServiceServer interface {
 	Reconcile(context.Context, *ReconcileRequest) (*ReconcileResponse, error)
 	Reload(context.Context, *ReloadRequest) (*ReloadResponse, error)
 	Clean(context.Context, *CleanRequest) (*CleanResponse, error)
+	// ReportReceive lets a receive served outside the daemon, by an ssh-shell
+	// process, show in the daemon's status. Its first message starts the
+	// receive; each later one reports progress. The receive stays listed until
+	// the stream ends, however it ends. It is accepted only on a Unix socket.
+	ReportReceive(grpc.ClientStreamingServer[ReportReceiveRequest, ReportReceiveResponse]) error
 	mustEmbedUnimplementedControlServiceServer()
 }
 
@@ -294,6 +318,9 @@ func (UnimplementedControlServiceServer) Reload(context.Context, *ReloadRequest)
 }
 func (UnimplementedControlServiceServer) Clean(context.Context, *CleanRequest) (*CleanResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Clean not implemented")
+}
+func (UnimplementedControlServiceServer) ReportReceive(grpc.ClientStreamingServer[ReportReceiveRequest, ReportReceiveResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method ReportReceive not implemented")
 }
 func (UnimplementedControlServiceServer) mustEmbedUnimplementedControlServiceServer() {}
 func (UnimplementedControlServiceServer) testEmbeddedByValue()                        {}
@@ -388,6 +415,13 @@ func _ControlService_Clean_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlService_ReportReceive_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ControlServiceServer).ReportReceive(&grpc.GenericServerStream[ReportReceiveRequest, ReportReceiveResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlService_ReportReceiveServer = grpc.ClientStreamingServer[ReportReceiveRequest, ReportReceiveResponse]
+
 // ControlService_ServiceDesc is the grpc.ServiceDesc for ControlService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -412,6 +446,12 @@ var ControlService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ControlService_Clean_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "ReportReceive",
+			Handler:       _ControlService_ReportReceive_Handler,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "boomerangz/control/v1/control.proto",
 }

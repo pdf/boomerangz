@@ -96,6 +96,7 @@ type Runtime struct {
 	locks        *keyLocks
 	status       *Status
 	sends        atomic.Uint64 // numbers each sending transition; see transferReporter
+	traces       receiveTraces // receives found by their resume tokens
 	logger       *slog.Logger
 	lifecycle    *lifecycle.Service
 	now          func() time.Time
@@ -563,6 +564,7 @@ func (r *Runtime) applyGeneration(generation *discovery.Generation) {
 		}
 	}
 	r.checkLocalDestinations(context.Background())
+	r.traceReceives()
 }
 
 // destinationNeedsLocked returns what each destination the current
@@ -1746,6 +1748,31 @@ type ControlSnapshot = daemonstate.ControlSnapshot
 
 // ControlStatus returns the status owner's current state.
 func (r *Runtime) ControlStatus() ControlSnapshot { return r.status.Snapshot() }
+
+// BeginReceive lists a receive one of this host's endpoints serves in the
+// daemon's status until it ends, and logs its start and end.
+func (r *Runtime) BeginReceive(receive daemonstate.Receive) daemonstate.ReceiveReporter {
+	r.logger.Info("receive started", "dataset", receive.Dataset, "sender_host", receive.Sender, "transport", receive.Transport)
+	return &loggedReceive{ReceiveReporter: r.status.BeginReceive(receive), logger: r.logger, receive: receive}
+}
+
+// loggedReceive logs a receive's end with the last count it reported.
+type loggedReceive struct {
+	daemonstate.ReceiveReporter
+	logger  *slog.Logger
+	receive daemonstate.Receive
+	bytes   atomic.Uint64
+}
+
+func (l *loggedReceive) Progress(bytes uint64, bytesPerSecond float64) {
+	l.bytes.Store(bytes)
+	l.ReceiveReporter.Progress(bytes, bytesPerSecond)
+}
+
+func (l *loggedReceive) End() {
+	l.ReceiveReporter.End()
+	l.logger.Info("receive ended", "dataset", l.receive.Dataset, "sender_host", l.receive.Sender, "transport", l.receive.Transport, "bytes", l.bytes.Load())
+}
 
 // SubscribeStatus subscribes to the daemon's status; see Status.Subscribe.
 func (r *Runtime) SubscribeStatus(ctx context.Context) (daemonstate.Subscription, error) {

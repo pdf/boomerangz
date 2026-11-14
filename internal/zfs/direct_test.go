@@ -260,3 +260,23 @@ func TestSetPropertiesRefusesValuesZFSWouldNotStore(t *testing.T) {
 		t.Fatalf("value ZFS refuses with E2BIG was sent: %v %v", err, runner.args)
 	}
 }
+
+func TestResumeTokensKeepsOnlyDatasetsCarryingOne(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{output: []byte("backup\t-\nbackup/a\t1-abc-f0-789c\nbackup/a/b\t-\narchive/c\t1-def-118-789c\n")}
+	d := &Direct{runner: runner}
+	tokens, err := d.ResumeTokens(t.Context(), []string{"backup", "archive/c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"backup/a": "1-abc-f0-789c", "archive/c": "1-def-118-789c"}; !reflect.DeepEqual(tokens, want) {
+		t.Fatalf("tokens=%v want=%v", tokens, want)
+	}
+	want := []string{"get", "-H", "-p", "-r", "-t", "filesystem,volume", "-o", "name,value", "receive_resume_token", "backup", "archive/c"}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("args=%v", runner.args)
+	}
+	if _, err := d.ResumeTokens(t.Context(), []string{"-r"}); err == nil {
+		t.Fatal("an option-like root was accepted")
+	}
+}

@@ -27,13 +27,16 @@ type output struct {
 	// permissions and failed checks included; it is an empty array, not
 	// absent, before any check.
 	Destinations []*controlrpc.DestinationPermissions `json:"destinations"`
+	// Receives is every receive into this host in progress, and every
+	// interrupted one; an empty array, not absent, when there are none.
+	Receives []*controlrpc.ReceiveStatus `json:"receives"`
 }
 
 // normalized sorts the snapshot's lists and keeps the datasets statuses asks
 // for, as discovery.StatusFilter decides; hidden counts the datasets the
 // default filter left out.
 func normalized(snapshot *controlrpc.StatusSnapshot, statuses []string) (result output, hidden int) {
-	result = output{Revision: snapshot.GetRevision(), Generation: snapshot.GetGeneration(), ConfigGeneration: snapshot.GetConfigGeneration(), Queues: slices.Clone(snapshot.GetQueues()), Jobs: slices.Clone(snapshot.GetJobs()), Destinations: slices.Clone(snapshot.GetDestinations())}
+	result = output{Revision: snapshot.GetRevision(), Generation: snapshot.GetGeneration(), ConfigGeneration: snapshot.GetConfigGeneration(), Queues: slices.Clone(snapshot.GetQueues()), Jobs: slices.Clone(snapshot.GetJobs()), Destinations: slices.Clone(snapshot.GetDestinations()), Receives: slices.Clone(snapshot.GetReceives())}
 	keep, defaulted := discovery.StatusFilter(statuses)
 	result.Datasets = []*controlrpc.DatasetStatus{}
 	for _, dataset := range snapshot.GetDatasets() {
@@ -46,12 +49,21 @@ func normalized(snapshot *controlrpc.StatusSnapshot, statuses []string) (result 
 	if result.Destinations == nil {
 		result.Destinations = []*controlrpc.DestinationPermissions{}
 	}
+	if result.Receives == nil {
+		result.Receives = []*controlrpc.ReceiveStatus{}
+	}
 	if snapshot.GetObservedUnixNano() != 0 {
 		result.Observed = time.Unix(0, snapshot.GetObservedUnixNano()).UTC()
 	}
 	slices.SortFunc(result.Datasets, func(a, b *controlrpc.DatasetStatus) int { return strings.Compare(a.GetName(), b.GetName()) })
 	slices.SortFunc(result.Queues, func(a, b *controlrpc.QueueStatus) int { return strings.Compare(a.GetName(), b.GetName()) })
 	slices.SortFunc(result.Jobs, func(a, b *controlrpc.JobStatus) int { return strings.Compare(a.GetJob(), b.GetJob()) })
+	slices.SortStableFunc(result.Receives, func(a, b *controlrpc.ReceiveStatus) int {
+		if order := strings.Compare(a.GetDataset(), b.GetDataset()); order != 0 {
+			return order
+		}
+		return int(min(max(a.GetStartedUnixNano()-b.GetStartedUnixNano(), -1), 1))
+	})
 	slices.SortStableFunc(result.Destinations, func(a, b *controlrpc.DestinationPermissions) int {
 		if a.GetRemote() != b.GetRemote() {
 			if a.GetRemote() {
@@ -295,29 +307,45 @@ func byteSize(bytes uint64) string {
 	return fmt.Sprintf("%.1f PiB", value/float64(unit))
 }
 
-// percent is how much of a known total a transfer has sent, whole and capped
-// at 100.
-func percent(job *controlrpc.JobStatus) (int, bool) {
-	if !job.GetTotalKnown() || job.GetTotalBytes() == 0 {
-		return 0, false
-	}
-	return int(min(job.GetBytes(), job.GetTotalBytes()) * 100 / job.GetTotalBytes()), true
+// figures are how far a stream has got, sending or receiving.
+type figures struct {
+	bytes, total uint64
+	known        bool
+	rate         float64
+	eta          int64
 }
 
-// progress describes a sending transfer: how far, how fast, how long left,
-// as parts that are never split across lines.
-func progress(job *controlrpc.JobStatus) []string {
+func jobFigures(job *controlrpc.JobStatus) figures {
+	return figures{bytes: job.GetBytes(), total: job.GetTotalBytes(), known: job.GetTotalKnown(), rate: job.GetBytesPerSecond(), eta: job.GetEtaNanoseconds()}
+}
+
+func receiveFigures(receive *controlrpc.ReceiveStatus) figures {
+	return figures{bytes: receive.GetBytes(), total: receive.GetTotalBytes(), known: receive.GetTotalKnown(), rate: receive.GetBytesPerSecond(), eta: receive.GetEtaNanoseconds()}
+}
+
+// percent is how much of a known total a stream has moved, whole and capped
+// at 100.
+func percent(f figures) (int, bool) {
+	if !f.known || f.total == 0 {
+		return 0, false
+	}
+	return int(min(f.bytes, f.total) * 100 / f.total), true
+}
+
+// progress describes a moving stream: how far, how fast, how long left, as
+// parts that are never split across lines.
+func progress(f figures) []string {
 	var parts []string
-	if share, known := percent(job); known {
-		parts = append(parts, fmt.Sprintf("%d%%", share), byteSize(job.GetBytes())+" of "+byteSize(job.GetTotalBytes()))
-	} else if job.GetBytes() != 0 {
-		parts = append(parts, byteSize(job.GetBytes()))
+	if share, known := percent(f); known {
+		parts = append(parts, fmt.Sprintf("%d%%", share), byteSize(f.bytes)+" of "+byteSize(f.total))
+	} else if f.bytes != 0 {
+		parts = append(parts, byteSize(f.bytes))
 	}
-	if rate := job.GetBytesPerSecond(); rate > 0 {
-		parts = append(parts, byteSize(uint64(rate))+"/s")
+	if f.rate > 0 {
+		parts = append(parts, byteSize(uint64(f.rate))+"/s")
 	}
-	if eta := job.GetEtaNanoseconds(); eta > 0 {
-		parts = append(parts, "ETA "+time.Duration(eta).Round(time.Second).String())
+	if f.eta > 0 {
+		parts = append(parts, "ETA "+time.Duration(f.eta).Round(time.Second).String())
 	}
 	return parts
 }
@@ -379,7 +407,7 @@ func stateText(job *controlrpc.JobStatus) string {
 	case classQueued:
 		return "queued"
 	case classRunning:
-		if share, known := percent(job); known && job.GetState() == "sending" {
+		if share, known := percent(jobFigures(job)); known && job.GetState() == "sending" {
 			return fmt.Sprintf("sending %d%%", share)
 		}
 	case classProblem:
@@ -392,6 +420,30 @@ func stateText(job *controlrpc.JobStatus) string {
 		}
 	}
 	return job.GetState()
+}
+
+// receiving reports whether a receive is in progress, rather than
+// interrupted.
+func receiving(receive *controlrpc.ReceiveStatus) bool {
+	return receive.GetState() == "receiving"
+}
+
+// receiveState is a receive's state in a dataset row: its share received
+// when it knows its total.
+func receiveState(receive *controlrpc.ReceiveStatus) string {
+	if share, known := percent(receiveFigures(receive)); known && receiving(receive) {
+		return fmt.Sprintf("receiving %d%%", share)
+	}
+	return receive.GetState()
+}
+
+// receiveLabel names a receive in words: where it goes and, when the sender
+// named itself, where it comes from.
+func receiveLabel(receive *controlrpc.ReceiveStatus) string {
+	if sender := receive.GetSenderHost(); sender != "" {
+		return receive.GetDataset() + " <- " + sender
+	}
+	return receive.GetDataset()
 }
 
 // Terminal writes the status display: a summary line, then what needs
@@ -421,7 +473,13 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, opts Option
 			// Finished work shows in the dataset rows, problems above.
 		}
 	}
-	writeSummary(&out, snapshot.GetDatasets(), len(running), len(queued), len(problems), now, opts)
+	var receives []*controlrpc.ReceiveStatus
+	for _, receive := range view.Receives {
+		if receiving(receive) {
+			receives = append(receives, receive)
+		}
+	}
+	writeSummary(&out, snapshot.GetDatasets(), len(running), len(receives), len(queued), len(problems), now, opts)
 	if len(problems) != 0 {
 		heading(&out, "PROBLEMS", opts.Color)
 		writeTable(&out, nil, problems, opts.Width, func(row int) string {
@@ -431,17 +489,17 @@ func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, opts Option
 			return ""
 		})
 	}
-	if len(running)+len(queued) != 0 {
+	if len(running)+len(receives)+len(queued) != 0 {
 		heading(&out, "IN PROGRESS", opts.Color)
-		writeTable(&out, nil, progressRows(running, queued, opts.Width), opts.Width, nil)
+		writeTable(&out, nil, progressRows(running, receives, queued, opts.Width), opts.Width, nil)
 	}
-	writeDatasets(&out, view.Datasets, jobs, hidden, now, opts)
+	writeDatasets(&out, view.Datasets, snapshot.GetDatasets(), jobs, view.Receives, hidden, now, opts)
 	writeQueues(&out, view.Queues, opts.Width)
 	_, err := io.WriteString(writer, out.String())
 	return err
 }
 
-func writeSummary(out *strings.Builder, all []*controlrpc.DatasetStatus, running, queued, problems int, now time.Time, opts Options) {
+func writeSummary(out *strings.Builder, all []*controlrpc.DatasetStatus, running, receiving, queued, problems int, now time.Time, opts Options) {
 	active := 0
 	for _, dataset := range all {
 		if dataset.GetStatus() == discovery.StatusActive {
@@ -451,6 +509,9 @@ func writeSummary(out *strings.Builder, all []*controlrpc.DatasetStatus, running
 	parts := []string{"boomerangz", now.In(opts.Zone).Format("15:04:05 MST"), plural(active, "active dataset", "active datasets")}
 	if running != 0 {
 		parts = append(parts, fmt.Sprintf("%d running", running))
+	}
+	if receiving != 0 {
+		parts = append(parts, fmt.Sprintf("%d receiving", receiving))
 	}
 	if queued != 0 {
 		parts = append(parts, fmt.Sprintf("%d queued", queued))
@@ -545,13 +606,17 @@ func blockedName(blocked *controlrpc.BlockedTarget) string {
 	return blocked.GetTarget()
 }
 
-// progressRows lists running jobs, then queued ones in queue order, each with
-// its state and what there is to say about it. A sending transfer shows its
-// figures, and under them a progress bar when it knows its total.
-func progressRows(running, queued []*controlrpc.JobStatus, width int) [][]string {
+// progressRows lists running jobs, then receives into this host, then queued
+// jobs in queue order, each with its state and what there is to say about it.
+// A sending transfer or a receive shows its figures, and under them a progress
+// bar when it knows its total.
+func progressRows(running []*controlrpc.JobStatus, receives []*controlrpc.ReceiveStatus, queued []*controlrpc.JobStatus, width int) [][]string {
 	labelWidth := 0
 	for _, job := range append(slices.Clone(running), queued...) {
 		labelWidth = max(labelWidth, len(jobLabel(job)))
+	}
+	for _, receive := range receives {
+		labelWidth = max(labelWidth, len(receiveLabel(receive)))
 	}
 	// The detail sits beside the label when it has minWrap or more, and
 	// otherwise on its own lines under it; see writeTable.
@@ -559,19 +624,26 @@ func progressRows(running, queued []*controlrpc.JobStatus, width int) [][]string
 	if room < minWrap {
 		room = width - continuation
 	}
+	moving := func(state string, f figures) string {
+		detail := pack(append([]string{state}, progress(f)...), ", ", room)
+		if share, known := percent(f); known {
+			detail += "\n" + progressBar(share, min(room-2, maxBar))
+		}
+		return detail
+	}
 	var rows [][]string
 	for _, job := range running {
 		detail := job.GetState()
 		switch {
 		case job.GetState() == "sending":
-			detail = pack(append([]string{detail}, progress(job)...), ", ", room)
-			if share, known := percent(job); known {
-				detail += "\n" + progressBar(share, min(room-2, maxBar))
-			}
+			detail = moving(detail, jobFigures(job))
 		case job.GetReason() != "":
 			detail += ": " + job.GetReason()
 		}
 		rows = append(rows, []string{jobLabel(job), detail})
+	}
+	for _, receive := range receives {
+		rows = append(rows, []string{receiveLabel(receive), moving(receive.GetState(), receiveFigures(receive))})
 	}
 	slices.SortStableFunc(queued, func(a, b *controlrpc.JobStatus) int { return int(a.GetQueuePosition()) - int(b.GetQueuePosition()) })
 	for _, job := range queued {
@@ -592,9 +664,31 @@ const (
 // writeDatasets lists the datasets the filter keeps, as `dataset list` does,
 // in one grid: each dataset's row carries its next snapshot and the state of
 // its latest snapshot job, and under it a row per destination carries the
-// state of its latest transfer, so every state lines up in one column.
-func writeDatasets(out *strings.Builder, datasets []*controlrpc.DatasetStatus, jobs []*controlrpc.JobStatus, hidden int, now time.Time, opts Options) {
+// state of its latest transfer, so every state lines up in one column. A
+// dataset being received into, or holding an interrupted receive, carries
+// that receive's state instead; one discovery has not listed yet, as a full
+// receive's new dataset is until it completes, has a row of its own as a
+// target, when the filter keeps targets.
+func writeDatasets(out *strings.Builder, datasets, all []*controlrpc.DatasetStatus, jobs []*controlrpc.JobStatus, receives []*controlrpc.ReceiveStatus, hidden int, now time.Time, opts Options) {
 	out.WriteString("\n")
+	incoming := map[string]*controlrpc.ReceiveStatus{}
+	for _, receive := range receives {
+		// The newest receive into a dataset is the one its row shows.
+		incoming[receive.GetDataset()] = receive
+	}
+	listed := map[string]bool{}
+	for _, dataset := range all {
+		listed[dataset.GetName()] = true
+	}
+	if keep, _ := discovery.StatusFilter(opts.Statuses); keep(discovery.StatusTarget) {
+		datasets = slices.Clone(datasets)
+		for name := range incoming {
+			if !listed[name] {
+				datasets = append(datasets, &controlrpc.DatasetStatus{Name: name, Status: discovery.StatusTarget})
+			}
+		}
+		slices.SortFunc(datasets, func(a, b *controlrpc.DatasetStatus) int { return strings.Compare(a.GetName(), b.GetName()) })
+	}
 	if len(datasets) == 0 {
 		if hidden > 0 {
 			writeText(out, fmt.Sprintf("No datasets found other than %d inactive; show them with: boomerangz status --status all", hidden), opts.Width)
@@ -624,6 +718,9 @@ func writeDatasets(out *strings.Builder, datasets []*controlrpc.DatasetStatus, j
 		state, since := "-", "-"
 		if job, found := snapshots[dataset.GetName()]; found {
 			state, since = stateText(job), dash(ago(unixTime(job.GetChangedUnixNano()), now))
+		}
+		if receive, found := incoming[dataset.GetName()]; found {
+			state, since = receiveState(receive), dash(ago(unixTime(receive.GetStartedUnixNano()), now))
 		}
 		rows = append(rows, []string{dataset.GetStatus(), name, dash(until(unixTime(dataset.GetNextSnapshotUnixNano()), now)), state, since})
 		var targets [][]string
