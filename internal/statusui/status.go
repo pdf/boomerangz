@@ -676,48 +676,13 @@ const (
 // that receive's state instead; one discovery has not listed yet, as a full
 // receive's new dataset is until it completes, has a row of its own as a
 // target, when the filter keeps targets.
-// datasetSections orders the dataset grid by what a dataset is to this host:
-// what it sends first, then what should send and cannot, then what it
-// receives, then what it ignores.
-var datasetSections = map[string]int{
-	discovery.StatusActive:   0,
-	discovery.StatusMember:   0,
-	discovery.StatusExcluded: 0,
-	discovery.StatusInvalid:  1,
-	discovery.StatusTarget:   2,
-	discovery.StatusInactive: 3,
-}
-
-// compareDatasets orders the dataset grid: each actor root with the members
-// and excluded datasets it covers straight beneath it, roots by name, then
-// the other sections, each by name.
+// compareDatasets orders the dataset grid as every dataset listing is
+// ordered.
 func compareDatasets(a, b *controlrpc.DatasetStatus) int {
-	group := func(dataset *controlrpc.DatasetStatus) (section int, root string) {
-		section, known := datasetSections[dataset.GetStatus()]
-		if !known {
-			section = len(datasetSections)
-		}
-		if section == 0 && dataset.GetCoveredBy() != "" {
-			return section, dataset.GetCoveredBy()
-		}
-		return section, dataset.GetName()
+	listed := func(dataset *controlrpc.DatasetStatus) discovery.Listed {
+		return discovery.Listed{Name: dataset.GetName(), Status: dataset.GetStatus(), CoveredBy: dataset.GetCoveredBy()}
 	}
-	sectionA, rootA := group(a)
-	sectionB, rootB := group(b)
-	if sectionA != sectionB {
-		return sectionA - sectionB
-	}
-	if rootA != rootB {
-		return strings.Compare(rootA, rootB)
-	}
-	// The root itself leads its group.
-	if leadA, leadB := a.GetName() == rootA, b.GetName() == rootB; leadA != leadB {
-		if leadA {
-			return -1
-		}
-		return 1
-	}
-	return strings.Compare(a.GetName(), b.GetName())
+	return discovery.CompareListed(listed(a), listed(b))
 }
 
 func writeDatasets(out *strings.Builder, datasets, all []*controlrpc.DatasetStatus, jobs []*controlrpc.JobStatus, receives []*controlrpc.ReceiveStatus, hidden int, now time.Time, opts Options) {

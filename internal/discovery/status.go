@@ -1,6 +1,9 @@
 package discovery
 
-import "slices"
+import (
+	"slices"
+	"strings"
+)
 
 // The management statuses a dataset can have. Every command that lists
 // datasets classifies them with Entry.Status and filters them with
@@ -52,4 +55,62 @@ func StatusFilter(statuses []string) (keep func(status string) bool, defaulted b
 	default:
 		return func(status string) bool { return slices.Contains(statuses, status) }, false
 	}
+}
+
+// Listed is what orders a dataset in a listing.
+type Listed struct {
+	Name      string
+	Status    string
+	CoveredBy string
+}
+
+// Listed returns what orders the entry in a listing.
+func (e Entry) Listed() Listed {
+	return Listed{Name: e.Dataset.Name, Status: e.Status(), CoveredBy: e.CoveredBy}
+}
+
+// listedSections orders a listing by what a dataset is to this host: what it
+// sends first, then what should send and cannot, then what it receives, then
+// what it ignores.
+var listedSections = map[string]int{
+	StatusActive:   0,
+	StatusMember:   0,
+	StatusExcluded: 0,
+	StatusInvalid:  1,
+	StatusTarget:   2,
+	StatusInactive: 3,
+}
+
+// CompareListed orders datasets in a listing: each actor root with the
+// members and excluded datasets it covers straight beneath it, roots by
+// name, then datasets with invalid policy, targets and inactive datasets,
+// each by name. Every terminal listing of datasets uses it, so they read in
+// one order.
+func CompareListed(a, b Listed) int {
+	group := func(dataset Listed) (section int, root string) {
+		section, known := listedSections[dataset.Status]
+		if !known {
+			section = len(listedSections)
+		}
+		if section == 0 && dataset.CoveredBy != "" {
+			return section, dataset.CoveredBy
+		}
+		return section, dataset.Name
+	}
+	sectionA, rootA := group(a)
+	sectionB, rootB := group(b)
+	if sectionA != sectionB {
+		return sectionA - sectionB
+	}
+	if rootA != rootB {
+		return strings.Compare(rootA, rootB)
+	}
+	// The root itself leads its group.
+	if leadA, leadB := a.Name == rootA, b.Name == rootB; leadA != leadB {
+		if leadA {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(a.Name, b.Name)
 }

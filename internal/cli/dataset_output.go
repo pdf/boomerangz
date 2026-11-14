@@ -24,9 +24,13 @@ func filterDatasets(entries []discovery.Entry, statuses []string) ([]discovery.E
 	return filtered, total - len(filtered)
 }
 
-// writeDatasetList renders entries as a table. hidden counts the inactive
-// datasets the default filter left out, so the table can say how to see them.
+// writeDatasetList renders entries as a table, in the order every dataset
+// listing uses. hidden counts the inactive datasets the default filter left
+// out, so the table can say how to see them.
 func writeDatasetList(writer io.Writer, entries []discovery.Entry, hidden int) error {
+	entries = slices.SortedFunc(slices.Values(entries), func(a, b discovery.Entry) int {
+		return discovery.CompareListed(a.Listed(), b.Listed())
+	})
 	if len(entries) == 0 {
 		message := "No datasets found.\n"
 		if hidden > 0 {

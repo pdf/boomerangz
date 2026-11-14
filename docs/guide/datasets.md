@@ -28,6 +28,11 @@ These commands are read-only and produce human-readable output by default.
 A root with a destination blocked by a collision stays `active`; `dataset list`
 names the blocked destination beside it.
 
+Each actor root comes first with the members and excluded datasets it covers
+straight beneath it, roots in name order; then datasets with invalid policy,
+targets, and inactive datasets, each in name order. `status` lists datasets in
+the same order. JSON output stays in name order.
+
 A dataset reads as `target` when an actor root on this host places its replica
 there on a local destination, when it carries a source root's lineage received
 with a stream that sent properties, or when it lies beneath one of this host's
