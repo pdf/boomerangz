@@ -173,7 +173,8 @@ and `--status STATUS` lists only datasets with that status. It takes `all` or
 any status, and can be repeated or given a comma-separated list. JSON output
 is filtered the same way.
 
-Times are relative to the snapshot: `in 13m`, `47m ago`. Long text wraps
+Times are relative to now: `in 13m`, `47m ago`. A watch redraws every second
+between updates, so they keep counting while nothing changes. Long text wraps
 rather than being cut, and no line is wider than the terminal; on a terminal
 too narrow for a table's columns, each row's details move onto indented lines
 under it. A watch that would be taller than the terminal shows its top lines

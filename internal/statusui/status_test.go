@@ -434,3 +434,20 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 	w.count++
 	return w.Buffer.Write(p)
 }
+
+func TestRelativeTimesFollowTheClock(t *testing.T) {
+	t.Parallel()
+	frame := func(now time.Time) string {
+		var out bytes.Buffer
+		if err := Terminal(&out, busy(), Options{Width: 120, Zone: zone, Now: now}); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if frame(time.Time{}) != frame(observed) {
+		t.Fatal("an unset clock does not measure from the snapshot's observed time")
+	}
+	if frame(observed.Add(2*time.Minute)) == frame(observed) {
+		t.Fatal("redrawing the same snapshot two minutes later leaves every relative time as it was")
+	}
+}
