@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/pdf/boomerangz/internal/policy"
@@ -53,5 +54,38 @@ func TestStatusFilter(t *testing.T) {
 				t.Errorf("StatusFilter(%q) keeps %q = %v, want %v", test.statuses, status, keep(status), want)
 			}
 		}
+	}
+}
+
+func TestCompareListedGroupsEachRootWithItsMembersThenExclusions(t *testing.T) {
+	t.Parallel()
+	listed := []Listed{
+		{Name: "zroot/home/.cache", Status: StatusExcluded, CoveredBy: "zroot/home"},
+		{Name: "storage/backup/home", Status: StatusTarget},
+		{Name: "tank", Status: StatusInactive},
+		{Name: "zroot/home", Status: StatusActive},
+		{Name: "storage/pdf/tmp", Status: StatusExcluded, CoveredBy: "storage/pdf"},
+		{Name: "storage/broken", Status: StatusInvalid},
+		{Name: "storage/pdf", Status: StatusActive},
+		{Name: "storage/pdf/personal", Status: StatusMember, CoveredBy: "storage/pdf"},
+		// Members precede excluded datasets whatever their names.
+		{Name: "storage/pdf/zz", Status: StatusMember, CoveredBy: "storage/pdf"},
+		// A member whose root a filter left out still sorts as its group.
+		{Name: "aaa/member", Status: StatusMember, CoveredBy: "zroot/home"},
+	}
+	slices.SortFunc(listed, CompareListed)
+	var got []string
+	for _, dataset := range listed {
+		got = append(got, dataset.Name)
+	}
+	want := []string{
+		"storage/pdf", "storage/pdf/personal", "storage/pdf/zz", "storage/pdf/tmp",
+		"zroot/home", "aaa/member", "zroot/home/.cache",
+		"storage/broken",
+		"storage/backup/home",
+		"tank",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("order = %q, want %q", got, want)
 	}
 }

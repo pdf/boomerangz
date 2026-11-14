@@ -18,7 +18,7 @@ tank/vm/images snapshot               snapshotting
 tank/vm/images -> remote:offsite      queued, position 1 of 1
 
 STATUS  DATASET                      NEXT SNAPSHOT  STATE  SINCE
-target  backup/boomerangz/tank/home  -              -      -
 member  tank/home/pdf                in 13m         -      -
+target  backup/boomerangz/tank/home  -              -      -
 
 queues  local 7/8 (nearly full), management 1/64, remote 0/64

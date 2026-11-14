@@ -14,6 +14,10 @@ backup/boomerangz/host-b/tank/vm <-
 host-b
     receiving, 5.0 GiB, 60.0 MiB/s
 
+active  tank/home
+    next snapshot in 13m
+  -> remote:offsite
+      state sending 25%, since 20s ago
 target  backup/boomerangz/host-a/tank/db
     state interrupted
 target
@@ -23,7 +27,3 @@ target
 backup/boomerangz/host-b/tank/media
 target  backup/boomerangz/host-b/tank/vm
     state receiving, since 1m ago
-active  tank/home
-    next snapshot in 13m
-  -> remote:offsite
-      state sending 25%, since 20s ago

@@ -164,14 +164,23 @@ The terminal view puts what needs attention first:
    `receiving`, with its share received when the sender's estimate is known,
    or `interrupted`; a full receive's new dataset, which discovery lists only
    once it exists, gets a `target` row of its own while it is received.
+   Datasets are in the order `dataset list` uses: each actor root with its
+   members and then its excluded datasets straight beneath it, then datasets
+   with invalid policy, then targets, then inactive datasets.
 5. One line summarising the queues, marking any that is nearly full.
 
-Datasets follow the same rules as `boomerangz dataset list`: each has the same
-status (`active`, `member`, `excluded`, `target`, `inactive`, or `invalid`),
-inactive datasets are hidden with a line saying how many and how to show them,
-and `--status STATUS` lists only datasets with that status. It takes `all` or
-any status, and can be repeated or given a comma-separated list. JSON output
-is filtered the same way.
+Each dataset has the status `boomerangz dataset list` gives it (`active`,
+`member`, `excluded`, `target`, `inactive`, or `invalid`). By default the view
+lists every status but three. Members and excluded datasets carry no
+transfers of their own, so a root's row counts them instead, as in
+`tank/home (recursive, 2 members, 1 excluded)`; on a terminal too narrow for
+the grid to fit on one line per row, the counts are left off. Inactive
+datasets are hidden
+with a line saying how many and how to show them. `--status STATUS` lists
+only datasets with that status, exactly as `dataset list --status` does; it
+takes `all` or any status, and can be repeated or given a comma-separated
+list. Members and excluded datasets listed with their root are indented under
+it. JSON output is filtered the same way.
 
 Times are relative to now: `in 13m`, `47m ago`. A watch redraws every second
 between updates, so they keep counting while nothing changes. Long text wraps

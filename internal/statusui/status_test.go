@@ -265,7 +265,7 @@ func TestFitKeepsAFrameWithinTheTerminalHeight(t *testing.T) {
 	}
 }
 
-func TestJSONFiltersDatasetsAsDatasetListDoes(t *testing.T) {
+func TestJSONFiltersDatasetsAsTheTerminalDoes(t *testing.T) {
 	t.Parallel()
 	names := func(t *testing.T, statuses []string) []string {
 		t.Helper()
@@ -287,8 +287,11 @@ func TestJSONFiltersDatasetsAsDatasetListDoes(t *testing.T) {
 		}
 		return result
 	}
-	if got, want := names(t, nil), []string{"backup/boomerangz/tank/home", "tank/broken", "tank/db", "tank/home", "tank/home/cache", "tank/home/pdf", "tank/vm/images"}; !slices.Equal(got, want) {
-		t.Errorf("default datasets = %q, want every status but inactive %q", got, want)
+	if got, want := names(t, nil), []string{"backup/boomerangz/tank/home", "tank/broken", "tank/db", "tank/home", "tank/vm/images"}; !slices.Equal(got, want) {
+		t.Errorf("default datasets = %q, want every status but member, excluded and inactive %q", got, want)
+	}
+	if got, want := names(t, []string{"member", "excluded"}), []string{"tank/home/cache", "tank/home/pdf"}; !slices.Equal(got, want) {
+		t.Errorf("--status member,excluded kept %q, want %q", got, want)
 	}
 	if got := names(t, []string{"all"}); len(got) != len(busy().GetDatasets()) {
 		t.Errorf("--status all kept %q, want every dataset", got)

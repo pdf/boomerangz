@@ -105,9 +105,10 @@ func TestDatasetListFiltersByStatus(t *testing.T) {
 		return rows
 	}
 	// backup and archive are where tank/home and its member place their
-	// replicas; tank is inactive and hidden by default.
+	// replicas; tank is inactive and hidden by default. The root leads its
+	// members, then what it excludes, and targets follow.
 	byDefault := run("list")
-	if got, want := rows(byDefault), []string{"target archive", "target backup", "active tank/home", "excluded tank/home/cache", "member tank/home/docs"}; !slices.Equal(got, want) {
+	if got, want := rows(byDefault), []string{"active tank/home", "member tank/home/docs", "excluded tank/home/cache", "target archive", "target backup"}; !slices.Equal(got, want) {
 		t.Errorf("default rows = %q, want %q", got, want)
 	}
 	if !strings.Contains(byDefault, "1 inactive dataset hidden; show it with: boomerangz dataset list --status all") {
