@@ -214,14 +214,13 @@ jobs, as decided by `.github/scripts/guest-suite-needed.sh` and pinned by
 
 The harness provisions a guest once and reuses it. After provisioning it
 flattens the system image into the image cache, keyed by `host/image-key.sh`:
-the host's CPU class and a digest of the target's `config.sh` and
-`provision.sh`. The guest boots with the host's CPU, so the key keeps images
-apart by CPU class in case a target's provisioning installs packages built for
-the CPU it finds; an image is reused only on hosts of the class it was
-provisioned on. The CachyOS target avoids that on purpose: it bootstraps the
-CachyOS keyring from the `cachyos` repository database over HTTPS and adds only
-the baseline x86-64 repository, not the x86-64-v3, x86-64-v4 or Zen 4/5 ones. Later runs boot a fresh overlay of it with a new cloud-init seed, skipping
-the download and provisioning. A
+a digest of the target's `config.sh` and `provision.sh`, and nothing about the
+host. The guest boots with the host's CPU, so a target provisions only packages
+built for the baseline x86-64 ISA and one image serves every host and CI
+runner. The CachyOS target bootstraps the CachyOS keyring from the `cachyos`
+repository database over HTTPS and adds only the baseline x86-64 repository,
+not the x86-64-v3, x86-64-v4 or Zen 4/5 ones. Later runs boot a fresh overlay
+of it with a new cloud-init seed, skipping the download and provisioning. A
 provisioned image older than a week is rebuilt, so kernel and OpenZFS updates
 still arrive; CI keeps the cache between runs and keys it by the week too.
 

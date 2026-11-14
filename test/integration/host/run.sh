@@ -79,9 +79,8 @@ readonly guest_artifacts=/var/tmp/boomerangz-integration-$run_id
 # cache; locally it persists between runs.
 readonly image_cache=${BOOMERANGZ_IMAGE_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/boomerangz-integration}
 readonly base_image=$image_cache/$target_image_name
-# A provisioned image is keyed by everything that shapes it: the host CPU
-# class it was provisioned for and the target's provisioning inputs (see
-# image-key.sh, which CI's cache key uses too). It is reused for a week at
+# A provisioned image is keyed by everything that shapes it: the target's
+# provisioning inputs (see image-key.sh, which CI's cache key uses too). It is reused for a week at
 # most, so the guest still picks up kernel and OpenZFS updates without any
 # input changing.
 provisioned_key=$("$script_dir/image-key.sh" "$target")
@@ -327,9 +326,7 @@ if [[ $provisioned == no ]]; then
 	qemu-img convert -O qcow2 "$system_image" "$staged"
 	chmod 0444 "$staged"
 	mv -f -- "$staged" "$provisioned_image"
-	# Superseded images of this CPU class go; another class's may still serve
-	# runs on other hosts sharing this cache.
-	find "$image_cache" -maxdepth 1 -name "$target-provisioned-${provisioned_key%-*}-*.qcow2" ! -name "$(basename -- "$provisioned_image")" -delete
+	find "$image_cache" -maxdepth 1 -name "$target-provisioned-*.qcow2" ! -name "$(basename -- "$provisioned_image")" -delete
 	"$target_dir/prepare-image.sh" "$provisioned_image" "$system_image" "$target_system_size"
 fi
 

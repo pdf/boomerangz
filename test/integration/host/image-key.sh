@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
-# Prints the key a target's provisioned guest image is cached under: the host
-# CPU class, then a digest of the target's provisioning inputs.
+# Prints the key a target's provisioned guest image is cached under: a digest
+# of the target's provisioning inputs, so changing config.sh or provision.sh
+# reprovisions the guest.
 #
-# The guest boots with the host's CPU, so a target whose provisioning installed
-# packages built for the CPU it finds would produce an image that fails to boot
-# on a host with fewer instruction set extensions. No target does that today -
-# CachyOS deliberately uses only its baseline x86-64 repository - but the CPU
-# class keeps such images apart should one start to: the x86-64 level the
-# host's dynamic loader supports, with the CPU vendor and family, which
-# separates Intel AVX-512 from Zen 4 and Zen 5 hosts. The digest covers
-# config.sh and provision.sh, so changing either reprovisions the guest.
+# The key carries nothing about the host. The guest boots with the host's CPU,
+# so a target must provision only packages built for the baseline x86-64 ISA -
+# CachyOS uses its baseline repository, not the x86-64-v3, x86-64-v4 or Zen 4/5
+# ones - and one image then serves every host and CI runner.
 
 set -euo pipefail
 
@@ -22,18 +19,5 @@ readonly target_dir=$script_dir/../targets/$target
 	exit 1
 }
 
-level=x86-64-v1
-supported=$(/lib64/ld-linux-x86-64.so.2 --help 2>/dev/null || true)
-for candidate in x86-64-v2 x86-64-v3 x86-64-v4; do
-	if grep -qF "$candidate (supported" <<<"$supported"; then
-		level=$candidate
-	fi
-done
-vendor=$(awk -F': *' '/^vendor_id/ { print $2; exit }' /proc/cpuinfo)
-family=$(awk -F': *' '/^cpu family/ { print $2; exit }' /proc/cpuinfo)
-[[ -n $vendor && -n $family ]] || {
-	printf 'image-key.sh: cannot read the CPU vendor and family\n' >&2
-	exit 1
-}
 digest=$(cat "$target_dir/config.sh" "$target_dir/provision.sh" | sha256sum | cut -c1-16)
-printf '%s-%s-%s-%s\n' "$level" "$vendor" "$family" "$digest"
+printf '%s\n' "$digest"
