@@ -8,9 +8,9 @@ backup/boomerangz/host-a/tank/home <- host-a.example  receiving, 34%, 41.0 GiB o
 backup/boomerangz/host-b/tank/vm <- host-b            receiving, 5.0 GiB, 60.0 MiB/s
 
 STATUS  DATASET                              NEXT SNAPSHOT  STATE          SINCE
+active  tank/home                            in 13m         -              -
+          -> remote:offsite                                 sending 25%    20s ago
 target  backup/boomerangz/host-a/tank/db     -              interrupted    -
 target  backup/boomerangz/host-a/tank/home   -              receiving 34%  4m ago
 target  backup/boomerangz/host-b/tank/media  -              -              -
 target  backup/boomerangz/host-b/tank/vm     -              receiving      1m ago
-active  tank/home                            in 13m         -              -
-          -> remote:offsite                                 sending 25%    20s ago

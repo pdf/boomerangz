@@ -18,8 +18,6 @@ tank/vm/images snapshot               snapshotting
 tank/vm/images -> remote:offsite      queued, position 1 of 1
 
 STATUS    DATASET                      NEXT SNAPSHOT  STATE         SINCE
-target    backup/boomerangz/tank/home  -              -             -
-invalid   tank/broken                  -              -             -
 active    tank/db                      due            -             -
             -> archive/boomerangz                     failed        3h ago
             -> backup/boomerangz                      blocked       -
@@ -31,6 +29,8 @@ member    tank/home/pdf                in 13m         -             -
 active    tank/vm/images               in 58m         snapshotting  2s ago
             -> backup/boomerangz                      sending 34%   1m ago
             -> remote:offsite                         queued        -
+invalid   tank/broken                  -              -             -
+target    backup/boomerangz/tank/home  -              -             -
 
 2 inactive datasets hidden; show them with: boomerangz status --status all
 

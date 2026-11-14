@@ -164,6 +164,9 @@ The terminal view puts what needs attention first:
    `receiving`, with its share received when the sender's estimate is known,
    or `interrupted`; a full receive's new dataset, which discovery lists only
    once it exists, gets a `target` row of its own while it is received.
+   Each actor root comes first with the members and excluded datasets it
+   covers straight beneath it, then datasets with invalid policy, then
+   targets, then inactive datasets.
 5. One line summarising the queues, marking any that is nearly full.
 
 Datasets follow the same rules as `boomerangz dataset list`: each has the same
