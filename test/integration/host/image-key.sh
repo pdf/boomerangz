@@ -2,12 +2,14 @@
 # Prints the key a target's provisioned guest image is cached under: the host
 # CPU class, then a digest of the target's provisioning inputs.
 #
-# The guest boots with the host's CPU, and provisioning may install packages
-# built for the CPU it finds - CachyOS picks x86-64-v3, x86-64-v4 or Zen 4/5
-# builds - so an image provisioned on one host can fail to boot on another
-# with fewer instruction set extensions. The CPU class keeps those apart: the
-# x86-64 level the host's dynamic loader supports, with the CPU vendor and
-# family, which separates Intel AVX-512 from Zen 4 and Zen 5 hosts.
+# The guest boots with the host's CPU, so a target whose provisioning installed
+# packages built for the CPU it finds would produce an image that fails to boot
+# on a host with fewer instruction set extensions. No target does that today -
+# CachyOS deliberately uses only its baseline x86-64 repository - but the CPU
+# class keeps such images apart should one start to: the x86-64 level the
+# host's dynamic loader supports, with the CPU vendor and family, which
+# separates Intel AVX-512 from Zen 4 and Zen 5 hosts. The digest covers
+# config.sh and provision.sh, so changing either reprovisions the guest.
 
 set -euo pipefail
 
