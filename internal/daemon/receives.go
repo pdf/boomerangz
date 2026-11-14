@@ -115,10 +115,7 @@ func (r *Runtime) traceReceives() {
 	if r.generation != nil {
 		entries = r.generation.Entries()
 	}
-	replicationRoots := slices.Clone(r.config.SSHShell.ReplicationRoots)
-	for _, listener := range r.config.Listeners {
-		replicationRoots = append(replicationRoots, listener.ReplicationRoots...)
-	}
+	replicationRoots := r.config.ReplicationRoots()
 	r.mu.Unlock()
 	roots := traceRoots(entries, replicationRoots)
 	r.traces.mu.Lock()

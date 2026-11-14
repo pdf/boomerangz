@@ -112,6 +112,10 @@ type Options struct {
 	Zone *time.Location
 	// Color marks headings and problems with ANSI attributes.
 	Color bool
+	// Now is the clock relative times ("in 6m", "30s ago") are measured
+	// against. Unset, it is the snapshot's observed time. A display that
+	// redraws one snapshot as time passes sets it on every frame.
+	Now time.Time
 }
 
 // ANSI attributes the display uses.
@@ -449,12 +453,15 @@ func receiveLabel(receive *controlrpc.ReceiveStatus) string {
 // Terminal writes the status display: a summary line, then what needs
 // attention, what is running, every listed dataset with its schedule and
 // destinations, and the queues. Long text wraps rather than being cut, and
-// times are shown relative to the snapshot, in opts.Zone. Structured output
-// stays in UTC.
+// times are shown relative to opts.Now, in opts.Zone. Structured output stays
+// in UTC.
 func Terminal(writer io.Writer, snapshot *controlrpc.StatusSnapshot, opts Options) error {
 	opts = opts.normalized()
 	view, hidden := normalized(snapshot, opts.Statuses)
-	now := view.Observed
+	now := opts.Now
+	if now.IsZero() {
+		now = view.Observed
+	}
 	if now.IsZero() {
 		now = time.Now()
 	}

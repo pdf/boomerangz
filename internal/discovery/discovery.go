@@ -271,6 +271,15 @@ func (s *Scanner) SetDestinations(destinations map[string]RemoteDestination) {
 	s.Request()
 }
 
+// SetReplicationRoots replaces the roots this host receives remote sources'
+// replicas beneath and requests a scan, so replicas are marked at once.
+func (s *Scanner) SetReplicationRoots(roots []string) {
+	s.mu.Lock()
+	s.options.ReplicationRoots = slices.Clone(roots)
+	s.mu.Unlock()
+	s.Request()
+}
+
 // Current returns the last complete generation, or nil before the first success.
 func (s *Scanner) Current() *Generation { return s.current.Load() }
 

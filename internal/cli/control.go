@@ -78,40 +78,111 @@ func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential
 		}
 		return statusui.JSON(out, response.GetStatus(), statuses)
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	stream, err := client.Status.WatchStatus(ctx, &controlrpc.WatchStatusRequest{})
 	if err != nil {
 		return err
 	}
-	tail := statusui.NewTail(watchTailLength)
-	var frame bytes.Buffer
-	for {
-		// A watch that fell behind ends with an error here rather than
-		// continuing with a gap, and the command exits non-zero.
-		response, receiveErr := stream.Recv()
-		if receiveErr != nil {
-			if errors.Is(receiveErr, io.EOF) || ctx.Err() != nil {
-				return nil
+	if !interactive {
+		for {
+			response, receiveErr := stream.Recv()
+			if receiveErr != nil {
+				return watchEnded(ctx, receiveErr)
 			}
-			return receiveErr
-		}
-		if interactive {
-			tail.Add(response.GetTransitions())
-			_, width, height := terminalSize(out)
-			frame.Reset()
-			opts := statusui.Options{Width: width, Statuses: statuses, Color: color}
-			if err := statusui.Terminal(&frame, response.GetStatus(), opts); err != nil {
+			if err := statusui.WatchJSON(out, response, statuses); err != nil {
 				return err
 			}
-			if err := tail.Terminal(&frame, time.Now(), opts); err != nil {
-				return err
-			}
-			if err := statusui.Redraw(out, statusui.Fit(frame.Bytes(), height)); err != nil {
-				return err
-			}
-		} else if err := statusui.WatchJSON(out, response, statuses); err != nil {
-			return err
 		}
 	}
+	tail := statusui.NewTail(watchTailLength)
+	var frame bytes.Buffer
+	ticker := time.NewTicker(watchRedrawInterval)
+	defer ticker.Stop()
+	err = watchFrames(ctx, stream.Recv, ticker.C, func(response *controlrpc.WatchStatusResponse, fresh bool, now time.Time) error {
+		if fresh {
+			tail.Add(response.GetTransitions())
+		}
+		_, width, height := terminalSize(out)
+		frame.Reset()
+		opts := statusui.Options{Width: width, Statuses: statuses, Color: color, Now: now}
+		if err := statusui.Terminal(&frame, response.GetStatus(), opts); err != nil {
+			return err
+		}
+		if err := tail.Terminal(&frame, now, opts); err != nil {
+			return err
+		}
+		return statusui.Redraw(out, statusui.Fit(frame.Bytes(), height))
+	})
+	return watchEnded(ctx, err)
+}
+
+// watchRedrawInterval is how often an interactive watch redraws its last
+// snapshot between updates, so relative times keep counting. The display
+// shows seconds below a minute, so a second is as fine as it needs to be.
+const watchRedrawInterval = time.Second
+
+// watchFrames draws each update receive delivers as it arrives, with fresh
+// set, and redraws the latest one on every tick, so relative times keep
+// counting while the daemon has nothing new to say. It returns when receive
+// fails or ctx ends; nothing is drawn before the first update.
+func watchFrames(ctx context.Context, receive func() (*controlrpc.WatchStatusResponse, error), ticks <-chan time.Time, draw func(response *controlrpc.WatchStatusResponse, fresh bool, now time.Time) error) error {
+	type received struct {
+		response *controlrpc.WatchStatusResponse
+		err      error
+	}
+	updates := make(chan received)
+	go func() {
+		for {
+			response, err := receive()
+			select {
+			case updates <- received{response, err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	var latest *controlrpc.WatchStatusResponse
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case update := <-updates:
+			if update.err != nil {
+				return update.err
+			}
+			latest = update.response
+			if err := draw(latest, true, time.Now()); err != nil {
+				return err
+			}
+		case now := <-ticks:
+			if latest == nil {
+				continue
+			}
+			if err := draw(latest, false, now); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// watchEnded maps how a watch stopped to the command's result: the stream
+// closing or the command being interrupted is a clean exit, and a watch that
+// fell behind ends with an error rather than continuing with a gap.
+func watchEnded(ctx context.Context, err error) error {
+	select {
+	case <-ctx.Done():
+		// Interrupted: the stream's own error only reports the cancellation.
+		return nil
+	default:
+	}
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
 }
 
 func runTrigger(ctx context.Context, out io.Writer, cfg config.Config, credential string, datasets []string) error {

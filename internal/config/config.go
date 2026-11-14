@@ -29,6 +29,18 @@ type Config struct {
 	Listeners map[string]ListenerConfig `toml:"listeners" json:"listeners"`
 }
 
+// ReplicationRoots are every dataset this host receives remote sources'
+// replicas beneath: the SSH shell's and each listener's, sorted and without
+// duplicates.
+func (c Config) ReplicationRoots() []string {
+	roots := slices.Clone(c.SSHShell.ReplicationRoots)
+	for _, listener := range c.Listeners {
+		roots = append(roots, listener.ReplicationRoots...)
+	}
+	slices.Sort(roots)
+	return slices.Compact(roots)
+}
+
 // Clone detaches all mutable maps and slices from a configuration value.
 func (c Config) Clone() Config {
 	result := c

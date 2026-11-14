@@ -201,3 +201,16 @@ func writeTestFile(t *testing.T, path, contents string) {
 		t.Fatal(err)
 	}
 }
+
+func TestReplicationRootsGatherEveryReceiver(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		SSHShell:  SSHShellConfig{ReplicationRoots: []string{"backup/ssh", "backup/shared"}},
+		Listeners: map[string]ListenerConfig{"a": {ReplicationRoots: []string{"backup/native"}}, "b": {ReplicationRoots: []string{"backup/shared"}}},
+	}
+	got := cfg.ReplicationRoots()
+	want := []string{"backup/native", "backup/shared", "backup/ssh"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("ReplicationRoots() = %q, want %q", got, want)
+	}
+}
