@@ -425,6 +425,27 @@ func (l *transitionLog) waitRun(t *testing.T, job string, from int) []string {
 	}
 }
 
+// waitReleased waits until pool has forgotten job. A run reports its last
+// transition before the pool releases its ID, and a submission in between
+// is refused as a duplicate, so a test that enqueues the same job again after
+// seeing it finish waits here first.
+func waitReleased(t *testing.T, pool *Pool, job string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		pool.mu.Lock()
+		known := pool.known[job]
+		pool.mu.Unlock()
+		if !known {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pool %s did not release job %s", pool.name, job)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (l *transitionLog) count(job string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -494,6 +515,7 @@ func TestRemoteJobReportsTransferPhases(t *testing.T) {
 
 	// The target now holds the newest snapshot. The job probes and succeeds
 	// without sending, and says so by never reporting sending.
+	waitReleased(t, runtime.remote, job)
 	from := log.count(job)
 	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
 		t.Fatal("second remote job was not accepted")
@@ -641,6 +663,7 @@ func TestRemoteOnThisHostIsRevalidatedBeforeReceiving(t *testing.T) {
 	if err != nil || !road.request.HostLocal {
 		t.Fatalf("road=%+v err=%v", road.request, err)
 	}
+	waitReleased(t, runtime.remote, job)
 	from := log.count(job)
 	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
 		t.Fatal("second remote job was not accepted")

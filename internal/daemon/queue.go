@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/pdf/boomerangz/internal/daemonstate"
 )
@@ -19,6 +20,11 @@ type Outcome struct {
 	State  string
 	Reason string
 	Silent bool
+	// RetryAt and Attempts reach a waiting-retry transition: when the job
+	// runs again, and how many attempts in a row have failed where the job
+	// counts them.
+	RetryAt  time.Time
+	Attempts int
 	// Identity names what the run acted on, and reaches the outcome's
 	// transition.
 	Identity daemonstate.Identity

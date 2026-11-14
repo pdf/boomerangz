@@ -150,7 +150,7 @@ need, `rename` included, when it first reaches it, and reports anything
 missing as a warning in `boomerangz status` and in its log, naming the
 destination, the account and the permissions. After starting the upgraded
 daemon, run `boomerangz status` once a transfer has reached each destination;
-it lists no `WARNINGS` when every destination grants what it needs. A remote
+it lists no permission problems when every destination grants what it needs. A remote
 is checked only once its endpoint opens. After granting a missing permission,
 run `boomerangz config reload` to have the daemon check again. See
 [Destination permissions](/operations/#destination-permissions).

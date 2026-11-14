@@ -1288,7 +1288,11 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 	job.Run = func(context.Context) Outcome {
 		defer ticket.Finish()
 		r.clearDirty(jobID)
-		return r.withPending(dataset, canonical, r.runLocal(ticket, dataset, target, canonical, mapped, effective, members, job))
+		outcome := r.withPending(dataset, canonical, r.runLocal(ticket, dataset, target, canonical, mapped, effective, members, job))
+		if outcome.State == "waiting-retry" {
+			outcome.RetryAt = r.now().Add(transientTransferRetryDelay)
+		}
+		return outcome
 	}
 	job.After = func(outcome Outcome) {
 		if r.isDirty(jobID) {
@@ -1296,7 +1300,7 @@ func (r *Runtime) enqueueLocal(dataset, target string, effective policy.Effectiv
 			return
 		}
 		if outcome.State == "waiting-retry" {
-			r.schedule("retry:"+jobID, r.now().Add(transientTransferRetryDelay), func() {
+			r.schedule("retry:"+jobID, outcome.RetryAt, func() {
 				r.enqueueLocal(dataset, target, effective, nil)
 			})
 		}
@@ -1466,7 +1470,7 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 				cancelled.Identity = carried
 				return r.withPending(dataset, road.request.CanonicalTarget, cancelled)
 			}
-			return r.withPending(dataset, road.request.CanonicalTarget, Outcome{State: outcome.Status, Reason: reconcileErr.Error(), Identity: carried})
+			return r.withPending(dataset, road.request.CanonicalTarget, Outcome{State: outcome.Status, Reason: reconcileErr.Error(), Identity: carried, RetryAt: outcome.NotBefore, Attempts: outcome.Failures})
 		}
 		if outcome.Status == "succeeded" {
 			r.enqueueDestinationPrune(dataset, effective, road.request.CanonicalTarget, "", members)
@@ -1478,7 +1482,7 @@ func (r *Runtime) enqueueRemote(dataset, remote string, effective policy.Effecti
 			// The state the last real attempt reported still stands.
 			return Outcome{State: outcome.Status, Reason: outcome.Reason, Silent: true, Identity: carried}
 		}
-		return r.withPending(dataset, road.request.CanonicalTarget, Outcome{State: outcome.Status, Reason: outcome.Reason, Identity: carried})
+		return r.withPending(dataset, road.request.CanonicalTarget, Outcome{State: outcome.Status, Reason: outcome.Reason, Identity: carried, RetryAt: outcome.NotBefore, Attempts: outcome.Failures})
 	}
 	job.After = func(Outcome) {
 		if r.isDirty(jobID) {
@@ -1549,17 +1553,25 @@ func (r *Runtime) recordProgress(pool string, job Job, send uint64, progress zfs
 	r.status.record(event)
 }
 
-// publishRuntimeLocked sends the runtime's dataset view to the status owner.
-// Callers hold r.mu, which orders the views.
+// publishRuntimeLocked sends the runtime's dataset view to the status owner:
+// every dataset of the discovery generation, classified as `dataset list`
+// classifies it, so status and that listing agree. Callers hold r.mu, which
+// orders the views.
 func (r *Runtime) publishRuntimeLocked() {
-	names := mapsKeys(r.known)
-	slices.Sort(names)
-	view := runtimeView{configGeneration: r.configGeneration, datasets: make([]DatasetStatus, 0, len(names))}
+	view := runtimeView{configGeneration: r.configGeneration}
 	if r.generation != nil {
-		view.generation, view.entries = r.generation.ID(), len(r.generation.Entries())
-	}
-	for _, name := range names {
-		view.datasets = append(view.datasets, DatasetStatus{Name: name, Active: r.active[name], Recursive: r.recursive[name]})
+		entries := r.generation.Entries()
+		view.generation, view.entries = r.generation.ID(), len(entries)
+		view.datasets = make([]DatasetStatus, 0, len(entries))
+		for _, entry := range entries {
+			name := entry.Dataset.Name
+			dataset := DatasetStatus{Name: name, Status: entry.Status(), Active: r.active[name], Recursive: entry.Policy.Send.Replicate, CoveredBy: entry.CoveredBy}
+			for _, blocked := range entry.Blocked {
+				dataset.Blocked = append(dataset.Blocked, daemonstate.BlockedTarget{Target: blocked.Target, Remote: blocked.Remote, Reason: blocked.Reason})
+			}
+			view.datasets = append(view.datasets, dataset)
+		}
+		slices.SortFunc(view.datasets, func(a, b DatasetStatus) int { return strings.Compare(a.Name, b.Name) })
 	}
 	r.status.publishRuntime(view)
 }

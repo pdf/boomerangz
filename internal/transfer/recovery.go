@@ -280,7 +280,9 @@ type RecoveryOutcome struct {
 	Pending   string    `json:"pending,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
 	NotBefore time.Time `json:"not_before,omitempty"`
-	Results   []Result  `json:"results,omitempty"`
+	// Failures counts the attempts in a row that failed (waiting-retry).
+	Failures int      `json:"failures,omitempty"`
+	Results  []Result `json:"results,omitempty"`
 }
 
 // Roadwarrior reconstructs resume work on demand and coalesces newly due work.
@@ -344,7 +346,7 @@ func (r *Roadwarrior) Reconcile(ctx context.Context, report Reporter) (RecoveryO
 		// An attempt made before the backoff deadline reports the failure that
 		// set it, so a caller that shows this outcome as the job's latest state
 		// never shows a retry with no cause.
-		outcome := RecoveryOutcome{Status: "waiting-retry", Reason: r.reason, NotBefore: r.notBefore}
+		outcome := RecoveryOutcome{Status: "waiting-retry", Reason: r.reason, NotBefore: r.notBefore, Failures: r.failures}
 		if pending, found := r.pending.PeekScope(r.request.Source, canonicalTarget(r.request)); found {
 			outcome.Pending = pending.Name
 		}
@@ -377,7 +379,7 @@ func (r *Roadwarrior) Reconcile(ctx context.Context, report Reporter) (RecoveryO
 				return outcome, delayErr
 			}
 			r.notBefore, r.reason = now.Add(delay), err.Error()
-			outcome.Status, outcome.NotBefore, outcome.Reason = "waiting-retry", r.notBefore, r.reason
+			outcome.Status, outcome.NotBefore, outcome.Reason, outcome.Failures = "waiting-retry", r.notBefore, r.reason, r.failures
 			return outcome, err
 		}
 		r.failures, r.notBefore, r.reason = 0, time.Time{}, ""

@@ -88,13 +88,34 @@ message JobStatus {
   // config_generation: the generation a configuration reload published
   // (succeeded).
   uint64 config_generation = 23;
+  // retry_unix_nano: when the daemon next tries a transfer again
+  // (waiting-retry).
+  int64 retry_unix_nano = 24;
+  // attempts: how many attempts in a row have failed (waiting-retry), where
+  // the transfer counts them; zero where it does not.
+  uint32 attempts = 25;
 }
 
 message DatasetStatus {
   string name = 1;
+  // active is set on a root the daemon schedules.
   bool active = 2;
   bool recursive = 3;
   int64 next_snapshot_unix_nano = 4;
+  // status is the dataset's management status, as `dataset list` reports
+  // it: active, member, excluded, target, inactive, or invalid.
+  string status = 5;
+  // covered_by is the actor root a member or excluded dataset lies under.
+  string covered_by = 6;
+  // blocked lists the targets an actor root may not send to.
+  repeated BlockedTarget blocked = 7;
+}
+
+message BlockedTarget {
+  // target is a local destination root or, with remote, a remote's name.
+  string target = 1;
+  bool remote = 2;
+  string reason = 3;
 }
 
 message StatusSnapshot {

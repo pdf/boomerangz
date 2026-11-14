@@ -142,6 +142,38 @@ func TestJobStatusCarriesEveryIdentityField(t *testing.T) {
 	}
 }
 
+func TestJobStatusCarriesRetryTimeAndAttempts(t *testing.T) {
+	t.Parallel()
+	retry := time.Unix(1700000000, 7).UTC()
+	got := toJobStatus(daemonstate.Event{Kind: daemonstate.EventTransition, Job: "remote:tank/a:offsite", State: "waiting-retry", RetryAt: retry, Attempts: 3})
+	if got.GetRetryUnixNano() != retry.UnixNano() || got.GetAttempts() != 3 {
+		t.Fatalf("job status = %v", got)
+	}
+	if got := toJobStatus(daemonstate.Event{Kind: daemonstate.EventTransition, Job: "remote:tank/a:offsite", State: "succeeded"}); got.GetRetryUnixNano() != 0 || got.GetAttempts() != 0 {
+		t.Fatalf("a transition with no retry carries retry fields: %v", got)
+	}
+}
+
+func TestDatasetStatusCarriesClassificationAndBlockedTargets(t *testing.T) {
+	t.Parallel()
+	snapshot := daemonstate.ControlSnapshot{Datasets: []daemonstate.DatasetStatus{
+		{Name: "tank/a", Status: "active", Active: true, Blocked: []daemonstate.BlockedTarget{{Target: "offsite", Remote: true, Reason: "overlap"}}},
+		{Name: "tank/a/b", Status: "member", CoveredBy: "tank/a"},
+	}}
+	for _, datasets := range [][]*controlrpc.DatasetStatus{toSnapshot(snapshot).GetDatasets(), func() []*controlrpc.DatasetStatus {
+		response, err := (&service{runtime: fixedRuntime{snapshot}}).ListDatasets(t.Context(), &controlrpc.ListDatasetsRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response.GetDatasets()
+	}()} {
+		if len(datasets) != 2 || datasets[0].GetStatus() != "active" || len(datasets[0].GetBlocked()) != 1 || datasets[0].GetBlocked()[0].GetTarget() != "offsite" || !datasets[0].GetBlocked()[0].GetRemote() || datasets[0].GetBlocked()[0].GetReason() != "overlap" ||
+			datasets[1].GetStatus() != "member" || datasets[1].GetCoveredBy() != "tank/a" {
+			t.Fatalf("datasets = %v", datasets)
+		}
+	}
+}
+
 func TestStatusSnapshotCarriesDestinationPermissions(t *testing.T) {
 	t.Parallel()
 	checked := time.Unix(1700000000, 5).UTC()
@@ -819,4 +851,17 @@ func TestManagedMTLSPairingNeedsNoTokenOrClientFiles(t *testing.T) {
 	if _, err := controlrpc.NewStatusServiceClient(connection).GetStatus(t.Context(), &controlrpc.GetStatusRequest{}); err == nil {
 		t.Fatal("revoked managed mTLS identity was accepted")
 	}
+}
+
+// fixedRuntime serves one snapshot; anything else it is asked panics.
+type fixedRuntime struct{ snapshot daemonstate.ControlSnapshot }
+
+func (r fixedRuntime) ControlStatus() daemonstate.ControlSnapshot { return r.snapshot }
+func (fixedRuntime) SubscribeStatus(context.Context) (daemonstate.Subscription, error) {
+	panic("not used")
+}
+func (fixedRuntime) Trigger([]string) ([]string, error) { panic("not used") }
+func (fixedRuntime) Reconcile()                         { panic("not used") }
+func (fixedRuntime) Clean(context.Context, []string, bool, bool, bool, []string, bool) ([]lifecycle.CleanPlan, error) {
+	panic("not used")
 }

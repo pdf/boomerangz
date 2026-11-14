@@ -50,11 +50,7 @@ type service struct {
 func toSnapshot(snapshot daemonstate.ControlSnapshot) *controlrpc.StatusSnapshot {
 	result := &controlrpc.StatusSnapshot{Revision: snapshot.Revision, ObservedUnixNano: snapshot.Observed.UnixNano(), Generation: snapshot.Generation, ConfigGeneration: snapshot.ConfigGeneration}
 	for _, dataset := range snapshot.Datasets {
-		item := &controlrpc.DatasetStatus{Name: dataset.Name, Active: dataset.Active, Recursive: dataset.Recursive}
-		if !dataset.NextSnapshot.IsZero() {
-			item.NextSnapshotUnixNano = dataset.NextSnapshot.UnixNano()
-		}
-		result.Datasets = append(result.Datasets, item)
+		result.Datasets = append(result.Datasets, toDatasetStatus(dataset))
 	}
 	for name, queue := range snapshot.Queues {
 		result.Queues = append(result.Queues, &controlrpc.QueueStatus{Name: name, Capacity: uint32(queue.Capacity), Pending: uint32(queue.Pending), JobIds: queue.IDs})
@@ -69,10 +65,26 @@ func toSnapshot(snapshot daemonstate.ControlSnapshot) *controlrpc.StatusSnapshot
 	return result
 }
 
+func toDatasetStatus(dataset daemonstate.DatasetStatus) *controlrpc.DatasetStatus {
+	item := &controlrpc.DatasetStatus{Name: dataset.Name, Status: dataset.Status, Active: dataset.Active, Recursive: dataset.Recursive, CoveredBy: dataset.CoveredBy}
+	if !dataset.NextSnapshot.IsZero() {
+		item.NextSnapshotUnixNano = dataset.NextSnapshot.UnixNano()
+	}
+	for _, blocked := range dataset.Blocked {
+		item.Blocked = append(item.Blocked, &controlrpc.BlockedTarget{Target: blocked.Target, Remote: blocked.Remote, Reason: blocked.Reason})
+	}
+	return item
+}
+
 func toJobStatus(event daemonstate.Event) *controlrpc.JobStatus {
-	return &controlrpc.JobStatus{Pool: event.Pool, Job: event.Job, Dataset: event.Scope, Target: event.Target, State: event.State, Reason: event.Reason, ChangedUnixNano: event.At.UnixNano(), Pending: uint32(event.Pending), QueuePosition: uint32(event.Position), Bytes: event.Bytes, TotalBytes: event.TotalBytes, BytesPerSecond: event.BytesPerSecond, EtaNanoseconds: int64(event.ETA), TotalKnown: event.TotalKnown,
+	item := &controlrpc.JobStatus{Pool: event.Pool, Job: event.Job, Dataset: event.Scope, Target: event.Target, State: event.State, Reason: event.Reason, ChangedUnixNano: event.At.UnixNano(), Pending: uint32(event.Pending), QueuePosition: uint32(event.Position), Bytes: event.Bytes, TotalBytes: event.TotalBytes, BytesPerSecond: event.BytesPerSecond, EtaNanoseconds: int64(event.ETA), TotalKnown: event.TotalKnown,
 		RunId: event.RunID, Snapshot: event.Snapshot, Base: event.Base, Mode: event.Mode, Destination: event.Destination, Marker: event.Marker,
 		Destroyed: event.Destroyed, DestroyedCount: uint32(event.DestroyedCount), ConfigGeneration: event.ConfigGeneration}
+	if !event.RetryAt.IsZero() {
+		item.RetryUnixNano = event.RetryAt.UnixNano()
+		item.Attempts = uint32(event.Attempts)
+	}
+	return item
 }
 
 // toWatchResponse pairs an update's state with the transitions that produced
@@ -141,11 +153,7 @@ func (s *service) ListDatasets(context.Context, *controlrpc.ListDatasetsRequest)
 	snapshot := s.runtime.ControlStatus()
 	result := &controlrpc.ListDatasetsResponse{Generation: snapshot.Generation}
 	for _, dataset := range snapshot.Datasets {
-		item := &controlrpc.DatasetStatus{Name: dataset.Name, Active: dataset.Active, Recursive: dataset.Recursive}
-		if !dataset.NextSnapshot.IsZero() {
-			item.NextSnapshotUnixNano = dataset.NextSnapshot.UnixNano()
-		}
-		result.Datasets = append(result.Datasets, item)
+		result.Datasets = append(result.Datasets, toDatasetStatus(dataset))
 	}
 	return result, nil
 }

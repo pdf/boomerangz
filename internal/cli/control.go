@@ -35,22 +35,29 @@ func controlClient(ctx context.Context, cfg config.Config, credential string) (*
 }
 
 func terminalWidth(writer io.Writer) (bool, int) {
+	interactive, width, _ := terminalSize(writer)
+	return interactive, width
+}
+
+// terminalSize reports whether writer is a terminal and, if so, its width
+// and height; 80 by 0 (no height limit) when the size cannot be read.
+func terminalSize(writer io.Writer) (interactive bool, width, height int) {
 	file, ok := writer.(*os.File)
 	if !ok || !term.IsTerminal(int(file.Fd())) {
-		return false, 0
+		return false, 0, 0
 	}
-	width, _, err := term.GetSize(int(file.Fd()))
+	width, height, err := term.GetSize(int(file.Fd()))
 	if err != nil {
-		width = 80
+		return true, 80, 0
 	}
-	return true, width
+	return true, width, height
 }
 
 // watchTailLength is how many recent transitions an interactive watch shows
 // under the status table.
 const watchTailLength = 10
 
-func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential string, watch, useJSON bool) error {
+func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential string, statuses []string, watch, useJSON bool) error {
 	client, err := controlClient(ctx, cfg, credential)
 	if err != nil {
 		return err
@@ -58,15 +65,18 @@ func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential
 	defer func() { _ = client.Connection.Close() }()
 	interactive, width := terminalWidth(out)
 	interactive = interactive && !useJSON
+	// NO_COLOR set to anything but the empty string turns color off
+	// (https://no-color.org).
+	color := os.Getenv("NO_COLOR") == ""
 	if !watch {
 		response, err := client.Status.GetStatus(ctx, &controlrpc.GetStatusRequest{})
 		if err != nil {
 			return err
 		}
 		if interactive {
-			return statusui.Terminal(out, response.GetStatus(), width)
+			return statusui.Terminal(out, response.GetStatus(), statusui.Options{Width: width, Statuses: statuses, Color: color})
 		}
-		return statusui.JSON(out, response.GetStatus())
+		return statusui.JSON(out, response.GetStatus(), statuses)
 	}
 	stream, err := client.Status.WatchStatus(ctx, &controlrpc.WatchStatusRequest{})
 	if err != nil {
@@ -86,18 +96,19 @@ func runStatus(ctx context.Context, out io.Writer, cfg config.Config, credential
 		}
 		if interactive {
 			tail.Add(response.GetTransitions())
-			_, width = terminalWidth(out)
+			_, width, height := terminalSize(out)
 			frame.Reset()
-			if err := statusui.Terminal(&frame, response.GetStatus(), width); err != nil {
+			opts := statusui.Options{Width: width, Statuses: statuses, Color: color}
+			if err := statusui.Terminal(&frame, response.GetStatus(), opts); err != nil {
 				return err
 			}
-			if err := tail.Terminal(&frame, width); err != nil {
+			if err := tail.Terminal(&frame, time.Now(), opts); err != nil {
 				return err
 			}
-			if err := statusui.Redraw(out, frame.Bytes()); err != nil {
+			if err := statusui.Redraw(out, statusui.Fit(frame.Bytes(), height)); err != nil {
 				return err
 			}
-		} else if err := statusui.WatchJSON(out, response); err != nil {
+		} else if err := statusui.WatchJSON(out, response, statuses); err != nil {
 			return err
 		}
 	}

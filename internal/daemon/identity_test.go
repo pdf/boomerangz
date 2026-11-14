@@ -181,6 +181,33 @@ func TestTransferRetryNamesThePendingSnapshotItCarried(t *testing.T) {
 	if retry.Snapshot != pending {
 		t.Fatalf("waiting-retry identity = %+v, want the carried pending snapshot %s", retry.Identity, pending)
 	}
+	// Status shows when the transfer runs again. A local transfer does not
+	// count its failures, so it reports none rather than a wrong count.
+	if retry.RetryAt.IsZero() || retry.Attempts != 0 {
+		t.Fatalf("waiting-retry retry_at=%v attempts=%d, want a retry time and no count", retry.RetryAt, retry.Attempts)
+	}
+}
+
+func TestRemoteRetryReportsWhenAndHowManyAttemptsFailed(t *testing.T) {
+	t.Parallel()
+	runtime, _, source, destination, effective := remoteReportRuntime(t)
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	runtime.now = func() time.Time { return now }
+	runtime.remotes[reportRemote] = &memoryRemote{executor: destination, stream: memoryStream{source: source, destination: destination, fail: temporaryStreamError{}}}
+	subscription := subscribe(t, runtime.status)
+	job := "remote:" + reportSource + ":" + reportRemote
+
+	if !runtime.enqueueRemote(reportSource, reportRemote, effective, nil) {
+		t.Fatal("remote job was not accepted")
+	}
+	retry := stateOf(t, runOf(t, subscription, job), "waiting-retry")
+	road, err := runtime.road(reportSource, reportRemote, effective, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := road.coordinator.NotBefore(); want.IsZero() || !retry.RetryAt.Equal(want) || retry.Attempts != 1 {
+		t.Fatalf("waiting-retry retry_at=%v attempts=%d, want the backoff deadline %v and 1", retry.RetryAt, retry.Attempts, want)
+	}
 }
 
 func TestOutcomeWithoutACarriedSnapshotNamesThePendingOne(t *testing.T) {

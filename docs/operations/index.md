@@ -136,6 +136,48 @@ fresh snapshot; changes made while no watch was connected are not replayed. A
 script that runs a watch unattended should treat that exit as a reason to
 reconnect, not as the daemon failing.
 
+### The terminal view
+
+The terminal view puts what needs attention first:
+
+1. A summary line: the time of the snapshot, how many active datasets there
+   are, and how many jobs are running, queued, or in trouble.
+2. `PROBLEMS`, shown only when there are any: destinations whose
+   [permission check](#destination-permissions) found something missing or
+   could not run, datasets with invalid policy, targets a root is blocked from
+   sending to, and jobs that `failed`, are `blocked`, or are in
+   `waiting-retry`, most severe first. A retry says how long ago it failed, how
+   many attempts in a row have failed where the transfer counts them, and when
+   it runs again. Problems are listed whatever the dataset filter.
+3. `IN PROGRESS`, shown only when there is work: running jobs with their state,
+   then queued ones in queue order. A sending transfer shows its share sent,
+   bytes, rate and time left, and a progress bar once it knows its total.
+4. The datasets, in one grid: each dataset's row gives its status, its next
+   snapshot, and the state of its latest snapshot job, and under it a row per
+   destination gives the state of its latest transfer, so every state lines
+   up in the `STATE` column. `SINCE` says how long ago that state began. A
+   finished job reads `ok`.
+5. One line summarising the queues, marking any that is nearly full.
+
+Datasets follow the same rules as `boomerangz dataset list`: each has the same
+status (`active`, `member`, `excluded`, `target`, `inactive`, or `invalid`),
+inactive datasets are hidden with a line saying how many and how to show them,
+and `--status STATUS` lists only datasets with that status. It takes `all` or
+any status, and can be repeated or given a comma-separated list. JSON output
+is filtered the same way.
+
+Times are relative to the snapshot: `in 13m`, `47m ago`. Long text wraps
+rather than being cut, and no line is wider than the terminal; on a terminal
+too narrow for a table's columns, each row's details move onto indented lines
+under it. A watch that would be taller than the terminal shows its top lines
+and says how many more there are. Headings and problems are coloured; set
+`NO_COLOR` to turn that off.
+
+In JSON, each entry in `datasets` carries `status`, `covered_by` on a member
+or excluded dataset (the root it lies under), `blocked` on a root (each
+target it may not send to, with `target`, `remote` and `reason`), and
+`active` on a root the daemon schedules.
+
 ### Destination permissions
 
 The daemon checks each destination's delegated ZFS permissions against
@@ -162,7 +204,7 @@ operation that needs a missing permission still stops at its own permission
 preflight with an error naming what is missing.
 
 In a terminal, `status` lists each destination with something missing, or
-whose check could not run, under `WARNINGS`. The JSON object carries
+whose check could not run, under `PROBLEMS`. The JSON object carries
 `destinations`, an array with one entry per destination checked so far, local
 destinations first:
 
@@ -203,6 +245,10 @@ A job's `state` in `status`, in `transitions`, and in the
 | `failed` | The job failed; `reason` carries the error |
 | `cancelled` | The job was stopped, or removed from its queue before it started; `reason` says why, for example `daemon shutting down`, `dataset deactivated`, or `remote configuration changed` for queued remote transfers a reload requeues against a changed remote |
 
+A `waiting-retry` transfer also carries `retry_unix_nano`, when the daemon next
+tries it, and `attempts`, how many attempts in a row have failed. A local
+transfer does not count its attempts, so it carries no `attempts`.
+
 A transfer that resumes an interrupted stream and then has newer state to send
 reports `sending` twice, once for each stream, so its byte count starting again
 from zero has a visible cause. A remote transfer whose destination is already
@@ -233,7 +279,8 @@ out.
 | `config_generation` | `config:reload` `succeeded` | The configuration generation the reload published |
 
 In a terminal, the recent transitions beneath a watch show these fields as
-`key=value` pairs before the reason, with `destroyed` shown as its count.
+`key=value` pairs before the reason, with `destroyed` shown as its count and a
+snapshot of the job's own dataset shown from its `@`.
 
 ## Request a snapshot
 

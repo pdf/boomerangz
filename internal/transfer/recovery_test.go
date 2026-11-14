@@ -184,3 +184,36 @@ func TestRoadwarriorRetriesOnlyTemporaryFailures(t *testing.T) {
 		t.Fatal("a blocked target must not report a retry deadline")
 	}
 }
+
+// TestRoadwarriorCountsFailedAttempts pins the count status shows beside a
+// retry: each attempt that fails in a row adds one, an attempt made before
+// the deadline reports the count without adding to it, and a success clears
+// it.
+func TestRoadwarriorCountsFailedAttempts(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	engine := &scriptedApply{results: []Result{{}, {}, {}, {}}, errors: []error{temporaryTestError{}, temporaryTestError{}, nil, temporaryTestError{}}}
+	recovery, err := NewRoadwarrior(engine, remoteRecoveryRequest(), nil, DefaultRetryPolicy(), func() time.Time { return now }, func() float64 { return 0.5 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, want := range []struct {
+		status   string
+		failures int
+		advance  bool
+	}{
+		{status: "waiting-retry", failures: 1},
+		{status: "waiting-retry", failures: 1}, // before the deadline: no attempt
+		{status: "waiting-retry", failures: 2, advance: true},
+		{status: "succeeded", failures: 0, advance: true},
+		{status: "waiting-retry", failures: 1},
+	} {
+		if want.advance {
+			now = recovery.NotBefore()
+		}
+		outcome, _ := recovery.Reconcile(t.Context(), nil)
+		if outcome.Status != want.status || outcome.Failures != want.failures {
+			t.Fatalf("attempt %d: status=%q failures=%d, want %q and %d", index+1, outcome.Status, outcome.Failures, want.status, want.failures)
+		}
+	}
+}

@@ -42,6 +42,11 @@ type Event struct {
 	BytesPerSecond float64       `json:"bytes_per_second,omitempty"`
 	ETA            time.Duration `json:"eta,omitempty"`
 	TotalKnown     bool          `json:"total_known,omitempty"`
+	// RetryAt is when the daemon next tries a transfer again, on a
+	// waiting-retry transition; Attempts is how many attempts in a row have
+	// failed, where the transfer counts them.
+	RetryAt  time.Time `json:"retry_at,omitzero"`
+	Attempts int       `json:"attempts,omitempty"`
 	Identity
 }
 
@@ -100,12 +105,27 @@ type QueueSnapshot struct {
 	IDs      []string `json:"ids,omitempty"`
 }
 
-// DatasetStatus is the detached daemon view used by the control API.
+// DatasetStatus is the detached daemon view used by the control API. Status
+// is the dataset's management status as discovery classifies it; Active is
+// set on a root the daemon schedules.
 type DatasetStatus struct {
 	Name         string
+	Status       string
 	Active       bool
 	Recursive    bool
 	NextSnapshot time.Time
+	// CoveredBy is the actor root a member or excluded dataset lies under.
+	CoveredBy string
+	// Blocked lists the targets an actor root may not send to.
+	Blocked []BlockedTarget
+}
+
+// BlockedTarget is a local destination root or, with Remote, a remote's name
+// that an actor root may not send to, and why.
+type BlockedTarget struct {
+	Target string
+	Remote bool
+	Reason string
 }
 
 // DestinationPermissions is the latest check of one destination's delegated
